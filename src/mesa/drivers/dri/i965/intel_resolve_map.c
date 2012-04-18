@@ -38,8 +38,7 @@ intel_resolve_map_set(struct exec_list *resolve_map,
 		      enum gen6_hiz_op need)
 {
    foreach_list_typed(struct intel_resolve_map, map, link, resolve_map) {
-      if (map->level == level && map->layer == layer) {
-         map->need = need;
+      if (map->level == level && map->layer == layer && map->need == need) {
 	 return;
       }
    }
