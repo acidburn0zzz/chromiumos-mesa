@@ -62,6 +62,8 @@
 
 #define DEBUG_STORE 0
 
+#define LLVM_CACHE_MAX_UNUSED 100
+
 
 static struct llvm_cache llvm_cache = { NULL };
 
@@ -596,6 +598,12 @@ static void
 llvm_cache_item_ref(struct llvm_cache_item *item)
 {
    ++item->ref_count;
+   if (item->ref_count == 1) {
+      --llvm_cache.num_unused;
+
+      /* Previously unused item has come into use.  Remove from unused list. */
+      remove_from_list(&item->list_item);
+   }
 }
 
 
@@ -605,7 +613,21 @@ llvm_cache_item_unref(struct llvm_cache_item *item)
    assert(item->ref_count > 0);
    --item->ref_count;
    if (item->ref_count == 0) {
-      llvm_cache_item_destroy(item);
+      ++llvm_cache.num_unused;
+
+      /* Item went out of use.  Insert at head of unused list. */
+      insert_at_head(&llvm_cache.unused, &item->list_item);
+
+      /* If now too many unused items in cache, get rid of oldest one. */
+      if (llvm_cache.num_unused > LLVM_CACHE_MAX_UNUSED) {
+	 struct llvm_cache_list_item *discard = last_elem(&llvm_cache.unused);
+	 assert(discard);
+	 assert(discard->base);
+	 remove_from_list(&discard->base->list_item);
+	 util_hash_table_remove(llvm_cache.ht, &discard->base->key);
+	 llvm_cache_item_destroy(discard->base);
+	 --llvm_cache.num_unused;
+      }
    }
 }
 
@@ -619,9 +641,13 @@ llvm_cache_item_get(struct draw_llvm_variant *variant, unsigned num_inputs)
    struct llvm_cache_item *item;
    struct llvm_cache_key key;
 
-   if (!llvm_cache.ht)
+   if (!llvm_cache.ht) {
       llvm_cache.ht = util_hash_table_create(&llvm_cache_key_hash,
 					     &llvm_cache_key_compare);
+      make_empty_list(&llvm_cache.unused);
+      llvm_cache.num_unused = 0;
+   }
+
    if (!llvm_cache.ht)
       return NULL;
 
@@ -688,6 +714,8 @@ llvm_cache_item_create(struct draw_llvm_variant *variant,
    gallivm_free_ir(variant->llvm_item->gallivm);
 
    memcpy(&item->key, key, sizeof(*key));
+
+   item->list_item.base = item;
 
    return item;
 }
