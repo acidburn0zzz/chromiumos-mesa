@@ -50,7 +50,10 @@
 
 #include "tgsi/tgsi_exec.h"
 #include "tgsi/tgsi_dump.h"
+#include "tgsi/tgsi_parse.h"
 
+#include "util/u_hash.h"
+#include "util/u_hash_table.h"
 #include "util/u_math.h"
 #include "util/u_pointer.h"
 #include "util/u_string.h"
@@ -59,6 +62,16 @@
 
 #define DEBUG_STORE 0
 
+
+static struct llvm_cache llvm_cache = { NULL };
+
+static struct llvm_cache_item *
+llvm_cache_item_create(struct draw_llvm_variant *variant,
+		       unsigned num_inputs,
+		       struct llvm_cache_key *key);
+
+static void
+llvm_cache_item_destroy(struct llvm_cache_item *item);
 
 static void
 draw_llvm_generate(struct draw_llvm *llvm, struct draw_llvm_variant *var,
@@ -534,8 +547,108 @@ draw_llvm_destroy(struct draw_llvm *llvm)
 }
 
 
+static unsigned
+llvm_cache_key_hash(void *v)
+{
+   return ((struct llvm_cache_key *)v)->hash;
+}
+
+
+static int
+llvm_cache_key_compare(void *v1, void *v2)
+{
+   struct llvm_cache_key *k1 = (struct llvm_cache_key *)v1;
+   struct llvm_cache_key *k2 = (struct llvm_cache_key *)v2;
+   if (k1->size < k2->size)
+      return -1;
+   if (k1->size > k2->size)
+      return 1;
+   return memcmp(k1->data, k2->data, k2->size);
+}
+
+
+static boolean
+llvm_cache_key_make(struct draw_llvm_variant *variant,
+                   struct llvm_cache_key *key)
+{
+   struct tgsi_token const *tokens = variant->shader->base.state.tokens;
+   unsigned tsz = tgsi_num_tokens(tokens) * sizeof(*tokens);
+   unsigned ksz = variant->shader->variant_key_size;
+   key->size = tsz + ksz;
+   key->data = MALLOC(key->size);
+   if (!key->data)
+      return false;
+   memcpy(key->data, tokens, tsz);
+   memcpy(((char *)key->data) + tsz, &variant->key, ksz);
+   key->hash = util_hash_crc32(key->data, key->size);
+   return true;
+}
+
+
+static void
+llvm_cache_key_free(struct llvm_cache_key *key)
+{
+   FREE(key->data);
+}
+
+
+static void
+llvm_cache_item_ref(struct llvm_cache_item *item)
+{
+   ++item->ref_count;
+}
+
+
+static void
+llvm_cache_item_unref(struct llvm_cache_item *item)
+{
+   assert(item->ref_count > 0);
+   --item->ref_count;
+   if (item->ref_count == 0) {
+      llvm_cache_item_destroy(item);
+   }
+}
+
+
+/**
+ * Get LLVM-generated code from cache or make it if needed.
+ */
 static struct llvm_cache_item *
-llvm_cache_item_create(struct draw_llvm_variant *variant, unsigned num_inputs)
+llvm_cache_item_get(struct draw_llvm_variant *variant, unsigned num_inputs)
+{
+   struct llvm_cache_item *item;
+   struct llvm_cache_key key;
+
+   if (!llvm_cache.ht)
+      llvm_cache.ht = util_hash_table_create(&llvm_cache_key_hash,
+					     &llvm_cache_key_compare);
+   if (!llvm_cache.ht)
+      return NULL;
+
+   if (!llvm_cache_key_make(variant, &key)) {
+      return NULL;
+   }
+
+   item = (struct llvm_cache_item *) util_hash_table_get(llvm_cache.ht, &key);
+   if (item) {
+      llvm_cache_key_free(&key);
+      llvm_cache_item_ref(item);
+   } else {
+      item = llvm_cache_item_create(variant, num_inputs, &key);
+      if (item) {
+         item->ref_count = 1;
+         util_hash_table_set(llvm_cache.ht, &item->key, item);
+      }
+   }
+
+   return item;
+}
+
+
+static struct llvm_cache_item *
+llvm_cache_item_create(struct draw_llvm_variant *variant,
+		       unsigned num_inputs,
+		       struct llvm_cache_key *key)
 {
    struct llvm_cache_item *item;
    LLVMTypeRef vertex_header;
@@ -543,8 +656,10 @@ llvm_cache_item_create(struct draw_llvm_variant *variant, unsigned num_inputs)
    struct draw_llvm *llvm = variant->llvm;
 
    item = MALLOC(sizeof *item);
-   if (item == NULL)
+   if (item == NULL) {
+      llvm_cache_key_free(key);
       return NULL;
+   }
 
    variant->llvm_item = item;
 
@@ -571,6 +686,8 @@ llvm_cache_item_create(struct draw_llvm_variant *variant, unsigned num_inputs)
 	 gallivm_jit_function(item->gallivm, variant->function_elts);
 
    gallivm_free_ir(variant->llvm_item->gallivm);
+
+   memcpy(&item->key, key, sizeof(*key));
 
    return item;
 }
@@ -604,7 +721,7 @@ draw_llvm_create_variant(struct draw_llvm *llvm,
       draw_llvm_dump_variant_key(&variant->key);
    }
 
-   variant->llvm_item = llvm_cache_item_create(variant, num_inputs);
+   variant->llvm_item = llvm_cache_item_get(variant, num_inputs);
    if (variant->llvm_item == NULL) {
       FREE(variant);
       return NULL;
@@ -2056,13 +2173,14 @@ llvm_cache_item_destroy(struct llvm_cache_item *item)
 {
    gallivm_destroy(item->gallivm);
    FREE(item->gallivm);
+   llvm_cache_key_free(&item->key);
    FREE(item);
 }
 
 void
 draw_llvm_destroy_variant(struct draw_llvm_variant *variant)
 {
-   llvm_cache_item_destroy(variant->llvm_item);
+   llvm_cache_item_unref(variant->llvm_item);
 
    remove_from_list(&variant->list_item_local);
    variant->shader->variants_cached--;
