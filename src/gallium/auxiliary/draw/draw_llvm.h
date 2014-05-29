@@ -382,9 +382,19 @@ struct draw_gs_llvm_variant_list_item
 };
 
 
+struct llvm_cache_list_item
+{
+   struct llvm_cache_item *base;
+   struct llvm_cache_list_item *next, *prev;
+};
+
 struct llvm_cache
 {
    struct util_hash_table *ht;
+
+   /* list of currently unused items in LRU order */
+   struct llvm_cache_list_item unused;
+   unsigned num_unused;
 };
 
 struct llvm_cache_key
@@ -403,6 +413,8 @@ struct llvm_cache_item
 
    struct llvm_cache_key key;
    unsigned ref_count;
+
+   struct llvm_cache_list_item list_item;
 };
 
 struct draw_llvm_variant
