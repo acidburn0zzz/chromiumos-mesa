@@ -382,12 +382,27 @@ struct draw_gs_llvm_variant_list_item
 };
 
 
+struct llvm_cache
+{
+   struct util_hash_table *ht;
+};
+
+struct llvm_cache_key
+{
+   void *data;
+   unsigned size;
+   unsigned hash;
+};
+
 struct llvm_cache_item
 {
    struct gallivm_state *gallivm;
 
    draw_jit_vert_func jit_func;
    draw_jit_vert_func_elts jit_func_elts;
+
+   struct llvm_cache_key key;
+   unsigned ref_count;
 };
 
 struct draw_llvm_variant
