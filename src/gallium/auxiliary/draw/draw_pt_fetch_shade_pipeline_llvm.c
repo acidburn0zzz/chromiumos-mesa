@@ -374,7 +374,7 @@ llvm_pipeline_generic(struct draw_pt_middle_end *middle,
    }
 
    if (fetch_info->linear)
-      clipped = fpme->current_variant->jit_func( &fpme->llvm->jit_context,
+      clipped = fpme->current_variant->llvm_item->jit_func( &fpme->llvm->jit_context,
                                        llvm_vert_info.verts,
                                        draw->pt.user.vbuffer,
                                        fetch_info->start,
@@ -385,7 +385,7 @@ llvm_pipeline_generic(struct draw_pt_middle_end *middle,
                                        draw->start_index,
                                        draw->start_instance);
    else
-      clipped = fpme->current_variant->jit_func_elts( &fpme->llvm->jit_context,
+      clipped = fpme->current_variant->llvm_item->jit_func_elts( &fpme->llvm->jit_context,
                                             llvm_vert_info.verts,
                                             draw->pt.user.vbuffer,
                                             fetch_info->elts,
