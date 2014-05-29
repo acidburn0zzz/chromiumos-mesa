@@ -382,9 +382,17 @@ struct draw_gs_llvm_variant_list_item
 };
 
 
-struct draw_llvm_variant
+struct llvm_cache_item
 {
    struct gallivm_state *gallivm;
+
+   draw_jit_vert_func jit_func;
+   draw_jit_vert_func_elts jit_func_elts;
+};
+
+struct draw_llvm_variant
+{
+   struct llvm_cache_item *llvm_item;
 
    /* LLVM JIT builder types */
    LLVMTypeRef context_ptr_type;
@@ -394,8 +402,6 @@ struct draw_llvm_variant
 
    LLVMValueRef function;
    LLVMValueRef function_elts;
-   draw_jit_vert_func jit_func;
-   draw_jit_vert_func_elts jit_func_elts;
 
    struct llvm_vertex_shader *shader;
 
