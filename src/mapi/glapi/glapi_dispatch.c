@@ -88,6 +88,13 @@
 #define _GLAPI_SKIP_PROTO_ENTRY_POINTS
 #endif
 
+#undef GL_COVERAGE_SAMPLES_NV
+#define __gl3_h_
+#define GL_EXT_multisampled_render_to_texture 1
+#define GL_EXT_texture_storage 1
+#include "GLES2/gl2platform.h"
+#include "GLES2/gl2ext.h"
+
 /* These prototypes are necessary because GLES1 library builds will create
  * dispatch functions for them.  We can't directly include GLES/gl.h because
  * it would conflict the previously-included GL/gl.h.  Since GLES1 ABI is not
