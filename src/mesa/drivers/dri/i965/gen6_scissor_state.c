@@ -32,6 +32,13 @@
 #include "main/fbobject.h"
 #include "main/framebuffer.h"
 
+/* Clamp scissors to 16-bit unsigned values; otherwise, the compiler truncates
+ * them to fit inside the bitfields, which is often not what is desired.
+ * My reading of GL and GLES specs suggests that overly-large scissor values are
+ * not an erroring condition and that the actual behavior is undefined, so
+ * switching from truncation to clamping is probably not a problem. ~ C. */
+#define CLAMP_SCISSOR(X) CLAMP(X, 0x0000, 0xffff)
+
 static void
 gen6_upload_scissor_state(struct brw_context *brw)
 {
@@ -80,17 +87,17 @@ gen6_upload_scissor_state(struct brw_context *brw)
          scissor[i].ymax = 0;
       } else if (render_to_fbo) {
          /* texmemory: Y=0=bottom */
-         scissor[i].xmin = bbox[0];
-         scissor[i].xmax = bbox[1] - 1;
-         scissor[i].ymin = bbox[2];
-         scissor[i].ymax = bbox[3] - 1;
+         scissor[i].xmin = CLAMP_SCISSOR(bbox[0]);
+         scissor[i].xmax = CLAMP_SCISSOR(bbox[1] - 1);
+         scissor[i].ymin = CLAMP_SCISSOR(bbox[2]);
+         scissor[i].ymax = CLAMP_SCISSOR(bbox[3] - 1);
       }
       else {
          /* memory: Y=0=top */
-         scissor[i].xmin = bbox[0];
-         scissor[i].xmax = bbox[1] - 1;
-         scissor[i].ymin = fb_height - bbox[3];
-         scissor[i].ymax = fb_height - bbox[2] - 1;
+         scissor[i].xmin = CLAMP_SCISSOR(bbox[0]);
+         scissor[i].xmax = CLAMP_SCISSOR(bbox[1] - 1);
+         scissor[i].ymin = CLAMP_SCISSOR(fb_height - bbox[3]);
+         scissor[i].ymax = CLAMP_SCISSOR(fb_height - bbox[2] - 1);
       }
    }
    BEGIN_BATCH(2);
