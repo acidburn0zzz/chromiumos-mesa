@@ -54,6 +54,7 @@ fd_create_surface(struct pipe_context *pctx,
 	pipe_resource_reference(&psurf->texture, ptex);
 
 	psurf->context = pctx;
+	psurf->surface_destroy = fd_surface_destroy;
 	psurf->format = surf_tmpl->format;
 	psurf->width = u_minify(ptex->width0, level);
 	psurf->height = u_minify(ptex->height0, level);
