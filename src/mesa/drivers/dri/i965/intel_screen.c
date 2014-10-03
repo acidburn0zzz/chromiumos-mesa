@@ -801,7 +801,6 @@ intel_create_image_from_dma_bufs(__DRIscreen *dri_screen,
       return NULL;
    }
 
-   image->dma_buf_imported = true;
    image->yuv_color_space = yuv_color_space;
    image->sample_range = sample_range;
    image->horizontal_siting = horizontal_siting;

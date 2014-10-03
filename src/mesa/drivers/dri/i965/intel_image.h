@@ -87,9 +87,6 @@ struct __DRIimageRec {
    GLuint tile_y;
    bool has_depthstencil;
 
-   /** The image was created with EGL_EXT_image_dma_buf_import. */
-   bool dma_buf_imported;
-
    /**
     * Provided by EGL_EXT_image_dma_buf_import.
     * \{
