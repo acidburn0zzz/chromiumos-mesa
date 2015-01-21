@@ -743,6 +743,10 @@ dri2_create_screen(_EGLDisplay *disp)
       }
       if (strcmp(extensions[i]->name, __DRI2_INTEROP) == 0)
          dri2_dpy->interop = (__DRI2interopExtension *) extensions[i];
+      if (strcmp(extensions[i]->name, __DRI_IMAGE) == 0) {
+         dri2_dpy->image = (__DRIimageExtension *) extensions[i];
+      }
+
    }
 
    dri2_setup_screen(disp);
