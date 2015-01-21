@@ -740,6 +740,10 @@ dri2_create_screen(_EGLDisplay *disp)
       if (strcmp(extensions[i]->name, __DRI2_RENDERER_QUERY) == 0) {
          dri2_dpy->rendererQuery = (__DRI2rendererQueryExtension *) extensions[i];
       }
+      if (strcmp(extensions[i]->name, __DRI_IMAGE) == 0) {
+         dri2_dpy->image = (__DRIimageExtension *) extensions[i];
+      }
+
    }
 
    dri2_setup_screen(disp);
