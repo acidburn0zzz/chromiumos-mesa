@@ -702,7 +702,7 @@ dri2_setup_screen(_EGLDisplay *disp)
       if (dri2_renderer_query_integer(dri2_dpy,
                                       __DRI2_RENDERER_HAS_TEXTURE_3D))
          disp->Extensions.KHR_gl_texture_3D_image = EGL_TRUE;
-#ifdef HAVE_LIBDRM
+#if defined(HAVE_LIBDRM) || defined(HAVE_SURFACELESS_PLATFORM)
       if (dri2_dpy->image->base.version >= 8 &&
           dri2_dpy->image->createImageFromDmaBufs) {
          disp->Extensions.EXT_image_dma_buf_import = EGL_TRUE;
