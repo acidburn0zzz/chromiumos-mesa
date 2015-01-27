@@ -597,6 +597,8 @@ static struct dri2_egl_display_vtbl dri2_drm_display_vtbl = {
    .get_dri_drawable = dri2_surface_get_dri_drawable,
 };
 
+#define DRM_RENDER_DEV_NAME "%s/renderD%d"
+
 EGLBoolean
 dri2_initialize_drm(_EGLDriver *drv, _EGLDisplay *disp)
 {
@@ -616,7 +618,7 @@ dri2_initialize_drm(_EGLDriver *drv, _EGLDisplay *disp)
    gbm = disp->PlatformDisplay;
    if (gbm == NULL) {
       char buf[64];
-      int n = snprintf(buf, sizeof(buf), DRM_DEV_NAME, DRM_DIR_NAME, 0);
+      int n = snprintf(buf, sizeof(buf), DRM_RENDER_DEV_NAME, DRM_DIR_NAME, 128);
       if (n != -1 && n < sizeof(buf))
          fd = loader_open_device(buf);
       if (fd < 0)
