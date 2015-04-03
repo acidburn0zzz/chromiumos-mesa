@@ -35,6 +35,7 @@
 
 #if defined(HAVE_LIBDRM)
 #include <xf86drm.h>
+#include <vgem_drm.h>
 #endif
 
 #include "pipe/p_compiler.h"
@@ -87,9 +88,9 @@ struct dri_sw_winsys
 #if defined(HAVE_LIBDRM)
 
 const char g_sys_card_path_format[] =
-   "/sys/bus/platform/devices/vgem/drm/card%d";
+   "/sys/bus/platform/devices/vgem/drm/renderD%d";
 const char g_dev_card_path_format[] =
-   "/dev/dri/card%d";
+   "/dev/dri/renderD%d";
 
 static int
 drm_open_vgem()
@@ -97,7 +98,7 @@ drm_open_vgem()
    char *name;
    int i, fd;
 
-   for (i = 0; i < 16; i++) {
+   for (i = 128; i >= 0; i++) {
       struct stat _stat;
       int ret;
       ret = asprintf(&name, g_sys_card_path_format, i);
@@ -132,7 +133,7 @@ mmap_dumb_bo(int fd, int handle, size_t size)
 
    mmap_arg.handle = handle;
 
-   ret = drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mmap_arg);
+   ret = drmIoctl(fd, DRM_IOCTL_VGEM_MODE_MAP_DUMB, &mmap_arg);
    if (ret)
       return NULL;
 
