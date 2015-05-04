@@ -504,8 +504,6 @@ st_context_flush(struct st_context_iface *stctxi, unsigned flags,
    }
 
    st_flush(st, fence, pipe_flags);
-   if (flags & ST_FLUSH_FRONT)
-      st_manager_flush_frontbuffer(st);
 }
 
 static boolean
