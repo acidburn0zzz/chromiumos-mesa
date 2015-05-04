@@ -52,7 +52,10 @@ update_wrapper(struct gl_context *ctx, struct gl_renderbuffer_attachment *att)
    /* Want to store linear values, not sRGB */
    rb->Format = _mesa_get_srgb_format_linear(format);
 
-   srb->Buffer = swImage->ImageSlices[zOffset];
+   if (swImage->ImageSlices)
+      srb->Buffer = swImage->ImageSlices[zOffset];
+   else
+      srb->Buffer = NULL;
 }
 
 
