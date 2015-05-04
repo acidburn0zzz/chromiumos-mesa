@@ -398,6 +398,9 @@ struct pipe_surface
          unsigned last_element;
       } buf;
    } u;
+
+   void (*surface_destroy)(struct pipe_context *ctx,
+                           struct pipe_surface *);
 };
 
 
@@ -427,6 +430,9 @@ struct pipe_sampler_view
    unsigned swizzle_g:3;         /**< PIPE_SWIZZLE_x for green component */
    unsigned swizzle_b:3;         /**< PIPE_SWIZZLE_x for blue component */
    unsigned swizzle_a:3;         /**< PIPE_SWIZZLE_x for alpha component */
+
+   void (*sampler_view_destroy)(struct pipe_context *ctx,
+                                struct pipe_sampler_view *view);
 };
 
 
