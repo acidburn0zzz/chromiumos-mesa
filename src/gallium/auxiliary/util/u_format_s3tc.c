@@ -123,6 +123,7 @@ util_format_s3tc_init(void)
    if (!library) {
       debug_printf("couldn't open " DXTN_LIBNAME ", software DXTn "
                    "compression/decompression unavailable\n");
+      util_format_s3tc_enabled = TRUE;
       return;
    }
 
