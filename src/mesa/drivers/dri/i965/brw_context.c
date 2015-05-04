@@ -1070,11 +1070,11 @@ brwCreateContext(gl_api api,
        */
       brw->hw_ctx = drm_intel_gem_context_create(brw->bufmgr);
 
-      if (!brw->hw_ctx) {
+/*      if (!brw->hw_ctx) {
          fprintf(stderr, "Gen6+ requires Kernel 3.6 or later.\n");
          intelDestroyContext(driContextPriv);
          return false;
-      }
+      }*/
    }
 
    if (brw_init_pipe_control(brw, devinfo)) {
