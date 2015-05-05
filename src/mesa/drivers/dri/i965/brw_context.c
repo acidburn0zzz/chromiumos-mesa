@@ -958,7 +958,7 @@ brwCreateContext(gl_api api,
 
    intel_batchbuffer_init(brw);
 
-   if (brw->gen >= 6) {
+   if (brw->gen >= 7) {
       /* Create a new hardware context.  Using a hardware context means that
        * our GPU state will be saved/restored on context switch, allowing us
        * to assume that the GPU is in the same state we left it in.
