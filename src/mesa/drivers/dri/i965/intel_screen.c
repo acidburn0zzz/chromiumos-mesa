@@ -1552,6 +1552,7 @@ intelAllocateBuffer(__DRIscreen *screen,
    intelBuffer = calloc(1, sizeof *intelBuffer);
    if (intelBuffer == NULL)
       return NULL;
+   intelBuffer->base.fd = -1;
 
    /* The front and back buffers are color buffers, which are X tiled. */
    uint32_t tiling = I915_TILING_X;
@@ -1570,7 +1571,7 @@ intelAllocateBuffer(__DRIscreen *screen,
 	   return NULL;
    }
 
-   drm_intel_bo_flink(intelBuffer->bo, &intelBuffer->base.name);
+   drm_intel_bo_gem_export_to_prime(intelBuffer->bo, &intelBuffer->base.fd);
 
    intelBuffer->base.attachment = attachment;
    intelBuffer->base.cpp = cpp;
@@ -1584,6 +1585,8 @@ intelReleaseBuffer(__DRIscreen *screen, __DRIbuffer *buffer)
 {
    struct intel_buffer *intelBuffer = (struct intel_buffer *) buffer;
 
+   if (buffer->fd >= 0)
+	   close(buffer->fd);
    drm_intel_bo_unreference(intelBuffer->bo);
    free(intelBuffer);
 }

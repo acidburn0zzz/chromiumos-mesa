@@ -1497,36 +1497,47 @@ intel_process_dri2_buffer(struct brw_context *brw,
    else
       last_mt = rb->singlesample_mt;
 
-   uint32_t old_name = 0;
-   if (last_mt) {
-       /* The bo already has a name because the miptree was created by a
-	* previous call to intel_process_dri2_buffer(). If a bo already has a
-	* name, then drm_intel_bo_flink() is a low-cost getter.  It does not
-	* create a new name.
-	*/
-      drm_intel_bo_flink(last_mt->bo, &old_name);
+   if (buffer->name) {
+      uint32_t old_name = 0;
+
+      if (last_mt) {
+         /* The bo already has a name because the miptree was created by a
+          * previous call to intel_process_dri2_buffer(). If a bo already has a
+          * name, then drm_intel_bo_flink() is a low-cost getter.  It does not
+          * create a new name.
+          */
+         drm_intel_bo_flink(last_mt->bo, &old_name);
+      }
+
+      if (old_name == buffer->name)
+         return;
+
+      intel_miptree_release(&rb->mt);
+      bo = drm_intel_bo_gem_create_from_name(brw->bufmgr, buffer_name,
+                                             buffer->name);
+   } else {
+      bo = drm_intel_bo_gem_create_from_prime(brw->bufmgr, buffer->fd, 0);
+      if (last_mt && bo == last_mt->bo) {
+         drm_intel_bo_unreference(bo);
+         return;
+      }
    }
 
-   if (old_name == buffer->name)
-      return;
-
-   if (unlikely(INTEL_DEBUG & DEBUG_DRI)) {
-      fprintf(stderr,
-              "attaching buffer %d, at %d, cpp %d, pitch %d\n",
-              buffer->name, buffer->attachment,
-              buffer->cpp, buffer->pitch);
-   }
-
-   bo = drm_intel_bo_gem_create_from_name(brw->bufmgr, buffer_name,
-                                          buffer->name);
    if (!bo) {
       fprintf(stderr,
               "Failed to open BO for returned DRI2 buffer "
-              "(%dx%d, %s, named %d).\n"
+              "(%dx%d, %s, named %d, fd %d).\n"
               "This is likely a bug in the X Server that will lead to a "
               "crash soon.\n",
-              drawable->w, drawable->h, buffer_name, buffer->name);
+              drawable->w, drawable->h, buffer_name, buffer->name, buffer->fd);
       return;
+   }
+
+   if (unlikely(INTEL_DEBUG & DEBUG_DRI)) {
+      fprintf(stderr,
+              "attaching buffer %d, fd %d, at %d, cpp %d, pitch %d\n",
+              buffer->name, buffer->fd, buffer->attachment,
+              buffer->cpp, buffer->pitch);
    }
 
    intel_update_winsys_renderbuffer_miptree(brw, rb, bo,
