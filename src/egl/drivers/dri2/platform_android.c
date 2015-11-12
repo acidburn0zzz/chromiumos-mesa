@@ -37,6 +37,7 @@
 #include "loader.h"
 #include "egl_dri2.h"
 #include "egl_dri2_fallbacks.h"
+#include "gralloc_drm_handle.h"
 #include "gralloc_drm.h"
 
 static int
@@ -65,9 +66,14 @@ get_format_bpp(int native)
 }
 
 static int
-get_native_buffer_name(struct ANativeWindowBuffer *buf)
+get_native_buffer_fd(struct ANativeWindowBuffer *buf)
 {
-   return gralloc_drm_get_gem_handle(buf->handle);
+	struct gralloc_drm_handle_t *handle = gralloc_drm_handle(buf->handle);
+
+	if (!handle)
+		return -1;
+
+	return handle->prime_fd;
 }
 
 static EGLBoolean
@@ -330,8 +336,10 @@ dri2_create_image_android_native_buffer(_EGLDisplay *disp, _EGLContext *ctx,
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_image *dri2_img;
-   int name;
+   int offset = 0;
+   int stride;
    EGLint format;
+   int fd;
 
    if (ctx != NULL) {
       /* From the EGL_ANDROID_image_native_buffer spec:
@@ -351,8 +359,8 @@ dri2_create_image_android_native_buffer(_EGLDisplay *disp, _EGLContext *ctx,
       return NULL;
    }
 
-   name = get_native_buffer_name(buf);
-   if (!name) {
+   fd = get_native_buffer_fd(buf);
+   if (fd < 0) {
       _eglError(EGL_BAD_PARAMETER, "eglCreateEGLImageKHR");
       return NULL;
    }
@@ -360,16 +368,16 @@ dri2_create_image_android_native_buffer(_EGLDisplay *disp, _EGLContext *ctx,
    /* see the table in droid_add_configs_for_visuals */
    switch (buf->format) {
    case HAL_PIXEL_FORMAT_BGRA_8888:
-      format = __DRI_IMAGE_FORMAT_ARGB8888;
+      format = __DRI_IMAGE_FOURCC_ARGB8888;
       break;
    case HAL_PIXEL_FORMAT_RGB_565:
-      format = __DRI_IMAGE_FORMAT_RGB565;
+      format = __DRI_IMAGE_FOURCC_RGB565;
       break;
    case HAL_PIXEL_FORMAT_RGBA_8888:
-      format = __DRI_IMAGE_FORMAT_ABGR8888;
+      format = __DRI_IMAGE_FOURCC_ABGR8888;
       break;
    case HAL_PIXEL_FORMAT_RGBX_8888:
-      format = __DRI_IMAGE_FORMAT_XBGR8888;
+      format = __DRI_IMAGE_FOURCC_XBGR8888;
       break;
    case HAL_PIXEL_FORMAT_RGB_888:
       /* unsupported */
@@ -390,14 +398,18 @@ dri2_create_image_android_native_buffer(_EGLDisplay *disp, _EGLContext *ctx,
       return NULL;
    }
 
+   stride = buf->stride * get_format_bpp(buf->format);
+
    dri2_img->dri_image =
-      dri2_dpy->image->createImageFromName(dri2_dpy->dri_screen,
-					   buf->width,
-					   buf->height,
-					   format,
-					   name,
-					   buf->stride,
-					   dri2_img);
+      dri2_dpy->image->createImageFromFds(dri2_dpy->dri_screen,
+					  buf->width,
+					  buf->height,
+					  format,
+					  &fd,
+					  1,
+					  &stride,
+					  &offset,
+					  dri2_img);
    if (!dri2_img->dri_image) {
       free(dri2_img);
       _eglError(EGL_BAD_ALLOC, "droid_create_image_mesa_drm");
@@ -443,12 +455,13 @@ droid_get_buffers_parse_attachments(struct dri2_egl_surface *dri2_surf,
       case __DRI_BUFFER_BACK_LEFT:
          if (dri2_surf->base.Type == EGL_WINDOW_BIT) {
             buf->attachment = attachments[i];
-            buf->name = get_native_buffer_name(dri2_surf->buffer);
+            buf->name = 0;
+            buf->fd = get_native_buffer_fd(dri2_surf->buffer);
             buf->cpp = get_format_bpp(dri2_surf->buffer->format);
             buf->pitch = dri2_surf->buffer->stride * buf->cpp;
             buf->flags = 0;
 
-            if (buf->name)
+            if (buf->name || buf->fd >= 0)
                num_buffers++;
 
             break;
