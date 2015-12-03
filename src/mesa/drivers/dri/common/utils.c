@@ -171,6 +171,10 @@ driCreateConfigs(mesa_format format,
       { 0x3FF00000, 0x000FFC00, 0x000003FF, 0x00000000 },
       /* MESA_FORMAT_B10G10R10A2_UNORM */
       { 0x3FF00000, 0x000FFC00, 0x000003FF, 0xC0000000 },
+      /* MESA_FORMAT_R8G8B8X8_UNORM */
+      { 0x000000FF, 0x0000FF00, 0x00FF0000, 0x00000000 },
+      /* MESA_FORMAT_R8G8B8A8_UNORM */
+      { 0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000 },
    };
 
    const uint32_t * masks;
@@ -202,6 +206,14 @@ driCreateConfigs(mesa_format format,
       break;
    case MESA_FORMAT_B10G10R10A2_UNORM:
       masks = masks_table[4];
+      break;
+   case MESA_FORMAT_R8G8B8X8_UNORM:
+   case MESA_FORMAT_R8G8B8X8_SRGB:
+      masks = masks_table[5];
+      break;
+   case MESA_FORMAT_R8G8B8A8_UNORM:
+   case MESA_FORMAT_R8G8B8A8_SRGB:
+      masks = masks_table[6];
       break;
    default:
       fprintf(stderr, "[%s:%u] Unknown framebuffer type %s (%d).\n",
