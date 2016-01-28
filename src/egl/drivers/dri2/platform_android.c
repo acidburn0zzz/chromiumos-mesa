@@ -29,6 +29,7 @@
 
 #include <errno.h>
 #include <dlfcn.h>
+#include <xf86drm.h>
 
 #if ANDROID_VERSION >= 0x402
 #include <sync/sync.h>
@@ -601,28 +602,6 @@ droid_add_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *dpy)
    return (count != 0);
 }
 
-static int
-droid_open_device(void)
-{
-   const hw_module_t *mod;
-   int fd = -1, err;
-
-   err = hw_get_module(GRALLOC_HARDWARE_MODULE_ID, &mod);
-   if (!err) {
-      const gralloc_module_t *gr = (gralloc_module_t *) mod;
-
-      err = -EINVAL;
-      if (gr->perform)
-         err = gr->perform(gr, GRALLOC_MODULE_PERFORM_GET_DRM_FD, &fd);
-   }
-   if (err || fd < 0) {
-      _eglLog(_EGL_WARNING, "fail to get drm fd");
-      fd = -1;
-   }
-
-   return (fd >= 0) ? dup(fd) : -1;
-}
-
 /* support versions < JellyBean */
 #ifndef ALOGW
 #define ALOGW LOGW
@@ -674,11 +653,15 @@ static struct dri2_egl_display_vtbl droid_display_vtbl = {
    .get_dri_drawable = dri2_surface_get_dri_drawable,
 };
 
+#define DRM_RENDER_DEV_NAME  "%s/renderD%d"
+
 EGLBoolean
 dri2_initialize_android(_EGLDriver *drv, _EGLDisplay *dpy)
 {
    struct dri2_egl_display *dri2_dpy;
+   int driver_loaded = 0;
    const char *err;
+   int i;
 
    _eglSetLogProc(droid_log);
 
@@ -690,21 +673,39 @@ dri2_initialize_android(_EGLDriver *drv, _EGLDisplay *dpy)
 
    dpy->DriverData = (void *) dri2_dpy;
 
-   dri2_dpy->fd = droid_open_device();
-   if (dri2_dpy->fd < 0) {
-      err = "DRI2: failed to open device";
-      goto cleanup_display;
+   const int limit = 64;
+   const int base = 128;
+   for (i = 0; i < limit; ++i) {
+      char *card_path;
+      if (asprintf(&card_path, DRM_RENDER_DEV_NAME, DRM_DIR_NAME, base + i) < 0)
+         continue;
+
+      dri2_dpy->fd = loader_open_device(card_path);
+
+      free(card_path);
+      if (dri2_dpy->fd < 0)
+         continue;
+
+      dri2_dpy->driver_name = loader_get_driver_for_fd(dri2_dpy->fd, 0);
+      if (dri2_dpy->driver_name) {
+         if (dri2_load_driver(dpy)) {
+            driver_loaded = 1;
+            break;
+         }
+         free(dri2_dpy->driver_name);
+      }
+      close(dri2_dpy->fd);
+      dri2_dpy->fd = -1;
    }
 
-   dri2_dpy->driver_name = loader_get_driver_for_fd(dri2_dpy->fd, 0);
-   if (dri2_dpy->driver_name == NULL) {
-      err = "DRI2: failed to get driver name";
-      goto cleanup_device;
-   }
-
-   if (!dri2_load_driver(dpy)) {
-      err = "DRI2: failed to load driver";
-      goto cleanup_driver_name;
+   if (!driver_loaded) {
+      dri2_dpy->driver_name = strdup("swrast");
+      if (!dri2_load_driver_swrast(dpy))
+      {
+         err = "DRI2: failed to load driver";
+         free(dri2_dpy->driver_name);
+         goto cleanup_display;
+      }
    }
 
    dri2_dpy->dri2_loader_extension.base.name = __DRI_DRI2_LOADER;
