@@ -40,6 +40,9 @@ void fd_set_sampler_views(struct pipe_context *pctx,
 						  unsigned start, unsigned nr,
 						  struct pipe_sampler_view **views);
 
+void fd_sampler_view_destroy(struct pipe_context *pctx,
+		struct pipe_sampler_view *view);
+
 void fd_texture_init(struct pipe_context *pctx);
 
 struct fd_texture_stateobj;

@@ -41,7 +41,7 @@ fd_sampler_state_delete(struct pipe_context *pctx, void *hwcso)
 	FREE(hwcso);
 }
 
-static void
+void
 fd_sampler_view_destroy(struct pipe_context *pctx,
 		struct pipe_sampler_view *view)
 {
