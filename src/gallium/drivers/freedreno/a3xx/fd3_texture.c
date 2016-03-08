@@ -227,6 +227,7 @@ fd3_sampler_view_create(struct pipe_context *pctx, struct pipe_resource *prsc,
 	so->base.texture = prsc;
 	so->base.reference.count = 1;
 	so->base.context = pctx;
+	so->base.sampler_view_destroy = fd_sampler_view_destroy;
 
 	so->texconst0 =
 			A3XX_TEX_CONST_0_TYPE(tex_type(prsc->target)) |
