@@ -349,7 +349,7 @@ dri2_allocate_buffer(__DRIscreen *sPriv,
 
    memset(&whandle, 0, sizeof(whandle));
    if (screen->can_share_buffer)
-      whandle.type = DRM_API_HANDLE_TYPE_SHARED;
+      whandle.type = DRM_API_HANDLE_TYPE_FD;
    else
       whandle.type = DRM_API_HANDLE_TYPE_KMS;
 
@@ -358,7 +358,13 @@ dri2_allocate_buffer(__DRIscreen *sPriv,
          PIPE_HANDLE_USAGE_EXPLICIT_FLUSH | PIPE_HANDLE_USAGE_READ);
 
    buffer->base.attachment = attachment;
-   buffer->base.name = whandle.handle;
+   if (screen->can_share_buffer) {
+      buffer->base.name = 0;
+      buffer->base.fd = (int)whandle.handle;
+   } else {
+      buffer->base.name = whandle.handle;
+      buffer->base.fd = -1;
+   }
    buffer->base.cpp = util_format_get_blocksize(pf);
    buffer->base.pitch = whandle.stride;
 
@@ -532,13 +538,18 @@ dri2_allocate_textures(struct dri_context *ctx,
          templ.height0 = dri_drawable->h;
          templ.format = format;
          templ.bind = bind;
-         whandle.handle = buf->name;
          whandle.stride = buf->pitch;
          whandle.offset = 0;
-         if (screen->can_share_buffer)
-            whandle.type = DRM_API_HANDLE_TYPE_SHARED;
-         else
-            whandle.type = DRM_API_HANDLE_TYPE_KMS;
+         if (buf->name != 0) {
+            whandle.handle = buf->name;
+            if (screen->can_share_buffer)
+               whandle.type = DRM_API_HANDLE_TYPE_SHARED;
+            else
+               whandle.type = DRM_API_HANDLE_TYPE_KMS;
+         } else {
+            whandle.handle = (unsigned)buf->fd;
+            whandle.type = DRM_API_HANDLE_TYPE_FD;
+         }
          drawable->textures[statt] =
             screen->base.screen->resource_from_handle(screen->base.screen,
                   &templ, &whandle,
