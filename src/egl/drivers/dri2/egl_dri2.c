@@ -455,7 +455,7 @@ dri2_open_driver(_EGLDisplay *disp)
 		  "%.*s/%s_dri.so", len, p, dri2_dpy->driver_name);
 	 dri2_dpy->driver = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
 	 if (dri2_dpy->driver == NULL)
-	    _eglLog(_EGL_DEBUG, "failed to open %s: %s\n", path, dlerror());
+	    _eglLog(_EGL_WARNING, "failed to open %s: %s\n", path, dlerror());
       }
       /* not need continue to loop all paths once the driver is found */
       if (dri2_dpy->driver != NULL)
@@ -478,7 +478,7 @@ dri2_open_driver(_EGLDisplay *disp)
       return NULL;
    }
 
-   _eglLog(_EGL_DEBUG, "DRI2: dlopen(%s)", path);
+   _eglLog(_EGL_WARNING, "DRI2: dlopen(%s)", path);
 
    if (asprintf(&get_extensions_name, "%s_%s",
                 __DRI_DRIVER_GET_EXTENSIONS, dri2_dpy->driver_name) != -1) {
