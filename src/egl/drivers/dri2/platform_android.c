@@ -58,6 +58,9 @@ get_format_bpp(int native)
    case HAL_PIXEL_FORMAT_RGB_565:
       bpp = 2;
       break;
+   case HAL_PIXEL_FORMAT_YV12:
+      bpp = 1;
+      break;
    default:
       bpp = 0;
       break;
@@ -82,6 +85,9 @@ static unsigned int get_fourcc_format(int hal_format)
       break;
    case HAL_PIXEL_FORMAT_RGBX_8888:
       format = __DRI_IMAGE_FOURCC_XBGR8888;
+      break;
+   case HAL_PIXEL_FORMAT_YV12:
+      format = __DRI_IMAGE_FOURCC_YUV420;
       break;
    default:
       break;
@@ -362,13 +368,14 @@ dri2_create_image_android_native_buffer(_EGLDriver *drv, _EGLDisplay *disp,
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_image *dri2_img;
-   unsigned int offset = 0;
-   unsigned int stride;
-   unsigned int fourcc_format;
+   unsigned int total_planes = 1;
+   unsigned int fourcc_format = 0;
+   unsigned int offsets[3] = { 0, 0, 0 };
+   unsigned int strides[3] = { 0, 0, 0 };
    /* This is ok for now as we will have only one fd
     * for all currently supported formats.
     */
-   int fd;
+   int fd, p, index;
 
    if (ctx != NULL) {
       /* From the EGL_ANDROID_image_native_buffer spec:
@@ -411,15 +418,65 @@ dri2_create_image_android_native_buffer(_EGLDriver *drv, _EGLDisplay *disp,
       return NULL;
    }
 
-   const EGLint attr_list[] = {
-      EGL_WIDTH, buf->width,
-      EGL_HEIGHT, buf->height,
-      EGL_LINUX_DRM_FOURCC_EXT, fourcc_format,
-      EGL_DMA_BUF_PLANE0_FD_EXT, fd,
-      EGL_DMA_BUF_PLANE0_PITCH_EXT, buf->stride * get_format_bpp(buf->format),
-      EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
-      EGL_NONE,
+   strides[0] = buf->stride * get_format_bpp(buf->format);
+
+   switch (buf->format) {
+   case HAL_PIXEL_FORMAT_YV12:
+      /* Y plane is at offset 0 and fds[0] is already set. */
+      /* Cr plane is located after Y plane */
+      offsets[2] = offsets[0] + strides[0] * buf->height;
+      strides[2] = ALIGN(strides[0] / 2, 16);
+      /* Cb plane is located after Cr plane */
+      offsets[1] = offsets[2] + strides[2] * buf->height / 2;
+      strides[1] = strides[2];
+      total_planes = 3;
+      break;
+   default:
+      break;
+   }
+
+   /* TODO: Do we need to pass in the following or defaults suffice:
+    * EGL_YUV_COLOR_SPACE_HINT_EXT,
+    * EGL_YUV_CHROMA_HORIZONTAL_SITING_HINT_EXT,
+    * EGL_YUV_CHROMA_VERTICAL_SITING_HINT_EXT
+    */
+   EGLint plane_fd_attr[] = {
+      EGL_DMA_BUF_PLANE0_FD_EXT,
+      EGL_DMA_BUF_PLANE1_FD_EXT,
+      EGL_DMA_BUF_PLANE2_FD_EXT,
    };
+
+   EGLint plane_pitch_attr[] = {
+      EGL_DMA_BUF_PLANE0_PITCH_EXT,
+      EGL_DMA_BUF_PLANE1_PITCH_EXT,
+      EGL_DMA_BUF_PLANE2_PITCH_EXT,
+   };
+
+   EGLint plane_offset_attr[] = {
+      EGL_DMA_BUF_PLANE0_OFFSET_EXT,
+      EGL_DMA_BUF_PLANE1_OFFSET_EXT,
+      EGL_DMA_BUF_PLANE2_OFFSET_EXT,
+   };
+
+   EGLint attr_list[25];
+   attr_list[0] = EGL_WIDTH;
+   attr_list[1] = buf->width;
+   attr_list[2] = EGL_HEIGHT;
+   attr_list[3] = buf->height;
+   attr_list[4] = EGL_LINUX_DRM_FOURCC_EXT;
+   attr_list[5] = fourcc_format;
+   index = 5;
+
+   for (p = 0; p < total_planes; ++p) {
+      attr_list[++index] = plane_fd_attr[p];
+      attr_list[++index] = fd;
+      attr_list[++index] = plane_pitch_attr[p];
+      attr_list[++index] = strides[p];
+      attr_list[++index] = plane_offset_attr[p];
+      attr_list[++index] = offsets[p];
+   }
+
+   attr_list[++index] = EGL_NONE;
 
    return dri2_create_image_khr(drv, disp, ctx, EGL_LINUX_DMA_BUF_EXT,
       NULL, attr_list);
