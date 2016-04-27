@@ -66,6 +66,30 @@ get_format_bpp(int native)
    return bpp;
 }
 
+static unsigned int get_fourcc_format(int hal_format)
+{
+   int format = 0;
+
+   switch (hal_format) {
+   case HAL_PIXEL_FORMAT_BGRA_8888:
+      format = __DRI_IMAGE_FOURCC_ARGB8888;
+      break;
+   case HAL_PIXEL_FORMAT_RGB_565:
+      format = __DRI_IMAGE_FOURCC_RGB565;
+      break;
+   case HAL_PIXEL_FORMAT_RGBA_8888:
+      format = __DRI_IMAGE_FOURCC_ABGR8888;
+      break;
+   case HAL_PIXEL_FORMAT_RGBX_8888:
+      format = __DRI_IMAGE_FOURCC_XBGR8888;
+      break;
+   default:
+      break;
+   }
+
+   return format;
+}
+
 static int
 get_native_buffer_fd(struct ANativeWindowBuffer *buf)
 {
@@ -332,14 +356,18 @@ droid_swap_buffers(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *draw)
 }
 
 static _EGLImage *
-dri2_create_image_android_native_buffer(_EGLDisplay *disp, _EGLContext *ctx,
+dri2_create_image_android_native_buffer(_EGLDriver *drv, _EGLDisplay *disp,
+					_EGLContext *ctx,
                                         struct ANativeWindowBuffer *buf)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_image *dri2_img;
-   int offset = 0;
-   int stride;
-   EGLint format;
+   unsigned int offset = 0;
+   unsigned int stride;
+   unsigned int fourcc_format;
+   /* This is ok for now as we will have only one fd
+    * for all currently supported formats.
+    */
    int fd;
 
    if (ctx != NULL) {
@@ -366,26 +394,10 @@ dri2_create_image_android_native_buffer(_EGLDisplay *disp, _EGLContext *ctx,
       return NULL;
    }
 
-   /* see the table in droid_add_configs_for_visuals */
-   switch (buf->format) {
-   case HAL_PIXEL_FORMAT_BGRA_8888:
-      format = __DRI_IMAGE_FOURCC_ARGB8888;
-      break;
-   case HAL_PIXEL_FORMAT_RGB_565:
-      format = __DRI_IMAGE_FOURCC_RGB565;
-      break;
-   case HAL_PIXEL_FORMAT_RGBA_8888:
-      format = __DRI_IMAGE_FOURCC_ABGR8888;
-      break;
-   case HAL_PIXEL_FORMAT_RGBX_8888:
-      format = __DRI_IMAGE_FOURCC_XBGR8888;
-      break;
-   case HAL_PIXEL_FORMAT_RGB_888:
-      /* unsupported */
-   default:
+   fourcc_format = get_fourcc_format(buf->format);
+   if (!fourcc_format) {
       _eglLog(_EGL_WARNING, "unsupported native buffer format 0x%x", buf->format);
       return NULL;
-      break;
    }
 
    dri2_img = calloc(1, sizeof(*dri2_img));
@@ -399,25 +411,18 @@ dri2_create_image_android_native_buffer(_EGLDisplay *disp, _EGLContext *ctx,
       return NULL;
    }
 
-   stride = buf->stride * get_format_bpp(buf->format);
+   const EGLint attr_list[] = {
+      EGL_WIDTH, buf->width,
+      EGL_HEIGHT, buf->height,
+      EGL_LINUX_DRM_FOURCC_EXT, fourcc_format,
+      EGL_DMA_BUF_PLANE0_FD_EXT, fd,
+      EGL_DMA_BUF_PLANE0_PITCH_EXT, buf->stride * get_format_bpp(buf->format),
+      EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+      EGL_NONE,
+   };
 
-   dri2_img->dri_image =
-      dri2_dpy->image->createImageFromFds(dri2_dpy->dri_screen,
-					  buf->width,
-					  buf->height,
-					  format,
-					  &fd,
-					  1,
-					  &stride,
-					  &offset,
-					  dri2_img);
-   if (!dri2_img->dri_image) {
-      free(dri2_img);
-      _eglError(EGL_BAD_ALLOC, "droid_create_image_mesa_drm");
-      return NULL;
-   }
-
-   return &dri2_img->base;
+   return dri2_create_image_khr(drv, disp, ctx, EGL_LINUX_DMA_BUF_EXT,
+      NULL, attr_list);
 }
 
 static _EGLImage *
@@ -427,7 +432,7 @@ droid_create_image_khr(_EGLDriver *drv, _EGLDisplay *disp,
 {
    switch (target) {
    case EGL_NATIVE_BUFFER_ANDROID:
-      return dri2_create_image_android_native_buffer(disp, ctx,
+      return dri2_create_image_android_native_buffer(drv, disp, ctx,
             (struct ANativeWindowBuffer *) buffer);
    default:
       return dri2_create_image_khr(drv, disp, ctx, target, buffer, attr_list);
