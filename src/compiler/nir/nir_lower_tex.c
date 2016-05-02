@@ -218,9 +218,9 @@ convert_yuv_to_rgb(nir_builder *b, nir_tex_instr *tex,
                nir_channel(b, nir_fadd(b, v, nir_imm_float(b, -0.5f)), 0),
                nir_imm_float(b, 0.0));
 
-   nir_ssa_def *red = nir_fdot4(b, yuv, nir_build_imm(b, 4, 32, m[0]));
-   nir_ssa_def *green = nir_fdot4(b, yuv, nir_build_imm(b, 4, 32, m[1]));
-   nir_ssa_def *blue = nir_fdot4(b, yuv, nir_build_imm(b, 4, 32, m[2]));
+   nir_ssa_def *red = nir_fdot4(b, yuv, nir_build_imm(b, 4, m[0]));
+   nir_ssa_def *green = nir_fdot4(b, yuv, nir_build_imm(b, 4, m[1]));
+   nir_ssa_def *blue = nir_fdot4(b, yuv, nir_build_imm(b, 4, m[2]));
 
    nir_ssa_def *result = nir_vec4(b, red, green, blue, nir_imm_float(b, 1.0f));
 
@@ -412,6 +412,21 @@ nir_lower_tex_block(nir_block *block, void *void_state)
       if ((tex->sampler_dim == GLSL_SAMPLER_DIM_RECT) &&
           state->options->lower_rect) {
          lower_rect(b, tex);
+         state->progress = true;
+      }
+
+      if ((1 << tex->texture_index) & state->options->lower_y_uv_external) {
+         lower_y_uv_external(b, tex);
+         state->progress = true;
+      }
+
+      if ((1 << tex->texture_index) & state->options->lower_y_u_v_external) {
+         lower_y_u_v_external(b, tex);
+         state->progress = true;
+      }
+
+      if ((1 << tex->texture_index) & state->options->lower_yx_xuxv_external) {
+         lower_yx_xuxv_external(b, tex);
          state->progress = true;
       }
 
