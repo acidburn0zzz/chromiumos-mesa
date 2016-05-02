@@ -294,6 +294,7 @@ struct dri2_egl_surface
 
 #if defined(HAVE_SURFACELESS_PLATFORM)
       __DRIimage           *front;
+      __DRIimage           *back;
       unsigned int         format;
 #endif
 
