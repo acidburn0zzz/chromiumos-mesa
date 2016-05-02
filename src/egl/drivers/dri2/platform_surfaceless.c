@@ -23,6 +23,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -60,6 +61,20 @@ surfaceless_free_images(struct dri2_egl_surface *dri2_surf)
       dri2_dpy->image->destroyImage(dri2_surf->front);
       dri2_surf->front = NULL;
    }
+   if(dri2_surf->back) {
+      dri2_dpy->image->destroyImage(dri2_surf->back);
+      dri2_surf->back = NULL;
+   }
+}
+
+static EGLBoolean
+surfaceless_swap_buffers(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *draw)
+{
+   struct dri2_egl_surface *dri2_surf = dri2_egl_surface(draw);
+    __DRIimage *temp = dri2_surf->back;
+
+   dri2_surf->back = dri2_surf->front;
+   dri2_surf->front = temp;
 }
 
 static int
@@ -101,6 +116,14 @@ surfaceless_image_get_buffers(__DRIdrawable *driDrawable,
       buffers->image_mask |= __DRI_IMAGE_BUFFER_FRONT;
       buffers->front = dri2_surf->front;
    }
+   if (buffer_mask & __DRI_IMAGE_BUFFER_BACK) {
+      if (!dri2_surf->back)
+         dri2_surf->back =
+            surfaceless_alloc_image(dri2_dpy, dri2_surf);
+
+      buffers->image_mask |= __DRI_IMAGE_BUFFER_BACK;
+      buffers->back = dri2_surf->back;
+   }
 
    return 1;
 }
@@ -113,6 +136,7 @@ dri2_surfaceless_create_surface(_EGLDriver *drv, _EGLDisplay *disp, EGLint type,
    struct dri2_egl_config *dri2_conf = dri2_egl_config(conf);
    struct dri2_egl_surface *dri2_surf;
    const __DRIconfig *config;
+   bool srgb;
 
    /* Make sure to calloc so all pointers
     * are originally NULL.
@@ -127,8 +151,14 @@ dri2_surfaceless_create_surface(_EGLDriver *drv, _EGLDisplay *disp, EGLint type,
    if (!_eglInitSurface(&dri2_surf->base, disp, type, conf, attrib_list))
       goto cleanup_surface;
 
-   config = dri2_get_dri_config(dri2_conf, type,
-                                dri2_surf->base.GLColorspace);
+   /* Only double buffered configurations exist at this point (single buffered
+    * configs were filtered out in surfaceless_add_configs_for_visuals).
+    */
+   srgb = (dri2_surf->base.GLColorspace == EGL_GL_COLORSPACE_SRGB_KHR);
+   config = dri2_conf->dri_double_config[srgb];
+
+   if (!config)
+      goto cleanup_surface;
 
    if (!config)
       goto cleanup_surface;
@@ -200,6 +230,7 @@ surfaceless_add_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *dpy)
       for (j = 0; dri2_dpy->driver_configs[j]; j++) {
          const EGLint surface_type = EGL_PBUFFER_BIT;
          struct dri2_egl_config *dri2_conf;
+         unsigned int double_buffered = 0;
 
          /* Determine driver supported masks */
          dri2_dpy->core->getConfigAttrib(dri2_dpy->driver_configs[j],
@@ -214,6 +245,14 @@ surfaceless_add_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *dpy)
          /* Compare with advertised visuals */
          if (r ^ visuals[i][0] || g ^ visuals[i][1]
             || b ^ visuals[i][2] || a ^ visuals[i][3])
+            continue;
+
+         dri2_dpy->core->getConfigAttrib(dri2_dpy->driver_configs[j],
+                                       __DRI_ATTRIB_DOUBLE_BUFFER,
+                                       &double_buffered);
+
+         /* support only double buffered configs */
+         if (!double_buffered)
             continue;
 
          dri2_conf = dri2_add_config(dpy, dri2_dpy->driver_configs[j],
@@ -235,6 +274,7 @@ static struct dri2_egl_display_vtbl dri2_surfaceless_display_vtbl = {
    .create_pbuffer_surface = dri2_surfaceless_create_pbuffer_surface,
    .destroy_surface = surfaceless_destroy_surface,
    .create_image = dri2_create_image_khr,
+   .swap_buffers = surfaceless_swap_buffers,
    .swap_interval = dri2_fallback_swap_interval,
    .swap_buffers_with_damage = dri2_fallback_swap_buffers_with_damage,
    .swap_buffers_region = dri2_fallback_swap_buffers_region,
