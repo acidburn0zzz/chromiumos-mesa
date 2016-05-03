@@ -24,7 +24,12 @@ include Makefile.sources
 include $(top_srcdir)/src/gallium/Automake.inc
 
 AM_CFLAGS = \
+	-I$(top_srcdir)/src/gallium/include/state_tracker \
 	$(GALLIUM_WINSYS_CFLAGS)
+
+if HAVE_LIBDRM
+AM_CFLAGS += $(LIBDRM_CFLAGS)
+endif
 
 noinst_LTLIBRARIES = libswdri.la
 
