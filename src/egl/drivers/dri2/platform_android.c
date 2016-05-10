@@ -353,8 +353,15 @@ droid_swap_buffers(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *draw)
 
    dri2_flush_drawable_for_swapbuffers(disp, draw);
 
-   if (dri2_surf->buffer)
+   if (dri2_surf->buffer) {
+      /* To avoid blocking other EGL calls, release the display mutex before
+       * we enter droid_window_enqueue_buffer() and re-acquire the mutex upon
+       * return.
+       */
+      mtx_unlock(&disp->Mutex);
       droid_window_enqueue_buffer(dri2_surf);
+      mtx_lock(&disp->Mutex);
+   }
 
    (*dri2_dpy->flush->invalidate)(dri2_surf->dri_drawable);
 
