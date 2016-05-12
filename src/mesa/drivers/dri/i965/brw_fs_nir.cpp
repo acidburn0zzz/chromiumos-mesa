@@ -3110,6 +3110,19 @@ fs_visitor::nir_emit_texture(const fs_builder &bld, nir_tex_instr *instr)
          break;
       }
 
+      case nir_tex_src_plane: {
+         nir_const_value *const_plane =
+            nir_src_as_const_value(instr->src[i].src);
+         const uint32_t plane = const_plane->u32[0];
+         const uint32_t texture_index =
+            instr->texture_index +
+            stage_prog_data->binding_table.plane_start[plane] -
+            stage_prog_data->binding_table.texture_start;
+
+         texture_reg = fs_reg(brw_imm_ud(texture_index));
+         break;
+      }
+
       default:
          unreachable("unknown texture source");
       }
