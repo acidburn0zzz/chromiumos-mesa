@@ -785,18 +785,19 @@ droid_add_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *dpy)
    const struct {
       int format;
       unsigned int rgba_masks[4];
+      EGLBoolean fb_target;
    } visuals[] = {
-      { HAL_PIXEL_FORMAT_RGBA_8888, { 0xff, 0xff00, 0xff0000, 0xff000000 } },
-      { HAL_PIXEL_FORMAT_RGBX_8888, { 0xff, 0xff00, 0xff0000, 0x0 } },
-      { HAL_PIXEL_FORMAT_RGB_888,   { 0xff, 0xff00, 0xff0000, 0x0 } },
-      { HAL_PIXEL_FORMAT_RGB_565,   { 0xf800, 0x7e0, 0x1f, 0x0 } },
-      { HAL_PIXEL_FORMAT_BGRA_8888, { 0xff0000, 0xff00, 0xff, 0xff000000 } },
-      { 0, { 0, 0, 0, 0 } }
+      { HAL_PIXEL_FORMAT_RGBA_8888, { 0xff, 0xff00, 0xff0000, 0xff000000 }, EGL_TRUE },
+      { HAL_PIXEL_FORMAT_RGBX_8888, { 0xff, 0xff00, 0xff0000, 0x0 }, EGL_FALSE },
+      { HAL_PIXEL_FORMAT_RGB_888,   { 0xff, 0xff00, 0xff0000, 0x0 }, EGL_FALSE },
+      { HAL_PIXEL_FORMAT_RGB_565,   { 0xf800, 0x7e0, 0x1f, 0x0 }, EGL_FALSE },
+      { HAL_PIXEL_FORMAT_BGRA_8888, { 0xff0000, 0xff00, 0xff, 0xff000000 }, EGL_FALSE },
+      { 0, { 0, 0, 0, 0 }, 0 }
    };
    EGLint config_attrs[] = {
      EGL_NATIVE_VISUAL_ID,   0,
      EGL_NATIVE_VISUAL_TYPE, 0,
-     EGL_FRAMEBUFFER_TARGET_ANDROID, EGL_TRUE,
+     EGL_FRAMEBUFFER_TARGET_ANDROID, 0,
      EGL_RECORDABLE_ANDROID, EGL_TRUE,
      EGL_MAX_PBUFFER_WIDTH, 4096,
      EGL_MAX_PBUFFER_HEIGHT, 4096,
@@ -810,6 +811,7 @@ droid_add_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *dpy)
 
       config_attrs[1] = visuals[i].format;
       config_attrs[3] = visuals[i].format;
+      config_attrs[5] = visuals[i].fb_target;
 
       for (j = 0; dri2_dpy->driver_configs[j]; j++) {
          const EGLint surface_type = EGL_WINDOW_BIT | EGL_PBUFFER_BIT;
