@@ -798,6 +798,8 @@ droid_add_configs_for_visuals(_EGLDriver *drv, _EGLDisplay *dpy)
      EGL_NATIVE_VISUAL_TYPE, 0,
      EGL_FRAMEBUFFER_TARGET_ANDROID, EGL_TRUE,
      EGL_RECORDABLE_ANDROID, EGL_TRUE,
+     EGL_MAX_PBUFFER_WIDTH, 4096,
+     EGL_MAX_PBUFFER_HEIGHT, 4096,
      EGL_NONE
    };
    int count, i, j;
