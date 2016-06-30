@@ -47,6 +47,11 @@ get_format_bpp(int native)
    int bpp;
 
    switch (native) {
+   case HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED:
+      /*
+       * HACK: Hardcode this to RGBX_8888 as per drm_gralloc hack.
+       * TODO: Revert this once b/29886289 is fixed.
+       */
    case HAL_PIXEL_FORMAT_RGBA_8888:
    case HAL_PIXEL_FORMAT_RGBX_8888:
    case HAL_PIXEL_FORMAT_BGRA_8888:
@@ -83,6 +88,11 @@ static unsigned int get_fourcc_format(int hal_format)
    case HAL_PIXEL_FORMAT_RGBA_8888:
       format = __DRI_IMAGE_FOURCC_ABGR8888;
       break;
+   case HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED:
+      /*
+       * HACK: Hardcode this to RGBX_8888 as per drm_gralloc hack.
+       * TODO: Revert this once b/29886289 is fixed.
+       */
    case HAL_PIXEL_FORMAT_RGBX_8888:
       format = __DRI_IMAGE_FOURCC_XBGR8888;
       break;
