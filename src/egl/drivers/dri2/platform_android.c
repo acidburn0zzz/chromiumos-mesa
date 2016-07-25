@@ -64,6 +64,11 @@ get_format_bpp(int native)
    case HAL_PIXEL_FORMAT_RGB_565:
       bpp = 2;
       break;
+   case HAL_PIXEL_FORMAT_YCbCr_420_888:
+      /*
+       * HACK: Hardcode this to YV12 as gralloc does for platforms using Mesa.
+       * TODO: Revert this once b/29886289 is fixed.
+       */
    case HAL_PIXEL_FORMAT_YV12:
       bpp = 1;
       break;
@@ -88,6 +93,11 @@ static int get_fourcc(int native)
        * TODO: Revert this once b/29886289 is fixed.
        */
    case HAL_PIXEL_FORMAT_RGBX_8888: return __DRI_IMAGE_FOURCC_XBGR8888;
+   case HAL_PIXEL_FORMAT_YCbCr_420_888:
+      /*
+       * HACK: Hardcode this to YV12 as gralloc does for platforms using Mesa.
+       * TODO: Revert this once b/29886289 is fixed.
+       */
    case HAL_PIXEL_FORMAT_YV12:      return __DRI_IMAGE_FOURCC_YVU420;
    default:
       _eglLog(_EGL_WARNING, "unsupported native buffer format 0x%x", native);
@@ -549,6 +559,11 @@ droid_create_image_from_prime_fd(_EGLDisplay *disp, _EGLContext *ctx,
    }
 
    switch (buf->format) {
+   case HAL_PIXEL_FORMAT_YCbCr_420_888:
+      /*
+       * HACK: Hardcode this to YV12 as gralloc does for platforms using Mesa.
+       * TODO: Revert this once b/29886289 is fixed.
+       */
    case HAL_PIXEL_FORMAT_YV12:
       /* Y plane is assumed to be at offset 0. */
       /* Cr plane is located after Y plane */
