@@ -63,6 +63,11 @@ get_format_bpp(int native)
    case HAL_PIXEL_FORMAT_RGB_565:
       bpp = 2;
       break;
+   case HAL_PIXEL_FORMAT_YCbCr_420_888:
+      /*
+       * HACK: Hardcode this to YV12 as gralloc does for platforms using Mesa.
+       * TODO: Revert this once b/29886289 is fixed.
+       */
    case HAL_PIXEL_FORMAT_YV12:
       bpp = 1;
       break;
@@ -96,6 +101,11 @@ static unsigned int get_fourcc_format(int hal_format)
    case HAL_PIXEL_FORMAT_RGBX_8888:
       format = __DRI_IMAGE_FOURCC_XBGR8888;
       break;
+   case HAL_PIXEL_FORMAT_YCbCr_420_888:
+      /*
+       * HACK: Hardcode this to YV12 as gralloc does for platforms using Mesa.
+       * TODO: Revert this once b/29886289 is fixed.
+       */
    case HAL_PIXEL_FORMAT_YV12:
       format = __DRI_IMAGE_FOURCC_YUV420;
       break;
@@ -464,6 +474,11 @@ dri2_create_image_android_native_buffer(_EGLDriver *drv, _EGLDisplay *disp,
    strides[0] = buf->stride * get_format_bpp(buf->format);
 
    switch (buf->format) {
+   case HAL_PIXEL_FORMAT_YCbCr_420_888:
+      /*
+       * HACK: Hardcode this to YV12 as gralloc does for platforms using Mesa.
+       * TODO: Revert this once b/29886289 is fixed.
+       */
    case HAL_PIXEL_FORMAT_YV12:
       /* Y plane is at offset 0 and fds[0] is already set. */
       /* Cr plane is located after Y plane */
