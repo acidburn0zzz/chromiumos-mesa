@@ -295,6 +295,7 @@ struct dri2_egl_surface
    struct ANativeWindow *window;
    struct ANativeWindowBuffer *buffer;
    __DRIimage *dri_image;
+   __DRIimage *dri_front_image;
 
    /* EGL-owned buffers */
    __DRIbuffer           *local_buffers[__DRI_BUFFER_COUNT];
