@@ -2384,6 +2384,9 @@ intel_miptree_map_movntdqa(struct brw_context *brw,
    void *src = intel_miptree_map_raw(brw, mt);
    if (!src)
       return;
+
+   src += mt->offset;
+
    src += image_y * mt->pitch;
    src += image_x * mt->cpp;
 
