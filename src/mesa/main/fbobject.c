@@ -2979,6 +2979,32 @@ check_textarget(struct gl_context *ctx, int dims, GLenum target,
 {
    bool err = false;
 
+   /* Check that textarget is a valid textarget enum. */
+   switch (textarget) {
+      case GL_TEXTURE_1D:
+      case GL_TEXTURE_1D_ARRAY:
+      case GL_TEXTURE_2D:
+      case GL_TEXTURE_2D_ARRAY:
+      case GL_TEXTURE_2D_MULTISAMPLE:
+      case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+      case GL_TEXTURE_CUBE_MAP:
+      case GL_TEXTURE_CUBE_MAP_ARRAY:
+      case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+      case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+      case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+      case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+      case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+      case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:
+      case GL_TEXTURE_RECTANGLE:
+      case GL_TEXTURE_3D:
+         break;
+      default:
+         _mesa_error(ctx, GL_INVALID_ENUM, "%s(invalid textarget %s)",
+                     caller, _mesa_enum_to_string(textarget));
+         return false;
+   }
+
+   /* Check that target and textarget match. */
    switch (dims) {
    case 1:
       switch (textarget) {
@@ -3027,13 +3053,6 @@ check_textarget(struct gl_context *ctx, int dims, GLenum target,
       break;
    default:
       err = true;
-   }
-
-   if (err) {
-      _mesa_error(ctx, GL_INVALID_OPERATION,
-                  "%s(invalid textarget %s)",
-                  caller, _mesa_enum_to_string(textarget));
-      return false;
    }
 
    /* Make sure textarget is consistent with the texture's type */
