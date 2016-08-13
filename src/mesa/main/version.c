@@ -594,11 +594,6 @@ _mesa_compute_version(struct gl_context *ctx)
       }
    }
 
-   /* Downgrade GLES2 version to 3.0 since advertising 3.1 triggers a number
-    * of test failures. (crbug.com/30202361) */
-   if (ctx->API == API_OPENGLES2 && ctx->Version > 30)
-      ctx->Version = 30;
-
    switch (ctx->API) {
    case API_OPENGL_COMPAT:
    case API_OPENGL_CORE:
