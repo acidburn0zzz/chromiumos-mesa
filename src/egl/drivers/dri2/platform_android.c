@@ -911,7 +911,7 @@ droid_open_device(void)
 #define DRM_RENDER_DEV_NAME  "%s/renderD%d"
 
 static int
-droid_probe_device(_EGLDisplay *dpy)
+droid_probe_device(_EGLDisplay *dpy, int swrast)
 {
    struct dri2_egl_display *dri2_dpy = dpy->DriverData;
    const int limit = 64;
@@ -929,7 +929,10 @@ droid_probe_device(_EGLDisplay *dpy)
       if (fd < 0)
          continue;
 
-      dri2_dpy->driver_name = loader_get_driver_for_fd(fd, 0);
+      if (swrast)
+         dri2_dpy->driver_name = strdup("kms_swrast");
+      else
+         dri2_dpy->driver_name = loader_get_driver_for_fd(fd, 0);
       if (!dri2_dpy->driver_name) {
          close(fd);
          continue;
@@ -1035,9 +1038,12 @@ dri2_initialize_android(_EGLDriver *drv, _EGLDisplay *dpy)
          err = "DRI2: failed to load driver";
          goto cleanup_driver_name;
       }
-   } else if (droid_probe_device(dpy) < 0) {
-      err = "DRI2: failed to open device";
-      goto cleanup_display;
+   } else if (droid_probe_device(dpy, 0) < 0) {
+      /* Retry with kms_swrast driver. */
+      if (droid_probe_device(dpy, 1) < 0) {
+         err = "DRI2: failed to load driver";
+         goto cleanup_display;
+      }
    }
 
    dri2_dpy->is_render_node = drmGetNodeTypeFromFd(dri2_dpy->fd) == DRM_NODE_RENDER;
