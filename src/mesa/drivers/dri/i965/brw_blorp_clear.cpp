@@ -189,6 +189,8 @@ do_single_blorp_clear(struct brw_context *brw, struct gl_framebuffer *fb,
 
    const bool is_fast_clear =
       params.fast_clear_op == GEN7_PS_RENDER_TARGET_FAST_CLEAR_ENABLE;
+   const bool is_lossless_compressed = intel_miptree_is_lossless_compressed(
+					     brw, irb->mt);
    if (is_fast_clear) {
       /* Record the clear color in the miptree so that it will be
        * programmed in SURFACE_STATE by later rendering and resolve
@@ -208,7 +210,8 @@ do_single_blorp_clear(struct brw_context *brw, struct gl_framebuffer *fb,
        * it now.
        */
       if (!irb->mt->mcs_mt) {
-         if (!intel_miptree_alloc_non_msrt_mcs(brw, irb->mt)) {
+	 assert(!is_lossless_compressed);
+         if (!intel_miptree_alloc_non_msrt_mcs(brw, irb->mt, false)) {
             /* MCS allocation failed--probably this will only happen in
              * out-of-memory conditions.  But in any case, try to recover
              * by falling back to a non-blorp clear technique.
@@ -237,7 +240,7 @@ do_single_blorp_clear(struct brw_context *brw, struct gl_framebuffer *fb,
        * redundant clears.
        */
       irb->mt->fast_clear_state = INTEL_FAST_CLEAR_STATE_CLEAR;
-   } else if (intel_miptree_is_lossless_compressed(brw, irb->mt)) {
+   } else if (is_lossless_compressed) {
       /* Compressed buffers can be cleared also using normal rep-clear. In
        * such case they bahave such as if they were drawn using normal 3D
        * render pipeline, and we simply mark the mcs as dirty.
