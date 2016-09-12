@@ -1365,11 +1365,10 @@ eglDestroyImage(EGLDisplay dpy, EGLImage image)
 
 
 static EGLSync
-_eglCreateSync(EGLDisplay dpy, EGLenum type, const EGLint *attrib_list,
+_eglCreateSync(_EGLDisplay *disp, EGLenum type, const EGLint *attrib_list,
                const EGLAttrib *attrib_list64, EGLBoolean is64,
                EGLenum invalid_type_error)
 {
-   _EGLDisplay *disp = _eglLockDisplay(dpy);
    _EGLContext *ctx = _eglGetCurrentContext();
    _EGLDriver *drv;
    _EGLSync *sync;
@@ -1381,7 +1380,7 @@ _eglCreateSync(EGLDisplay dpy, EGLenum type, const EGLint *attrib_list,
       RETURN_EGL_EVAL(disp, EGL_NO_SYNC_KHR);
 
    /* return an error if the client API doesn't support GL_OES_EGL_sync */
-   if (!ctx || ctx->Resource.Display != dpy ||
+   if (!ctx || ctx->Resource.Display != disp ||
        ctx->ClientAPI != EGL_OPENGL_ES_API)
       RETURN_EGL_ERROR(disp, EGL_BAD_MATCH, EGL_NO_SYNC_KHR);
 
@@ -1412,7 +1411,8 @@ _eglCreateSync(EGLDisplay dpy, EGLenum type, const EGLint *attrib_list,
 static EGLSync EGLAPIENTRY
 eglCreateSyncKHR(EGLDisplay dpy, EGLenum type, const EGLint *attrib_list)
 {
-   return _eglCreateSync(dpy, type, attrib_list, NULL, EGL_FALSE,
+   _EGLDisplay *disp = _eglLockDisplay(dpy);
+   return _eglCreateSync(disp, type, attrib_list, NULL, EGL_FALSE,
                          EGL_BAD_ATTRIBUTE);
 }
 
@@ -1420,7 +1420,8 @@ eglCreateSyncKHR(EGLDisplay dpy, EGLenum type, const EGLint *attrib_list)
 static EGLSync EGLAPIENTRY
 eglCreateSync64KHR(EGLDisplay dpy, EGLenum type, const EGLAttrib *attrib_list)
 {
-   return _eglCreateSync(dpy, type, NULL, attrib_list, EGL_TRUE,
+   _EGLDisplay *disp = _eglLockDisplay(dpy);
+   return _eglCreateSync(disp, type, NULL, attrib_list, EGL_TRUE,
                          EGL_BAD_ATTRIBUTE);
 }
 
@@ -1428,7 +1429,8 @@ eglCreateSync64KHR(EGLDisplay dpy, EGLenum type, const EGLAttrib *attrib_list)
 EGLSync EGLAPIENTRY
 eglCreateSync(EGLDisplay dpy, EGLenum type, const EGLAttrib *attrib_list)
 {
-   return _eglCreateSync(dpy, type, NULL, attrib_list, EGL_TRUE,
+   _EGLDisplay *disp = _eglLockDisplay(dpy);
+   return _eglCreateSync(disp, type, NULL, attrib_list, EGL_TRUE,
                          EGL_BAD_PARAMETER);
 }
 
