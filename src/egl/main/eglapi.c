@@ -1406,8 +1406,8 @@ eglDestroyImage(EGLDisplay dpy, EGLImage image)
 
 
 static EGLSync
-_eglCreateSync(_EGLDisplay *disp, EGLenum type, const EGLint *attrib_list,
-               const EGLAttrib *attrib_list64, EGLBoolean is64,
+_eglCreateSync(_EGLDisplay *disp, EGLenum type, const EGLAttrib *attrib_list,
+               EGLBoolean orig_is_EGLAttrib,
                EGLenum invalid_type_error)
 {
    _EGLContext *ctx = _eglGetCurrentContext();
@@ -1417,7 +1417,7 @@ _eglCreateSync(_EGLDisplay *disp, EGLenum type, const EGLint *attrib_list,
 
    _EGL_CHECK_DISPLAY(disp, EGL_NO_SYNC_KHR, drv);
 
-   if (!disp->Extensions.KHR_cl_event2 && is64) {
+   if (!disp->Extensions.KHR_cl_event2 && orig_is_EGLAttrib) {
       /* There exist two EGLAttrib variants of eglCreateSync*:
        * eglCreateSync64KHR which requires EGL_KHR_cl_event2, and eglCreateSync
        * which requires EGL 1.5. Here we use the presence of EGL_KHR_cl_event2
@@ -1452,7 +1452,7 @@ _eglCreateSync(_EGLDisplay *disp, EGLenum type, const EGLint *attrib_list,
       RETURN_EGL_ERROR(disp, invalid_type_error, EGL_NO_SYNC_KHR);
    }
 
-   sync = drv->API.CreateSyncKHR(drv, disp, type, attrib_list, attrib_list64);
+   sync = drv->API.CreateSyncKHR(drv, disp, type, attrib_list);
    ret = (sync) ? _eglLinkSync(sync) : EGL_NO_SYNC_KHR;
 
    RETURN_EGL_EVAL(disp, ret);
@@ -1460,11 +1460,30 @@ _eglCreateSync(_EGLDisplay *disp, EGLenum type, const EGLint *attrib_list,
 
 
 static EGLSync EGLAPIENTRY
-eglCreateSyncKHR(EGLDisplay dpy, EGLenum type, const EGLint *attrib_list)
+eglCreateSyncKHR(EGLDisplay dpy, EGLenum type, const EGLint *int_list)
 {
    _EGLDisplay *disp = _eglLockDisplay(dpy);
-   return _eglCreateSync(disp, type, attrib_list, NULL, EGL_FALSE,
+
+   EGLSync sync;
+   EGLAttrib *attrib_list;
+   EGLint err;
+
+   if (sizeof(int_list[0]) == sizeof(attrib_list[0])) {
+      attrib_list = (EGLAttrib *) int_list;
+   } else {
+      err = _eglConvertIntsToAttribs(int_list, &attrib_list);
+      if (err != EGL_SUCCESS)
+         RETURN_EGL_ERROR(disp, err, EGL_NO_SYNC);
+   }
+
+   sync = _eglCreateSync(disp, type, attrib_list, EGL_FALSE,
                          EGL_BAD_ATTRIBUTE);
+
+   if (sizeof(int_list[0]) != sizeof(attrib_list[0]))
+      free(attrib_list);
+
+   /* Don't double-unlock the display. _eglCreateSync already unlocked it. */
+   return sync;
 }
 
 
@@ -1472,7 +1491,7 @@ static EGLSync EGLAPIENTRY
 eglCreateSync64KHR(EGLDisplay dpy, EGLenum type, const EGLAttrib *attrib_list)
 {
    _EGLDisplay *disp = _eglLockDisplay(dpy);
-   return _eglCreateSync(disp, type, NULL, attrib_list, EGL_TRUE,
+   return _eglCreateSync(disp, type, attrib_list, EGL_TRUE,
                          EGL_BAD_ATTRIBUTE);
 }
 
@@ -1481,7 +1500,7 @@ EGLSync EGLAPIENTRY
 eglCreateSync(EGLDisplay dpy, EGLenum type, const EGLAttrib *attrib_list)
 {
    _EGLDisplay *disp = _eglLockDisplay(dpy);
-   return _eglCreateSync(disp, type, NULL, attrib_list, EGL_TRUE,
+   return _eglCreateSync(disp, type, attrib_list, EGL_TRUE,
                          EGL_BAD_PARAMETER);
 }
 
