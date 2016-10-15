@@ -2039,6 +2039,7 @@ for plat in $egl_platforms; do
 		;;
 
 	android)
+		PKG_CHECK_MODULES([ANDROID], [cutils hardware sync])
 		;;
 
 	*)
