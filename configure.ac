@@ -820,10 +820,14 @@ AX_PTHREAD
 if test "x$ax_pthread_ok" = xno; then
     AC_MSG_ERROR([Building mesa on this platform requires pthreads])
 fi
+
 dnl AX_PTHREADS leaves PTHREAD_LIBS empty for gcc and sets PTHREAD_CFLAGS
 dnl to -pthread, which causes problems if we need -lpthread to appear in
-dnl pkgconfig files.
-test -z "$PTHREAD_LIBS" && PTHREAD_LIBS="-lpthread"
+dnl pkgconfig files.  Since Android doesn't have a pthread lib, this check
+dnl is not valid for that platform.
+if test "x$android" = xno; then
+    test -z "$PTHREAD_LIBS" && PTHREAD_LIBS="-lpthread"
+fi
 
 PKG_CHECK_MODULES(PTHREADSTUBS, pthread-stubs)
 AC_SUBST(PTHREADSTUBS_CFLAGS)
