@@ -264,7 +264,7 @@ brw_workaround_depthstencil_alignment(struct brw_context *brw,
    brw->depthstencil.stencil_mt = NULL;
    if (depth_irb)
       brw->depthstencil.depth_mt = depth_mt;
-   if (stencil_irb)
+   if (stencil_irb && stencil_irb->mt)
       brw->depthstencil.stencil_mt = get_stencil_miptree(stencil_irb);
 
    /* Gen6+ doesn't require the workarounds, since we always program the
@@ -283,7 +283,7 @@ brw_workaround_depthstencil_alignment(struct brw_context *brw,
     * separate stencil.  To catch that case, we check whether
     * depth_mt->stencil_mt is non-NULL.
     */
-   if (depth_irb && invalidate_depth &&
+   if (depth_irb && depth_mt && invalidate_depth &&
        (_mesa_get_format_base_format(depth_mt->format) == GL_DEPTH_STENCIL ||
         depth_mt->stencil_mt)) {
       invalidate_depth = invalidate_stencil && depth_irb && stencil_irb
@@ -338,7 +338,7 @@ brw_workaround_depthstencil_alignment(struct brw_context *brw,
          tile_y = depth_irb->draw_y & tile_mask_y;
       }
 
-      if (stencil_irb) {
+      if (stencil_irb && stencil_irb->mt) {
          stencil_mt = get_stencil_miptree(stencil_irb);
          intel_miptree_get_image_offset(stencil_mt,
                                         stencil_irb->mt_level,
@@ -360,7 +360,7 @@ brw_workaround_depthstencil_alignment(struct brw_context *brw,
    }
 
    /* If we have (just) stencil, check it for ignored low bits as well */
-   if (stencil_irb) {
+   if (stencil_irb && stencil_irb->mt) {
       intel_miptree_get_image_offset(stencil_mt,
                                      stencil_irb->mt_level,
                                      stencil_irb->mt_layer,
@@ -461,7 +461,7 @@ brw_workaround_depthstencil_alignment(struct brw_context *brw,
                                              (depth_irb->draw_y & ~tile_mask_y) / 2);
       }
    }
-   if (stencil_irb) {
+   if (stencil_irb && stencil_irb->mt) {
       stencil_mt = get_stencil_miptree(stencil_irb);
 
       brw->depthstencil.stencil_mt = stencil_mt;
