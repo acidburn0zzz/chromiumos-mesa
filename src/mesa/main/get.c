@@ -95,6 +95,10 @@ enum value_type {
    TYPE_INT_3,
    TYPE_INT_4,
    TYPE_INT_N,
+   TYPE_UINT,
+   TYPE_UINT_2,
+   TYPE_UINT_3,
+   TYPE_UINT_4,
    TYPE_INT64,
    TYPE_ENUM,
    TYPE_ENUM_2,
@@ -203,6 +207,7 @@ union value {
 #define CONTEXT_INT(field) CONTEXT_FIELD(field, TYPE_INT)
 #define CONTEXT_INT2(field) CONTEXT_FIELD(field, TYPE_INT_2)
 #define CONTEXT_INT64(field) CONTEXT_FIELD(field, TYPE_INT64)
+#define CONTEXT_UINT(field) CONTEXT_FIELD(field, TYPE_UINT)
 #define CONTEXT_ENUM(field) CONTEXT_FIELD(field, TYPE_ENUM)
 #define CONTEXT_ENUM2(field) CONTEXT_FIELD(field, TYPE_ENUM_2)
 #define CONTEXT_BOOL(field) CONTEXT_FIELD(field, TYPE_BOOLEAN)
@@ -1402,13 +1407,17 @@ _mesa_GetBooleanv(GLenum pname, GLboolean *params)
       break;
 
    case TYPE_INT_4:
+   case TYPE_UINT_4:
       params[3] = INT_TO_BOOLEAN(((GLint *) p)[3]);
    case TYPE_INT_3:
+   case TYPE_UINT_3:
       params[2] = INT_TO_BOOLEAN(((GLint *) p)[2]);
    case TYPE_INT_2:
+   case TYPE_UINT_2:
    case TYPE_ENUM_2:
       params[1] = INT_TO_BOOLEAN(((GLint *) p)[1]);
    case TYPE_INT:
+   case TYPE_UINT:
    case TYPE_ENUM:
       params[0] = INT_TO_BOOLEAN(((GLint *) p)[0]);
       break;
@@ -1506,6 +1515,16 @@ _mesa_GetFloatv(GLenum pname, GLfloat *params)
 	 params[i] = INT_TO_FLOAT(v.value_int_n.ints[i]);
       break;
 
+   case TYPE_UINT_4:
+      params[3] = (GLfloat) (((GLuint *) p)[3]);
+   case TYPE_UINT_3:
+      params[2] = (GLfloat) (((GLuint *) p)[2]);
+   case TYPE_UINT_2:
+      params[1] = (GLfloat) (((GLuint *) p)[1]);
+   case TYPE_UINT:
+      params[0] = (GLfloat) (((GLuint *) p)[0]);
+      break;
+
    case TYPE_INT64:
       params[0] = (GLfloat) (((GLint64 *) p)[0]);
       break;
@@ -1584,13 +1603,17 @@ _mesa_GetIntegerv(GLenum pname, GLint *params)
       break;
 
    case TYPE_INT_4:
+   case TYPE_UINT_4:
       params[3] = ((GLint *) p)[3];
    case TYPE_INT_3:
+   case TYPE_UINT_3:
       params[2] = ((GLint *) p)[2];
    case TYPE_INT_2:
+   case TYPE_UINT_2:
    case TYPE_ENUM_2:
       params[1] = ((GLint *) p)[1];
    case TYPE_INT:
+   case TYPE_UINT:
    case TYPE_ENUM:
       params[0] = ((GLint *) p)[0];
       break;
@@ -1694,6 +1717,16 @@ _mesa_GetInteger64v(GLenum pname, GLint64 *params)
 	 params[i] = INT_TO_BOOLEAN(v.value_int_n.ints[i]);
       break;
 
+   case TYPE_UINT_4:
+      params[3] = ((GLuint *) p)[3];
+   case TYPE_UINT_3:
+      params[2] = ((GLuint *) p)[2];
+   case TYPE_UINT_2:
+      params[1] = ((GLuint *) p)[1];
+   case TYPE_UINT:
+      params[0] = ((GLuint *) p)[0];
+      break;
+
    case TYPE_INT64:
       params[0] = ((GLint64 *) p)[0];
       break;
@@ -1780,6 +1813,16 @@ _mesa_GetDoublev(GLenum pname, GLdouble *params)
    case TYPE_INT_N:
       for (i = 0; i < v.value_int_n.n; i++)
 	 params[i] = v.value_int_n.ints[i];
+      break;
+
+   case TYPE_UINT_4:
+      params[3] = ((GLuint *) p)[3];
+   case TYPE_UINT_3:
+      params[2] = ((GLuint *) p)[2];
+   case TYPE_UINT_2:
+      params[1] = ((GLuint *) p)[1];
+   case TYPE_UINT:
+      params[0] = ((GLuint *) p)[0];
       break;
 
    case TYPE_INT64:
@@ -2238,9 +2281,11 @@ _mesa_GetBooleani_v( GLenum pname, GLuint index, GLboolean *params )
 
    switch (type) {
    case TYPE_INT:
+   case TYPE_UINT:
       params[0] = INT_TO_BOOLEAN(v.value_int);
       break;
    case TYPE_INT_4:
+   case TYPE_UINT_4:
       params[0] = INT_TO_BOOLEAN(v.value_int_4[0]);
       params[1] = INT_TO_BOOLEAN(v.value_int_4[1]);
       params[2] = INT_TO_BOOLEAN(v.value_int_4[2]);
@@ -2283,9 +2328,11 @@ _mesa_GetIntegeri_v( GLenum pname, GLuint index, GLint *params )
       break;
 
    case TYPE_INT:
+   case TYPE_UINT:
       params[0] = v.value_int;
       break;
    case TYPE_INT_4:
+   case TYPE_UINT_4:
       params[0] = v.value_int_4[0];
       params[1] = v.value_int_4[1];
       params[2] = v.value_int_4[2];
@@ -2315,6 +2362,15 @@ _mesa_GetInteger64i_v( GLenum pname, GLuint index, GLint64 *params )
       params[1] = v.value_int_4[1];
       params[2] = v.value_int_4[2];
       params[3] = v.value_int_4[3];
+      break;
+   case TYPE_UINT:
+      params[0] = (GLuint) v.value_int;
+      break;
+   case TYPE_UINT_4:
+      params[0] = (GLuint) v.value_int_4[0];
+      params[1] = (GLuint) v.value_int_4[1];
+      params[2] = (GLuint) v.value_int_4[2];
+      params[3] = (GLuint) v.value_int_4[3];
       break;
    case TYPE_INT64:
       params[0] = v.value_int64;
@@ -2369,6 +2425,16 @@ _mesa_GetFloati_v(GLenum pname, GLuint index, GLfloat *params)
    case TYPE_INT_N:
       for (i = 0; i < v.value_int_n.n; i++)
 	 params[i] = INT_TO_FLOAT(v.value_int_n.ints[i]);
+      break;
+
+   case TYPE_UINT_4:
+      params[3] = (GLfloat) ((GLuint) v.value_int_4[3]);
+   case TYPE_UINT_3:
+      params[2] = (GLfloat) ((GLuint) v.value_int_4[2]);
+   case TYPE_UINT_2:
+      params[1] = (GLfloat) ((GLuint) v.value_int_4[1]);
+   case TYPE_UINT:
+      params[0] = (GLfloat) ((GLuint) v.value_int_4[0]);
       break;
 
    case TYPE_INT64:
@@ -2443,6 +2509,16 @@ _mesa_GetDoublei_v(GLenum pname, GLuint index, GLdouble *params)
 	 params[i] = (GLdouble) INT_TO_FLOAT(v.value_int_n.ints[i]);
       break;
 
+   case TYPE_UINT_4:
+      params[3] = (GLdouble) ((GLuint) v.value_int_4[3]);
+   case TYPE_UINT_3:
+      params[2] = (GLdouble) ((GLuint) v.value_int_4[2]);
+   case TYPE_UINT_2:
+      params[1] = (GLdouble) ((GLuint) v.value_int_4[1]);
+   case TYPE_UINT:
+      params[0] = (GLdouble) ((GLuint) v.value_int_4[0]);
+      break;
+
    case TYPE_INT64:
       params[0] = (GLdouble) v.value_int64;
       break;
@@ -2506,13 +2582,17 @@ _mesa_GetFixedv(GLenum pname, GLfixed *params)
       break;
 
    case TYPE_INT_4:
+   case TYPE_UINT_4:
       params[3] = INT_TO_FIXED(((GLint *) p)[3]);
    case TYPE_INT_3:
+   case TYPE_UINT_3:
       params[2] = INT_TO_FIXED(((GLint *) p)[2]);
    case TYPE_INT_2:
+   case TYPE_UINT_2:
    case TYPE_ENUM_2:
       params[1] = INT_TO_FIXED(((GLint *) p)[1]);
    case TYPE_INT:
+   case TYPE_UINT:
    case TYPE_ENUM:
       params[0] = INT_TO_FIXED(((GLint *) p)[0]);
       break;
