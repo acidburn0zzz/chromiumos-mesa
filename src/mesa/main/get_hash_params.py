@@ -338,6 +338,7 @@ descriptor=[
 
 # blend_func_extended
   [ "MAX_DUAL_SOURCE_DRAW_BUFFERS", "CONTEXT_INT(Const.MaxDualSourceDrawBuffers), extra_ARB_blend_func_extended" ],
+  [ "CONTEXT_ROBUST_ACCESS", "CONTEXT_ENUM(Const.RobustAccess), extra_KHR_robustness" ],
 ]},
 
 # GLES3 is not a typo.

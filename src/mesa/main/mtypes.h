@@ -3594,6 +3594,9 @@ struct gl_constants
    /* GL_ARB_robustness */
    GLenum ResetStrategy;
 
+   /* GL_KHR_robustness */
+   GLboolean RobustAccess;
+
    /* GL_ARB_blend_func_extended */
    GLuint MaxDualSourceDrawBuffers;
 
