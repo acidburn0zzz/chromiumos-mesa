@@ -143,106 +143,6 @@ get_native_buffer_name(struct ANativeWindowBuffer *buf)
    return gralloc_drm_get_gem_handle(buf->handle);
 }
 
-static EGLBoolean
-droid_window_dequeue_buffer(struct dri2_egl_surface *dri2_surf)
-{
-#if ANDROID_VERSION >= 0x0402
-   int fence_fd;
-
-   if (dri2_surf->window->dequeueBuffer(dri2_surf->window, &dri2_surf->buffer,
-                                        &fence_fd))
-      return EGL_FALSE;
-
-   /* If access to the buffer is controlled by a sync fence, then block on the
-    * fence.
-    *
-    * It may be more performant to postpone blocking until there is an
-    * immediate need to write to the buffer. But doing so would require adding
-    * hooks to the DRI2 loader.
-    *
-    * From the ANativeWindow::dequeueBuffer documentation:
-    *
-    *    The libsync fence file descriptor returned in the int pointed to by
-    *    the fenceFd argument will refer to the fence that must signal
-    *    before the dequeued buffer may be written to.  A value of -1
-    *    indicates that the caller may access the buffer immediately without
-    *    waiting on a fence.  If a valid file descriptor is returned (i.e.
-    *    any value except -1) then the caller is responsible for closing the
-    *    file descriptor.
-    */
-    if (fence_fd >= 0) {
-       /* From the SYNC_IOC_WAIT documentation in <linux/sync.h>:
-        *
-        *    Waits indefinitely if timeout < 0.
-        */
-        int timeout = -1;
-        sync_wait(fence_fd, timeout);
-        close(fence_fd);
-   }
-
-   dri2_surf->buffer->common.incRef(&dri2_surf->buffer->common);
-#else
-   if (dri2_surf->window->dequeueBuffer(dri2_surf->window, &dri2_surf->buffer))
-      return EGL_FALSE;
-
-   dri2_surf->buffer->common.incRef(&dri2_surf->buffer->common);
-   dri2_surf->window->lockBuffer(dri2_surf->window, dri2_surf->buffer);
-#endif
-
-   return EGL_TRUE;
-}
-
-static EGLBoolean
-droid_window_enqueue_buffer(_EGLDisplay *disp, struct dri2_egl_surface *dri2_surf)
-{
-   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
-
-   /* To avoid blocking other EGL calls, release the display mutex before
-    * we enter droid_window_enqueue_buffer() and re-acquire the mutex upon
-    * return.
-    */
-   mtx_unlock(&disp->Mutex);
-
-#if ANDROID_VERSION >= 0x0402
-   /* Queue the buffer without a sync fence. This informs the ANativeWindow
-    * that it may access the buffer immediately.
-    *
-    * From ANativeWindow::dequeueBuffer:
-    *
-    *    The fenceFd argument specifies a libsync fence file descriptor for
-    *    a fence that must signal before the buffer can be accessed.  If
-    *    the buffer can be accessed immediately then a value of -1 should
-    *    be used.  The caller must not use the file descriptor after it
-    *    is passed to queueBuffer, and the ANativeWindow implementation
-    *    is responsible for closing it.
-    */
-   int fence_fd = -1;
-   dri2_surf->window->queueBuffer(dri2_surf->window, dri2_surf->buffer,
-                                  fence_fd);
-#else
-   dri2_surf->window->queueBuffer(dri2_surf->window, dri2_surf->buffer);
-#endif
-
-   dri2_surf->buffer->common.decRef(&dri2_surf->buffer->common);
-   dri2_surf->buffer = NULL;
-
-   mtx_lock(&disp->Mutex);
-
-   if (dri2_surf->dri_image) {
-      dri2_dpy->image->destroyImage(dri2_surf->dri_image);
-      dri2_surf->dri_image = NULL;
-   }
-
-   return EGL_TRUE;
-}
-
-static void
-droid_window_cancel_buffer(_EGLDisplay *disp, struct dri2_egl_surface *dri2_surf)
-{
-   /* no cancel buffer? */
-   droid_window_enqueue_buffer(disp, dri2_surf);
-}
-
 static __DRIbuffer *
 droid_alloc_local_buffer(struct dri2_egl_surface *dri2_surf,
                          unsigned int att, unsigned int format)
@@ -278,6 +178,131 @@ droid_free_local_buffers(struct dri2_egl_surface *dri2_surf)
    }
 }
 
+static void
+wait_and_close_acquire_fence(struct dri2_egl_surface *dri2_surf)
+{
+#if ANDROID_VERSION >= 0x0402
+   /* If access to the buffer is controlled by a sync fence, then block on the
+    * fence.
+    *
+    * It may be more performant to postpone blocking until there is an
+    * immediate need to write to the buffer. But doing so would require adding
+    * hooks to the DRI2 loader.
+    *
+    * From the ANativeWindow::dequeueBuffer documentation:
+    *
+    *    The libsync fence file descriptor returned in the int pointed to by
+    *    the fenceFd argument will refer to the fence that must signal
+    *    before the dequeued buffer may be written to.  A value of -1
+    *    indicates that the caller may access the buffer immediately without
+    *    waiting on a fence.  If a valid file descriptor is returned (i.e.
+    *    any value except -1) then the caller is responsible for closing the
+    *    file descriptor.
+    */
+    if (dri2_surf->acquire_fence_fd >= 0) {
+       /* From the SYNC_IOC_WAIT documentation in <linux/sync.h>:
+        *
+        *    Waits indefinitely if timeout < 0.
+        */
+        int timeout = -1;
+        sync_wait(dri2_surf->acquire_fence_fd, timeout);
+        close(dri2_surf->acquire_fence_fd);
+        dri2_surf->acquire_fence_fd = -1;
+   }
+#endif
+}
+
+static EGLBoolean
+droid_window_dequeue_buffer(_EGLDisplay *disp, struct dri2_egl_surface *dri2_surf)
+{
+   /* To avoid blocking other EGL calls, release the display mutex before
+    * we enter droid_window_dequeue_buffer() and re-acquire the mutex upon
+    * return.
+    */
+   mtx_unlock(&disp->Mutex);
+
+#if ANDROID_VERSION >= 0x0402
+   if (dri2_surf->window->dequeueBuffer(dri2_surf->window, &dri2_surf->buffer,
+                                        &dri2_surf->acquire_fence_fd))
+      return EGL_FALSE;
+
+   dri2_surf->buffer->common.incRef(&dri2_surf->buffer->common);
+#else
+   if (dri2_surf->window->dequeueBuffer(dri2_surf->window, &dri2_surf->buffer))
+      return EGL_FALSE;
+
+   dri2_surf->buffer->common.incRef(&dri2_surf->buffer->common);
+   dri2_surf->window->lockBuffer(dri2_surf->window, dri2_surf->buffer);
+#endif
+
+   mtx_lock(&disp->Mutex);
+
+   /* update the surface size */
+   if (dri2_surf->base.Width != dri2_surf->buffer->width ||
+       dri2_surf->base.Height != dri2_surf->buffer->height) {
+      droid_free_local_buffers(dri2_surf);
+      dri2_surf->base.Width = dri2_surf->buffer->width;
+      dri2_surf->base.Height = dri2_surf->buffer->height;
+   }
+
+   return EGL_TRUE;
+}
+
+static EGLBoolean
+droid_window_enqueue_buffer(_EGLDisplay *disp, struct dri2_egl_surface *dri2_surf)
+{
+   struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
+
+   /* In case we haven't done any rendering. */
+   wait_and_close_acquire_fence(dri2_surf);
+
+   /* To avoid blocking other EGL calls, release the display mutex before
+    * we enter droid_window_enqueue_buffer() and re-acquire the mutex upon
+    * return.
+    */
+   mtx_unlock(&disp->Mutex);
+
+#if ANDROID_VERSION >= 0x0402
+   /* Queue the buffer without a sync fence. This informs the ANativeWindow
+    * that it may access the buffer immediately.
+    *
+    * From ANativeWindow::dequeueBuffer:
+    *
+    *    The fenceFd argument specifies a libsync fence file descriptor for
+    *    a fence that must signal before the buffer can be accessed.  If
+    *    the buffer can be accessed immediately then a value of -1 should
+    *    be used.  The caller must not use the file descriptor after it
+    *    is passed to queueBuffer, and the ANativeWindow implementation
+    *    is responsible for closing it.
+    */
+
+   int fence_fd = -1;
+   dri2_surf->window->queueBuffer(dri2_surf->window, dri2_surf->buffer,
+                                  fence_fd);
+#else
+   dri2_surf->window->queueBuffer(dri2_surf->window, dri2_surf->buffer);
+#endif
+
+   dri2_surf->buffer->common.decRef(&dri2_surf->buffer->common);
+   dri2_surf->buffer = NULL;
+
+   mtx_lock(&disp->Mutex);
+
+   if (dri2_surf->dri_image) {
+      dri2_dpy->image->destroyImage(dri2_surf->dri_image);
+      dri2_surf->dri_image = NULL;
+   }
+
+   return EGL_TRUE;
+}
+
+static void
+droid_window_cancel_buffer(_EGLDisplay *disp, struct dri2_egl_surface *dri2_surf)
+{
+   /* no cancel buffer? */
+   droid_window_enqueue_buffer(disp, dri2_surf);
+}
+
 static _EGLSurface *
 droid_create_surface(_EGLDriver *drv, _EGLDisplay *disp, EGLint type,
 		    _EGLConfig *conf, void *native_window,
@@ -294,6 +319,7 @@ droid_create_surface(_EGLDriver *drv, _EGLDisplay *disp, EGLint type,
       _eglError(EGL_BAD_ALLOC, "droid_create_surface");
       return NULL;
    }
+   dri2_surf->acquire_fence_fd = -1;
 
    if (!_eglInitSurface(&dri2_surf->base, disp, type, conf, attrib_list))
       goto cleanup_surface;
@@ -335,9 +361,17 @@ droid_create_surface(_EGLDriver *drv, _EGLDisplay *disp, EGLint type,
    if (window) {
       window->common.incRef(&window->common);
       dri2_surf->window = window;
+      if (droid_window_dequeue_buffer(disp, dri2_surf) != EGL_TRUE) {
+         _eglError(EGL_BAD_SURFACE, "failed to dequeue buffer from native window");
+         goto cleanup_window;
+      }
    }
 
    return &dri2_surf->base;
+
+cleanup_window:
+   window->common.decRef(&window->common);
+   (*dri2_dpy->core->destroyDrawable)(dri2_surf->dri_drawable);
 
 cleanup_surface:
    free(dri2_surf);
@@ -391,29 +425,6 @@ droid_destroy_surface(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *surf)
 }
 
 static int
-update_buffers(struct dri2_egl_surface *dri2_surf)
-{
-   if (dri2_surf->base.Type != EGL_WINDOW_BIT)
-      return 0;
-
-   /* try to dequeue the next back buffer */
-   if (!dri2_surf->buffer && !droid_window_dequeue_buffer(dri2_surf)) {
-      _eglLog(_EGL_WARNING, "Could not dequeue buffer from native window");
-      return -1;
-   }
-
-   /* free outdated buffers and update the surface size */
-   if (dri2_surf->base.Width != dri2_surf->buffer->width ||
-       dri2_surf->base.Height != dri2_surf->buffer->height) {
-      droid_free_local_buffers(dri2_surf);
-      dri2_surf->base.Width = dri2_surf->buffer->width;
-      dri2_surf->base.Height = dri2_surf->buffer->height;
-   }
-
-   return 0;
-}
-
-static int
 get_front_bo(struct dri2_egl_surface *dri2_surf, unsigned int format)
 {
    struct dri2_egl_display *dri2_dpy =
@@ -450,6 +461,8 @@ get_back_bo(struct dri2_egl_surface *dri2_surf)
 
    if (!dri2_surf->buffer)
       return -1;
+
+   wait_and_close_acquire_fence(dri2_surf);
 
    fd = get_native_buffer_fd(dri2_surf->buffer);
    if (fd < 0) {
@@ -496,9 +509,6 @@ droid_image_get_buffers(__DRIdrawable *driDrawable,
 
    images->image_mask = 0;
 
-   if (update_buffers(dri2_surf) < 0)
-      return 0;
-
    if (buffer_mask & __DRI_IMAGE_BUFFER_FRONT) {
       if (get_front_bo(dri2_surf, format) < 0)
          return 0;
@@ -535,6 +545,11 @@ droid_swap_buffers(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *draw)
       droid_window_enqueue_buffer(disp, dri2_surf);
 
    (*dri2_dpy->flush->invalidate)(dri2_surf->dri_drawable);
+
+   if (droid_window_dequeue_buffer(disp, dri2_surf) != EGL_TRUE) {
+      _eglError(EGL_BAD_SURFACE, "failed to dequeue buffer from native window");
+      return EGL_FALSE;
+   }
 
    return EGL_TRUE;
 }
@@ -745,6 +760,9 @@ droid_get_buffers_parse_attachments(struct dri2_egl_surface *dri2_surf,
       switch (attachments[i]) {
       case __DRI_BUFFER_BACK_LEFT:
          if (dri2_surf->base.Type == EGL_WINDOW_BIT) {
+            if (!dri2_surf->buffer)
+               continue;
+
             buf->attachment = attachments[i];
             buf->name = get_native_buffer_name(dri2_surf->buffer);
             buf->cpp = get_format_bpp(dri2_surf->buffer->format);
@@ -791,9 +809,6 @@ droid_get_buffers_with_format(__DRIdrawable * driDrawable,
 			     int *out_count, void *loaderPrivate)
 {
    struct dri2_egl_surface *dri2_surf = loaderPrivate;
-
-   if (update_buffers(dri2_surf) < 0)
-      return NULL;
 
    dri2_surf->buffer_count =
       droid_get_buffers_parse_attachments(dri2_surf, attachments, count);

@@ -294,6 +294,7 @@ struct dri2_egl_surface
 #ifdef HAVE_ANDROID_PLATFORM
    struct ANativeWindow *window;
    struct ANativeWindowBuffer *buffer;
+   int acquire_fence_fd;
    __DRIimage *dri_image;
    __DRIimage *dri_front_image;
 
