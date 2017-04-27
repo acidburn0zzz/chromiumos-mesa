@@ -30,7 +30,6 @@
 #include <errno.h>
 #include <dlfcn.h>
 #include <xf86drm.h>
-#include <stdbool.h>
 
 #if ANDROID_VERSION >= 0x402
 #include <sync/sync.h>
@@ -250,8 +249,7 @@ droid_window_dequeue_buffer(_EGLDisplay *disp, struct dri2_egl_surface *dri2_sur
 }
 
 static EGLBoolean
-droid_window_enqueue_buffer(_EGLDisplay *disp,
-                            struct dri2_egl_surface *dri2_surf, bool cancel)
+droid_window_enqueue_buffer(_EGLDisplay *disp, struct dri2_egl_surface *dri2_surf)
 {
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
 
@@ -279,12 +277,8 @@ droid_window_enqueue_buffer(_EGLDisplay *disp,
     */
 
    int fence_fd = -1;
-   if (cancel)
-      dri2_surf->window->cancelBuffer(dri2_surf->window, dri2_surf->buffer,
-                                      fence_fd);
-   else
-      dri2_surf->window->queueBuffer(dri2_surf->window, dri2_surf->buffer,
-                                     fence_fd);
+   dri2_surf->window->queueBuffer(dri2_surf->window, dri2_surf->buffer,
+                                  fence_fd);
 #else
    dri2_surf->window->queueBuffer(dri2_surf->window, dri2_surf->buffer);
 #endif
@@ -300,6 +294,13 @@ droid_window_enqueue_buffer(_EGLDisplay *disp,
    }
 
    return EGL_TRUE;
+}
+
+static void
+droid_window_cancel_buffer(_EGLDisplay *disp, struct dri2_egl_surface *dri2_surf)
+{
+   /* no cancel buffer? */
+   droid_window_enqueue_buffer(disp, dri2_surf);
 }
 
 static _EGLSurface *
@@ -408,7 +409,7 @@ droid_destroy_surface(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *surf)
 
    if (dri2_surf->base.Type == EGL_WINDOW_BIT) {
       if (dri2_surf->buffer)
-         droid_window_enqueue_buffer(disp, dri2_surf, true);
+         droid_window_cancel_buffer(disp, dri2_surf);
 
       dri2_surf->window->common.decRef(&dri2_surf->window->common);
    }
@@ -541,7 +542,7 @@ droid_swap_buffers(_EGLDriver *drv, _EGLDisplay *disp, _EGLSurface *draw)
    dri2_flush_drawable_for_swapbuffers(disp, draw);
 
    if (dri2_surf->buffer)
-      droid_window_enqueue_buffer(disp, dri2_surf, false);
+      droid_window_enqueue_buffer(disp, dri2_surf);
 
    (*dri2_dpy->flush->invalidate)(dri2_surf->dri_drawable);
 
