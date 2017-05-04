@@ -1094,7 +1094,7 @@ eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
     *    generated.
     */
    if (surf->Lost)
-      RETURN_EGL_ERROR(disp, EGL_BAD_NATIVE_WINDOW, EGL_FALSE);
+      RETURN_EGL_ERROR(disp, EGL_BAD_SURFACE, EGL_FALSE);
 
    ret = drv->API.SwapBuffers(drv, disp, surf);
 
