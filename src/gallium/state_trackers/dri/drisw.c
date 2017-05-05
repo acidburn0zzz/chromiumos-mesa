@@ -46,6 +46,7 @@
 #include "dri_screen.h"
 #include "dri_context.h"
 #include "dri_drawable.h"
+#include "dri_extensions.h"
 #include "dri_query_renderer.h"
 
 #include "drm_driver.h"
@@ -491,6 +492,7 @@ static const __DRIextension *drisw_screen_extensions[] = {
    &driTexBufferExtension.base,
    &dri2RendererQueryExtension.base,
    &dri2ConfigQueryExtension.base,
+   &dri2FenceExtension.base,
 #ifdef HAVE_LIBDRM
    &dri2ImageExtension.base,
 #endif
