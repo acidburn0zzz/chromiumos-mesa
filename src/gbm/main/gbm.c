@@ -534,7 +534,12 @@ gbm_bo_get_plane_offset(struct gbm_bo *bo, size_t plane)
 GBM_EXPORT uint32_t
 gbm_bo_get_plane_size(struct gbm_bo *bo, size_t plane)
 {
-   return 0;
+   /* To help the gbmtest give a size based on bo
+    * instead of just 0.
+    * This isn't completely what minigbm does as it
+    * will consider a multiplier based on the plane.
+    */
+   return bo->stride * bo->height;
 }
 
 GBM_EXPORT uint32_t
