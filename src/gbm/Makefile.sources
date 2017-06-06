@@ -9,3 +9,7 @@ gbm_core_FILES = \
 gbm_dri_FILES = \
 	backends/dri/gbm_dri.c \
 	backends/dri/gbm_driint.h
+
+gbm_wrap_FILES = \
+	backends/wrap/gbm_wrap.c \
+	backends/wrap/gbm_wrap_impl.h

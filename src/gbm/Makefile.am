@@ -47,6 +47,10 @@ libgbm_la_LIBADD += \
 	$(PTHREADSTUBS_LIBS)
 endif
 
+# lib wrapper through backend
+libgbm_la_SOURCES += \
+	$(gbm_wrap_FILES)
+
 TESTS = gbm-symbols-check
 EXTRA_DIST = gbm-symbols-check
 
