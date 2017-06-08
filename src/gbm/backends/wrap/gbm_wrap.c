@@ -416,17 +416,29 @@ static struct gbm_wrapper_device *
 load_wrapped_gbm()
 {
    struct gbm_wrapper_device *wgbm;
+   const char * wrapped_lib;
    wgbm = calloc(1, sizeof *wgbm);
    if (!wgbm)
       return NULL;
-   /* TODO: maybe just use env variable override otherwise builtin. */
-   /* for now just wrap minigbm always...?*/
-   /* TODO: XXX open based on some config/path not hardcoded minigbm...*/
-   const char * wrapped_lib = "libminigbm.so.1.0.0";
+
+   /* Allow users to specify the wrapped library by
+    * env variable.
+    */
+   wrapped_lib = getenv("GBM_WRAP_LIBRARY");
+   if (!wrapped_lib) {
+      wrapped_lib = DEFAULT_WRAPPED_GBM_LIBRARY;
+   }
+
    if (gbm_wrapper_loadsyms(wrapped_lib, wgbm)) {
      free_gbm(wgbm);
      return NULL;
    }
+   /* Give a message for users to know it has happened.
+    * NOTE: It could be considered excessive to log on success
+    * but for testing/early adoption we want this to be clear
+    * in the logs.
+    */
+   fprintf(stderr, "gbm: Using wrapped gbm library %s\n", wrapped_lib);
    return wgbm;
 }
 

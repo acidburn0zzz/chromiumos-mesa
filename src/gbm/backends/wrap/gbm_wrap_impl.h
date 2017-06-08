@@ -3,6 +3,12 @@
 #define _GBM_WRAP_IMPL_H
 
 #include "gbmint.h"
+
+/* Default library to wrap.
+ * TODO perhaps config option?.
+ */
+#define DEFAULT_WRAPPED_GBM_LIBRARY "libminigbm.so.1.0.0"
+
 /**
  * Must keep track of two types of gbm_device, gbm_surface, and gbm_bo
  * pointers.
