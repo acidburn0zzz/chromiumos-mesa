@@ -87,60 +87,6 @@ gbm_surface_to_wrap_device(struct gbm_surface *surface)
    return gbm_to_wrap_device(wrapper_surface->base.gbm);
 }
 
-// The compiler desires casting void * from dlysm.
-#if 0
-#define WRAP_GBM_FUNCTION(wgbm, function) \
-   do { wgbm->wfuncs.function = (__typeof__(wgbm->wfuncs.function))dlsym(wgbm->library, #function); } while (0);
-#else
-#define WRAP_GBM_FUNCTION(wgbm, function) \
-   do { wgbm->wfuncs.function = dlsym(wgbm->library, #function); } while (0);
-#endif
-
-/* open and load the functions from the target library.
- * return negative on error, 0 on success.
- * */
-static int
-gbm_wrapper_loadsyms(const char *path, struct gbm_wrapper_device *wgbm)
-{
-   wgbm->library = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
-   if (wgbm->library == NULL) {
-      fprintf(stderr, "gbm: failed to open wrapped library %s)\n", path);
-      fprintf(stderr, "gbm: Last dlopen error: %s\n", dlerror());
-      return -1;
-    }
-
-   /* Wrap all the functions. */
-   /* TODO: care about failures?
-    * must dlclose if failure occurs that is fatal.*/
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_create);
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_destroy);
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_device);
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_fd);
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_format);
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_handle);
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_height);
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_stride);
-   //WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_user_data);
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_width);
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_import);
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_map);
-   //WRAP_GBM_FUNCTION(wgbm, gbm_bo_set_user_data);
-   WRAP_GBM_FUNCTION(wgbm, gbm_bo_unmap);
-   WRAP_GBM_FUNCTION(wgbm, gbm_create_device);
-   WRAP_GBM_FUNCTION(wgbm, gbm_device_destroy);
-   WRAP_GBM_FUNCTION(wgbm, gbm_device_get_backend_name);
-   WRAP_GBM_FUNCTION(wgbm, gbm_device_get_fd);
-   WRAP_GBM_FUNCTION(wgbm, gbm_device_is_format_supported);
-   WRAP_GBM_FUNCTION(wgbm, gbm_surface_create);
-   WRAP_GBM_FUNCTION(wgbm, gbm_surface_destroy);
-   WRAP_GBM_FUNCTION(wgbm, gbm_surface_has_free_buffers);
-   WRAP_GBM_FUNCTION(wgbm, gbm_surface_lock_front_buffer);
-   WRAP_GBM_FUNCTION(wgbm, gbm_surface_release_buffer);
-
-   /* TODO anything else? */
-   return 0;
-}
-
 /**
  * Free simple wrapper object gbm.
  * NOTE: only frees the simple buffer.
@@ -401,6 +347,67 @@ gbm_wrap_surface_destroy(struct gbm_surface *surface)
    struct gbm_wrapper_surface *wsurf = gbm_surface_to_wrap_surface(surface);
    wgbm->wfuncs.gbm_surface_destroy(wrapped_surface(surface));
    free_surface(wsurf);
+}
+
+/* Wrap functions from the library into the backend. */
+#if 0
+#define WRAP_GBM_FUNCTION(wgbm, function) \
+   do { wgbm->wfuncs.function = dlsym(wgbm->library, #function);} while (0);
+#else
+#define WRAP_GBM_FUNCTION(wgbm, function) \
+   ({ \
+      wgbm->wfuncs.function = dlsym(wgbm->library, #function); \
+      if (wgbm->wfuncs.function == NULL) \
+         fprintf(stderr, "gbm: Unable to wrap " #function "\n"); \
+      ( wgbm->wfuncs.function == NULL); \
+   })
+#endif
+
+/* Open and load the functions from the target library.
+ * return negative on error, 0 on success.
+ * */
+static int
+gbm_wrapper_loadsyms(const char *path, struct gbm_wrapper_device *wgbm)
+{
+   wgbm->library = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+   if (wgbm->library == NULL) {
+      fprintf(stderr, "gbm: failed to open wrapped library (%s)\n", path);
+      fprintf(stderr, "gbm: Last dlopen error: %s\n", dlerror());
+      return -1;
+    }
+
+   /* Wrap all the functions. */
+   if (WRAP_GBM_FUNCTION(wgbm, gbm_bo_create) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_bo_destroy) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_device) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_fd) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_format) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_handle) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_height) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_stride) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_bo_get_width) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_bo_import) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_bo_map) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_bo_unmap) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_create_device) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_device_destroy) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_device_get_backend_name) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_device_get_fd) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_device_is_format_supported) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_surface_create) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_surface_destroy) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_surface_has_free_buffers) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_surface_lock_front_buffer) ||
+         WRAP_GBM_FUNCTION(wgbm, gbm_surface_release_buffer)) {
+            /* Close if any of them are null.
+             * We will just require them all to be implemented.
+             */
+            dlclose(wgbm->library);
+            wgbm->library = NULL;
+            return -1;
+         }
+   /* Success. */
+   return 0;
 }
 
 /* Load and wrap the target wrapper library functions.

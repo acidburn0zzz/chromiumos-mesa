@@ -79,5 +79,5 @@ struct gbm_wrapper_surface {
  * the holder members.
  */
 #define container_of(type, from, member) \
-   ((type *)(((char *)from) - offsetof(type, member)));
+   ((type *)(((char *)(from)) - offsetof(type, member)))
 #endif
