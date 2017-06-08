@@ -1,0 +1,73 @@
+
+* logging for errors, bad loads, even debug?
+* test cases
+* Planes
+* Make configurable?
+
+# Issues
+
+BROKEN things thatm ust be put into atlassian:
+* udl driver doesn't have a mouse cursor on the other screen.
+* udl driver, when unplugging, screen attached but not active (not sure if matters if screen is active) it will panic system
+
+* Make sure there is a message somewhere when it chooses one backend over the other for testing
+ or early confirmation it uses minigbm..
+* Have it fail gracefully when minigbm isn't there and it fails to load it for passthrough...
+
+## logging messages
+
+Example found:
+```
+localhost displaylink # cat /var/log/ui/ui.LATEST  | grep gbm
+gbm: failed to open any driver (search paths /usr/lib64/dri)
+gbm: Last dlopen error: /usr/lib64/dri/evdi_dri.so: cannot open shared object file: No such file or directory
+gbm: Using wrapped gbm library libminigbm.so.1.0.0
+```
+
+You will see the line "gbm: Using wrapped gbm library libminigbm.so.1.0.0" when
+it successfully binds the gbm library with the wrapped library.
+
+If it fails to dlopen the library it will log:
+```
+"gbm: failed to open wrapped library"
+```
+
+Would really like it if it claimed it was doing the passthrough in this case! Don't worry
+so much about it being ugly or overstated...
+Goal is for testers/end users/support able to give us a quick check if this is happening.
+
+## Selection
+
+One can force use of a backend with the env "GBM_BACKEND=gbm_wrapper.so".
+However, the backend loader will try each in succession, so if
+the dri backend doesn't work it will try the wrapper.
+That works for us for now.
+
+Use the env variable "GBM_WRAP_LIBRARY" to specify the library to
+wrap. By default it uses "libmingbm.so.1.0.0" defined in "gbm_wrap_impl.h".
+
+
+The default dri backend will try the kms_swrast or swrast first before trying
+the wrapper backend. With the kernel changes in place the kms_swrast
+seems to work with the browser. It does not pass all the gbmtest cases
+as well as the passthrough, however.
+
+## Planes
+
+minigbm contains plane support, this version of mesa does not.
+Only a few of the formats support multiple planes. In the past we just always
+returned values of 1 for all calls. Supported formats in the mesa version
+happen to not support planes anyway so it should work OK.
+However, This is an issue with the passthrough as the formats
+returned can support multiple planes and the returns aren't correct
+(gbmtest from autotests will find this).
+
+If we only use this for evdi and udl then we can get by as they
+don't support formats with planes (I'm pretty sure).
+But be weary if using this for more devices.
+If we use it for more devices we might want to consider dumping mesa
+for minigbm as a whole.
+
+NOTE: Future versinos of mesa (17 perhap?) do start to include these
+plane functions as well. This passthrough would be easier there, however
+it might just be easier to bring over changes at some point.
