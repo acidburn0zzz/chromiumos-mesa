@@ -439,6 +439,8 @@ dri_screen_create_dri2(struct gbm_dri_device *dri, char *driver_name)
       fprintf(stderr, "failed to load driver: %s\n", dri->base.driver_name);
       return ret;
    };
+   /* XXX just for debugging to make sure. */
+   fprintf(stderr, "succeeded to load driver: %s\n", dri->base.driver_name);
 
    dri->loader_extensions = gbm_dri_screen_extensions;
 
