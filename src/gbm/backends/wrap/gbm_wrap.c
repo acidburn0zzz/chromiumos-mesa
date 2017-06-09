@@ -337,6 +337,8 @@ static int
 gbm_wrap_surface_has_free_buffers(struct gbm_surface *surface)
 {
    struct gbm_wrapper_device *wgbm = gbm_surface_to_wrap_device(surface);
+   if (!wgbm->wfuncs.gbm_surface_has_free_buffers)
+      return 0;
    return wgbm->wfuncs.gbm_surface_has_free_buffers(wrapped_surface(surface));
 }
 
@@ -396,16 +398,19 @@ gbm_wrapper_loadsyms(const char *path, struct gbm_wrapper_device *wgbm)
          WRAP_GBM_FUNCTION(wgbm, gbm_device_is_format_supported) ||
          WRAP_GBM_FUNCTION(wgbm, gbm_surface_create) ||
          WRAP_GBM_FUNCTION(wgbm, gbm_surface_destroy) ||
-         WRAP_GBM_FUNCTION(wgbm, gbm_surface_has_free_buffers) ||
          WRAP_GBM_FUNCTION(wgbm, gbm_surface_lock_front_buffer) ||
          WRAP_GBM_FUNCTION(wgbm, gbm_surface_release_buffer)) {
-            /* Close if any of them are null.
+            /* Close if any of these required calls are null.
              * We will just require them all to be implemented.
              */
             dlclose(wgbm->library);
             wgbm->library = NULL;
             return -1;
          }
+   /* The has_free_buffers isn't part of libminigbm, just
+    * allow it to be optional.
+    */
+   WRAP_GBM_FUNCTION(wgbm, gbm_surface_has_free_buffers);
    /* Success. */
    return 0;
 }
