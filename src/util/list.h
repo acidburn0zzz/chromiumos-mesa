@@ -179,7 +179,7 @@ static inline void list_validate(const struct list_head *list)
 #ifndef container_of
 #define container_of(ptr, sample, member)				\
     (void *)((char *)(ptr)						\
-	     - ((char *)&(sample)->member - (char *)(sample)))
+	     - ((char *)&((__typeof__(sample))0)->member))
 #endif
 
 #define list_first_entry(ptr, type, member) \
