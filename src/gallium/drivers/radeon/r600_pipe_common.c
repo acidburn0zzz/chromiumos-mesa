@@ -1211,13 +1211,17 @@ bool r600_common_screen_init(struct r600_common_screen *rscreen,
 			     struct radeon_winsys *ws)
 {
 	char llvm_string[32] = {}, kernel_version[128] = {};
+#if 0
 	struct utsname uname_data;
+#endif
 
 	ws->query_info(ws, &rscreen->info);
 
+#if 0
 	if (uname(&uname_data) == 0)
 		snprintf(kernel_version, sizeof(kernel_version),
 			 " / %s", uname_data.release);
+#endif
 
 	if (HAVE_LLVM > 0) {
 		snprintf(llvm_string, sizeof(llvm_string),
