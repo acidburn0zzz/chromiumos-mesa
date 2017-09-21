@@ -1251,8 +1251,7 @@ struct pipe_resource *si_resource_create_common(struct pipe_screen *screen,
 bool si_common_screen_init(struct r600_common_screen *rscreen,
 			   struct radeon_winsys *ws)
 {
-	char family_name[32] = {}, llvm_string[32] = {}, kernel_version[128] = {};
-	struct utsname uname_data;
+	char family_name[32] = {}, llvm_string[32] = {};
 	const char *chip_name;
 
 	ws->query_info(ws, &rscreen->info);
@@ -1264,9 +1263,6 @@ bool si_common_screen_init(struct r600_common_screen *rscreen,
 	else
 		chip_name = r600_get_family_name(rscreen);
 
-	if (uname(&uname_data) == 0)
-		snprintf(kernel_version, sizeof(kernel_version),
-			 " / %s", uname_data.release);
 
 	if (HAVE_LLVM > 0) {
 		snprintf(llvm_string, sizeof(llvm_string),
@@ -1275,10 +1271,10 @@ bool si_common_screen_init(struct r600_common_screen *rscreen,
 	}
 
 	snprintf(rscreen->renderer_string, sizeof(rscreen->renderer_string),
-		 "%s (%sDRM %i.%i.%i%s%s)",
+		 "%s (%sDRM %i.%i.%i%s)",
 		 chip_name, family_name, rscreen->info.drm_major,
 		 rscreen->info.drm_minor, rscreen->info.drm_patchlevel,
-		 kernel_version, llvm_string);
+		 llvm_string);
 
 	rscreen->b.get_name = r600_get_name;
 	rscreen->b.get_vendor = r600_get_vendor;
