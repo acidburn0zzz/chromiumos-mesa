@@ -201,6 +201,7 @@ static struct pipe_surface *virgl_create_surface(struct pipe_context *ctx,
    if (!surf)
       return NULL;
 
+   pipe_reference(NULL, &vctx->reference);
    res->clean = FALSE;
    handle = virgl_object_assign_handle();
    pipe_reference_init(&surf->base.reference, 1);
@@ -233,6 +234,7 @@ static void virgl_surface_destroy(struct pipe_context *ctx,
 
    pipe_resource_reference(&surf->base.texture, NULL);
    virgl_encode_delete_object(vctx, surf->handle, VIRGL_OBJECT_SURFACE);
+   surf->base.context->destroy(surf->base.context);
    FREE(surf);
 }
 
@@ -668,6 +670,7 @@ static struct pipe_sampler_view *virgl_create_sampler_view(struct pipe_context *
    if (!grview)
       return NULL;
 
+   pipe_reference(NULL, &vctx->reference);
    res = virgl_resource(texture);
    handle = virgl_object_assign_handle();
    virgl_encode_sampler_view(vctx, handle, res, state);
@@ -734,6 +737,7 @@ static void virgl_destroy_sampler_view(struct pipe_context *ctx,
 
    virgl_encode_delete_object(vctx, grview->handle, VIRGL_OBJECT_SAMPLER_VIEW);
    pipe_resource_reference(&view->texture, NULL);
+   view->context->destroy(view->context);
    FREE(view);
 }
 
@@ -846,6 +850,10 @@ virgl_context_destroy( struct pipe_context *ctx )
    struct virgl_context *vctx = virgl_context(ctx);
    struct virgl_screen *rs = virgl_screen(ctx->screen);
 
+   pipe_reference(&vctx->reference, NULL);
+   if (pipe_is_referenced(&vctx->reference))
+      return;
+
    vctx->framebuffer.zsbuf = NULL;
    vctx->framebuffer.nr_cbufs = 0;
    virgl_encoder_destroy_sub_ctx(vctx, vctx->hw_sub_ctx_id);
@@ -867,7 +875,7 @@ struct pipe_context *virgl_context_create(struct pipe_screen *pscreen,
    struct virgl_context *vctx;
    struct virgl_screen *rs = virgl_screen(pscreen);
    vctx = CALLOC_STRUCT(virgl_context);
-
+   pipe_reference_init(&vctx->reference.count, 1);
    vctx->cbuf = rs->vws->cmd_buf_create(rs->vws);
    if (!vctx->cbuf) {
       FREE(vctx);

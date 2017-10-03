@@ -50,6 +50,7 @@ struct virgl_textures_info {
 
 struct virgl_context {
    struct pipe_context base;
+   struct pipe_reference reference;
    struct virgl_cmd_buf *cbuf;
 
    struct virgl_textures_info samplers[PIPE_SHADER_TYPES];
