@@ -229,6 +229,27 @@ enum gbm_bo_flags {
     * Buffer is linear, i.e. not tiled.
     */
    GBM_BO_USE_LINEAR = (1 << 4),
+
+   /* Flags used in minigbm that are not implemented
+    * with mesagbm. Stub them out so they don't have to
+    * be removed from the various users (chrome).
+    */
+   GBM_BO_USE_TEXTURING = 0,
+   GBM_BO_USE_CAMERA_WRITE = 0,
+   GBM_BO_USE_CAMERA_READ = 0,
+   GBM_BO_USE_HW_VIDEO_DECODER = 0,
+   GBM_BO_USE_HW_VIDEO_ENCODER = 0,
+   GBM_BO_USE_PROTECTED = 0,
+
+   /* These are also minigbm flags that aren't implemented in mesagbm. In at
+    * least one place
+    * (platform/tast-tests/helpers/local/graphics.GBM.gbmtest.cc) they are
+    * used in a switch statement, so they can't all be zero. Instead, set them
+    * to the minigbm values. [OVER-9416] */
+   GBM_BO_USE_SW_READ_OFTEN = (1 << 9),
+   GBM_BO_USE_SW_READ_RARELY = (1 << 10),
+   GBM_BO_USE_SW_WRITE_OFTEN = (1 << 11),
+   GBM_BO_USE_SW_WRITE_RARELY = (1 << 12),
 };
 
 int
@@ -325,6 +346,12 @@ gbm_bo_map(struct gbm_bo *bo,
            uint32_t x, uint32_t y, uint32_t width, uint32_t height,
            uint32_t flags, uint32_t *stride, void **map_data);
 
+// Neverware: gbm_bo_map2 shim [OVER-12403]
+void *
+gbm_bo_map2(struct gbm_bo *bo,
+            uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+            uint32_t flags, uint32_t *stride, void **map_data, int plane);
+
 void
 gbm_bo_unmap(struct gbm_bo *bo, void *map_data);
 
@@ -366,6 +393,35 @@ gbm_bo_get_plane_count(struct gbm_bo *bo);
 
 union gbm_bo_handle
 gbm_bo_get_handle_for_plane(struct gbm_bo *bo, int plane);
+
+// Neverware, copied from minigbm
+
+uint64_t
+gbm_bo_get_format_modifier(struct gbm_bo *bo);
+
+size_t
+gbm_bo_get_num_planes(struct gbm_bo *bo);
+
+// may not be needed?
+union gbm_bo_handle
+gbm_bo_get_plane_handle(struct gbm_bo *bo, size_t plane);
+
+int
+gbm_bo_get_plane_fd(struct gbm_bo *bo, size_t plane);
+
+uint32_t
+gbm_bo_get_plane_offset(struct gbm_bo *bo, size_t plane);
+
+uint32_t
+gbm_bo_get_plane_size(struct gbm_bo *bo, size_t plane);
+
+uint32_t
+gbm_bo_get_plane_stride(struct gbm_bo *bo, size_t plane);
+
+uint64_t
+gbm_bo_get_plane_format_modifier(struct gbm_bo *bo, size_t plane);
+
+// (end) Neverware
 
 int
 gbm_bo_write(struct gbm_bo *bo, const void *buf, size_t count);
