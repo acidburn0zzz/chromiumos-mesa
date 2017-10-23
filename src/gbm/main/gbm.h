@@ -365,6 +365,35 @@ gbm_bo_get_plane_count(struct gbm_bo *bo);
 union gbm_bo_handle
 gbm_bo_get_handle_for_plane(struct gbm_bo *bo, int plane);
 
+// Neverware, copied from minigbm
+
+uint64_t
+gbm_bo_get_format_modifier(struct gbm_bo *bo);
+
+size_t
+gbm_bo_get_num_planes(struct gbm_bo *bo);
+
+// may not be needed?
+union gbm_bo_handle
+gbm_bo_get_plane_handle(struct gbm_bo *bo, size_t plane);
+
+int
+gbm_bo_get_plane_fd(struct gbm_bo *bo, size_t plane);
+
+uint32_t
+gbm_bo_get_plane_offset(struct gbm_bo *bo, size_t plane);
+
+uint32_t
+gbm_bo_get_plane_size(struct gbm_bo *bo, size_t plane);
+
+uint32_t
+gbm_bo_get_plane_stride(struct gbm_bo *bo, size_t plane);
+
+uint64_t
+gbm_bo_get_plane_format_modifier(struct gbm_bo *bo, size_t plane);
+
+// (end) Neverware
+
 int
 gbm_bo_write(struct gbm_bo *bo, const void *buf, size_t count);
 
