@@ -679,6 +679,7 @@ static struct pipe_sampler_view *virgl_create_sampler_view(struct pipe_context *
    grview->base.context = ctx;
    pipe_resource_reference(&grview->base.texture, texture);
    grview->handle = handle;
+   grview->base.sampler_view_destroy = ctx->sampler_view_destroy;
    return &grview->base;
 }
 

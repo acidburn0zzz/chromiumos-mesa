@@ -156,7 +156,7 @@ pipe_sampler_view_reference(struct pipe_sampler_view **ptr, struct pipe_sampler_
 
    if (pipe_reference_described(&(*ptr)->reference, &view->reference,
                                 (debug_reference_descriptor)debug_describe_sampler_view))
-      old_view->context->sampler_view_destroy(old_view->context, old_view);
+      old_view->sampler_view_destroy(old_view->context, old_view);
    *ptr = view;
 }
 

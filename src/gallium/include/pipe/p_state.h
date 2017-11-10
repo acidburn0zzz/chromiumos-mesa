@@ -459,6 +459,9 @@ struct pipe_sampler_view
          unsigned size;     /**< size of the readable sub-range in bytes */
       } buf;
    } u;
+
+   void (*sampler_view_destroy)(struct pipe_context *ctx,
+                                struct pipe_sampler_view *view);
 };
 
 
