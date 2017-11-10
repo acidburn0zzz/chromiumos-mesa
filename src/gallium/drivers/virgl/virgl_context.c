@@ -221,6 +221,7 @@ static struct pipe_surface *virgl_create_surface(struct pipe_context *ctx,
    }
    virgl_encoder_create_surface(vctx, handle, res, &surf->base);
    surf->handle = handle;
+   surf->base.surface_destroy = ctx->surface_destroy;
    return &surf->base;
 }
 

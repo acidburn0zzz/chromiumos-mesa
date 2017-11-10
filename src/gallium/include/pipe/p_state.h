@@ -427,6 +427,9 @@ struct pipe_surface
    uint16_t height;              /**< logical height in pixels */
 
    union pipe_surface_desc u;
+
+   void (*surface_destroy)(struct pipe_context *ctx,
+                           struct pipe_surface *);
 };
 
 

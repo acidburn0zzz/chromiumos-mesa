@@ -110,7 +110,7 @@ pipe_surface_reference(struct pipe_surface **ptr, struct pipe_surface *surf)
 
    if (pipe_reference_described(&(*ptr)->reference, &surf->reference, 
                                 (debug_reference_descriptor)debug_describe_surface))
-      old_surf->context->surface_destroy(old_surf->context, old_surf);
+      old_surf->surface_destroy(old_surf->context, old_surf);
    *ptr = surf;
 }
 
