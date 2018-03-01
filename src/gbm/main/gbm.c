@@ -773,11 +773,11 @@ gbm_bo_get_plane_stride(struct gbm_bo *bo, size_t plane)
 GBM_EXPORT uint64_t
 gbm_bo_get_plane_format_modifier(struct gbm_bo *bo, size_t plane)
 {
-   return 0;
+   return gbm_bo_get_modifier(bo);
 }
 
 GBM_EXPORT uint64_t
 gbm_bo_get_format_modifier(struct gbm_bo *bo)
 {
-  return gbm_bo_get_plane_format_modifier(bo, 0);
+   return gbm_bo_get_modifier(bo);
 }
