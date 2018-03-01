@@ -737,13 +737,13 @@ gbm_format_get_name(uint32_t gbm_format, struct gbm_format_name_desc *desc)
 GBM_EXPORT size_t
 gbm_bo_get_num_planes(struct gbm_bo *bo)
 {
-   return 1;
+   return gbm_bo_get_plane_count(bo);
 }
 
 GBM_EXPORT union gbm_bo_handle
 gbm_bo_get_plane_handle(struct gbm_bo *bo, size_t plane)
 {
-   return bo->handle;
+   return gbm_bo_get_handle_for_plane(bo, plane);
 }
 
 GBM_EXPORT int
@@ -755,7 +755,7 @@ gbm_bo_get_plane_fd(struct gbm_bo *bo, size_t plane)
 GBM_EXPORT uint32_t
 gbm_bo_get_plane_offset(struct gbm_bo *bo, size_t plane)
 {
-   return 0;
+   return gbm_bo_get_offset(bo, plane);
 }
 
 GBM_EXPORT uint32_t
@@ -767,7 +767,7 @@ gbm_bo_get_plane_size(struct gbm_bo *bo, size_t plane)
 GBM_EXPORT uint32_t
 gbm_bo_get_plane_stride(struct gbm_bo *bo, size_t plane)
 {
-   return bo->stride;
+   return gbm_bo_get_stride_for_plane(bo, plane);
 }
 
 GBM_EXPORT uint64_t
