@@ -505,3 +505,63 @@ gbm_surface_has_free_buffers(struct gbm_surface *surf)
 {
    return surf->gbm->surface_has_free_buffers(surf);
 }
+
+
+GBM_EXPORT size_t
+gbm_bo_get_num_planes(struct gbm_bo *bo)
+{
+   return 1;
+}
+
+GBM_EXPORT union gbm_bo_handle
+gbm_bo_get_plane_handle(struct gbm_bo *bo, size_t plane)
+{
+   return bo->handle;
+}
+
+GBM_EXPORT int
+gbm_bo_get_plane_fd(struct gbm_bo *bo, size_t plane)
+{
+   return bo->gbm->bo_get_fd(bo);
+}
+
+GBM_EXPORT uint32_t
+gbm_bo_get_plane_offset(struct gbm_bo *bo, size_t plane)
+{
+   return 0;
+}
+
+GBM_EXPORT uint32_t
+gbm_bo_get_plane_size(struct gbm_bo *bo, size_t plane)
+{
+   return 0;
+}
+
+GBM_EXPORT uint32_t
+gbm_bo_get_plane_stride(struct gbm_bo *bo, size_t plane)
+{
+   return bo->stride;
+}
+
+GBM_EXPORT uint64_t
+gbm_bo_get_plane_format_modifier(struct gbm_bo *bo, size_t plane)
+{
+   return 0;
+}
+
+GBM_EXPORT struct gbm_bo *gbm_bo_create_with_modifiers(
+      struct gbm_device *gbm,
+      uint32_t width,
+      uint32_t height,
+      uint32_t format,
+      const uint64_t *modifiers,
+      uint32_t count)
+{
+   return NULL;
+}
+
+GBM_EXPORT uint64_t
+gbm_bo_get_format_modifier(struct gbm_bo *bo)
+{
+  return gbm_bo_get_plane_format_modifier(bo, 0);
+}
