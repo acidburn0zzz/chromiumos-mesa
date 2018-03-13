@@ -2321,7 +2321,10 @@ _mesa_base_tex_format(const struct gl_context *ctx, GLint internalFormat)
 
    /* GL_BGRA can be an internal format *only* in OpenGL ES (1.x or 2.0).
     */
-   if (_mesa_is_gles(ctx)) {
+   /* TODO(neverware): forcing this to true because somehow we occasionally
+    * get ctx->API == 0 (the compatibility profile) here. This breaks BGRA
+    * mipmaps. [OVER-6205] */
+   if (true /*_mesa_is_gles(ctx)*/) {
       switch (internalFormat) {
       case GL_BGRA:
          return GL_RGBA;
