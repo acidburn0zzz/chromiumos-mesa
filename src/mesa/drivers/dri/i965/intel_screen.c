@@ -362,6 +362,10 @@ modifier_is_supported(const struct gen_device_info *devinfo,
       return false;
 
    if (modinfo->aux_usage == ISL_AUX_USAGE_CCS_E) {
+      /* Chrome doesn't handle CCS properly so don't allow it.
+       * OVER-6202.
+       */
+      return false;
       /* If INTEL_DEBUG=norbc is set, don't support any CCS_E modifiers */
       if (unlikely(INTEL_DEBUG & DEBUG_NO_RBC))
          return false;
