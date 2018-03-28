@@ -372,7 +372,7 @@ emit_sampler(struct i915_context *i915)
 static void
 validate_constants(struct i915_context *i915, unsigned *batch_space)
 {
-   int nr = i915->fs->num_constants ?
+   int nr = (i915->fs && i915->fs->num_constants) ?
       2 + 4*i915->fs->num_constants : 0;
 
    *batch_space = nr;
@@ -384,7 +384,7 @@ emit_constants(struct i915_context *i915)
    /* Collate the user-defined constants with the fragment shader's
     * immediates according to the constant_flags[] array.
     */
-   const uint nr = i915->fs->num_constants;
+   const uint nr = i915->fs ? i915->fs->num_constants : 0;
 
    assert(nr < I915_MAX_CONSTANT);
    if (nr) {
@@ -424,6 +424,10 @@ static void
 validate_program(struct i915_context *i915, unsigned *batch_space)
 {
    uint additional_size = 0;
+   if (!i915->fs) {
+      *batch_space = 0;
+      return;
+   }
 
    additional_size += i915->current.target_fixup_format ? 3 : 0;
 
@@ -436,6 +440,8 @@ emit_program(struct i915_context *i915)
 {
    uint additional_size = 0;
    uint i;
+   if (!i915->fs)
+      return;
 
    /* count how much additional space we'll need */
    validate_program(i915, &additional_size);
