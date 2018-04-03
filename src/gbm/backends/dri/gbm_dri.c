@@ -1033,15 +1033,13 @@ gbm_dri_bo_import(struct gbm_device *gbm,
       }
       /* Minigbm supports passing in per-plane modifiers.
        * Mesa does not support this.
-       * Notify the caller of this limitation by checking
-       * the passed in modifiers.
+       * Warn the caller of this limitation by checking
+       * the passed in modifiers. It will just use
+       * the modifier from the first plane.
        */
       for (i = 1; i < num_fds; i++) {
-         if (fd_data->format_modifiers[i] != fd_data->format_modifiers[0]) {
+         if (fd_data->format_modifiers[i] != fd_data->format_modifiers[0])
             fprintf(stderr, "Format modifiers differ between planes.\n");
-            errno = EINVAL;
-            return NULL;
-         }
       }
 
       /* GBM's GBM_FORMAT_* tokens are a strict superset of the DRI FourCC
