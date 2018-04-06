@@ -1025,9 +1025,9 @@ gbm_dri_bo_import(struct gbm_device *gbm,
       /* Determine the number of passed in planes. */
       for (i = 0; i < GBM_MAX_PLANES; i++) {
          /* minigbm checks a table of format to number of planes.
-          * Here, instead just consider this list 0 or -1 terminated.
+          * Here, instead just consider this list -1 terminated.
           */
-         if (fd_data->fds[i] == 0 && fd_data->fds[i] != -1)
+         if (fd_data->fds[i] == -1)
             break;
          num_fds++;
       }
