@@ -86,6 +86,8 @@ static inline void set_dynamic_array(struct i915_context *i915,
 static void upload_MODES4(struct i915_context *i915)
 {
    unsigned modes4 = 0;
+   if (!i915->depth_stencil)
+      return;
 
    /* I915_NEW_STENCIL
     */
@@ -111,6 +113,8 @@ const struct i915_tracked_state i915_upload_MODES4 = {
 static void upload_BFO(struct i915_context *i915)
 {
    unsigned bfo[2];
+   if (!i915->depth_stencil)
+      return;
    bfo[0] = i915->depth_stencil->bfo[0];
    bfo[1] = i915->depth_stencil->bfo[1];
    /* I don't get it only allowed to set a ref mask when the enable bit is set? */
@@ -164,7 +168,11 @@ const struct i915_tracked_state i915_upload_BLENDCOLOR = {
  */
 static void upload_IAB(struct i915_context *i915)
 {
-   unsigned iab = i915->blend->iab;
+   unsigned iab;
+   if (!i915->blend)
+      return;
+
+   iab = i915->blend->iab;
 
    set_dynamic(i915, I915_DYNAMIC_IAB, iab);
 }
@@ -181,6 +189,8 @@ const struct i915_tracked_state i915_upload_IAB = {
  */
 static void upload_DEPTHSCALE(struct i915_context *i915)
 {
+   if (!i915->rasterizer)
+      return;
    set_dynamic_array(i915, I915_DYNAMIC_DEPTHSCALE_0,
                      &i915->rasterizer->ds[0].u, 2);
 }
@@ -207,6 +217,8 @@ const struct i915_tracked_state i915_upload_DEPTHSCALE = {
 static void upload_STIPPLE(struct i915_context *i915)
 {
    unsigned st[2];
+   if (!i915->rasterizer)
+      return;
 
    st[0] = _3DSTATE_STIPPLE;
    st[1] = 0;
@@ -251,6 +263,8 @@ const struct i915_tracked_state i915_upload_STIPPLE = {
  */
 static void upload_SCISSOR_ENABLE( struct i915_context *i915 )
 {
+   if (!i915->rasterizer)
+      return;
    set_dynamic(i915, I915_DYNAMIC_SC_ENA_0, i915->rasterizer->sc[0]);
 }
 
