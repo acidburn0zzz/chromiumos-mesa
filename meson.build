@@ -1037,6 +1037,7 @@ dep_libdrm_etnaviv = null_dep
 dep_libdrm_freedreno = null_dep
 dep_libdrm_intel = null_dep
 
+# TODO: amdgpu requires 2.4.91 and we are on 2.4.89
 _drm_amdgpu_ver = '2.4.91'
 _drm_radeon_ver = '2.4.71'
 _drm_nouveau_ver = '2.4.66'
