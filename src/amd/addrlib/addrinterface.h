@@ -2299,17 +2299,17 @@ ADDR_E_RETURNCODE ADDR_API AddrComputeDccInfo(
 
 /**
 ****************************************************************************************************
-*   ADDR_GET_MAX_ALIGNMENTS_OUTPUT
+*   ADDR_GET_MAX_ALINGMENTS_OUTPUT
 *
 *   @brief
 *       Output structure of AddrGetMaxAlignments
 ****************************************************************************************************
 */
-typedef struct _ADDR_GET_MAX_ALIGNMENTS_OUTPUT
+typedef struct _ADDR_GET_MAX_ALINGMENTS_OUTPUT
 {
     UINT_32 size;                   ///< Size of this structure in bytes
     UINT_32 baseAlign;              ///< Maximum base alignment in bytes
-} ADDR_GET_MAX_ALIGNMENTS_OUTPUT;
+} ADDR_GET_MAX_ALINGMENTS_OUTPUT;
 
 /**
 ****************************************************************************************************
@@ -2321,7 +2321,7 @@ typedef struct _ADDR_GET_MAX_ALIGNMENTS_OUTPUT
 */
 ADDR_E_RETURNCODE ADDR_API AddrGetMaxAlignments(
     ADDR_HANDLE                     hLib,
-    ADDR_GET_MAX_ALIGNMENTS_OUTPUT* pOut);
+    ADDR_GET_MAX_ALINGMENTS_OUTPUT* pOut);
 
 /**
 ****************************************************************************************************
@@ -2333,7 +2333,7 @@ ADDR_E_RETURNCODE ADDR_API AddrGetMaxAlignments(
 */
 ADDR_E_RETURNCODE ADDR_API AddrGetMaxMetaAlignments(
     ADDR_HANDLE                     hLib,
-    ADDR_GET_MAX_ALIGNMENTS_OUTPUT* pOut);
+    ADDR_GET_MAX_ALINGMENTS_OUTPUT* pOut);
 
 /**
 ****************************************************************************************************
