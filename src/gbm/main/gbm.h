@@ -229,6 +229,14 @@ enum gbm_bo_flags {
     * Buffer is linear, i.e. not tiled.
     */
    GBM_BO_USE_LINEAR = (1 << 4),
+
+   /* Flags used in minigbm that are not implemented
+    * with mesagbm. Stub them out so they don't have to
+    * be removed from the various users (chrome).
+    */
+   GBM_BO_USE_TEXTURING = 0,
+   GBM_BO_USE_CAMERA_WRITE = 0,
+   GBM_BO_USE_HW_VIDEO_DECODER = 0,
 };
 
 int
