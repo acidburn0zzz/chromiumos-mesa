@@ -192,7 +192,15 @@ int r600_sb_bytecode_process(struct r600_context *rctx,
 	// if conversion breaks the dependency tracking between CF_EMIT ops when it removes
 	// the phi nodes for SV_GEOMETRY_EMIT. Just disable it for GS
 	if ((sh->target != TARGET_GS && sh->target != TARGET_HS) || pshader->needs_scratch_space)
-		SB_RUN_PASS(if_conversion,		1);
+		// Neverware: disable this pass to fix graphics corruption on
+		// the iMac7,1 with RV610 graphics. I'm not particularly
+		// convinced that this pass is the "real" problem; by
+		// perturbing the shader I can get the bug to reproduce even
+		// with this pass disabled. However, for the non-artificial
+		// test cases where I've been able to reproduce the bug,
+		// removing this optimization pass does seem to fix the
+		// problem. [OVER-7164]
+		;//SB_RUN_PASS(if_conversion,		1);
 
 	// if_conversion breaks info about uses, but next pass (peephole)
 	// doesn't need it, so we can skip def/use update here
