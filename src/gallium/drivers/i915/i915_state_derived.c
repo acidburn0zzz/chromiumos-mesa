@@ -61,6 +61,9 @@ static void calculate_vertex_layout(struct i915_context *i915)
    boolean texCoords[I915_TEX_UNITS], colors[2], fog, needW, face;
    uint i;
    int src;
+   /* If called in clear, before the shader is set, do nothing. */
+   if (!fs)
+      return;
 
    memset(texCoords, 0, sizeof(texCoords));
    colors[0] = colors[1] = fog = needW = face = FALSE;

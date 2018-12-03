@@ -97,6 +97,8 @@ const struct i915_tracked_state i915_upload_S0S1 = {
 static void upload_S2S4(struct i915_context *i915)
 {
    unsigned LIS2, LIS4;
+   if (!i915->rasterizer)
+      return;
 
    /* I915_NEW_VERTEX_FORMAT
     */
@@ -125,6 +127,8 @@ const struct i915_tracked_state i915_upload_S2S4 = {
 static void upload_S5(struct i915_context *i915)
 {
    unsigned LIS5 = 0;
+   if (!i915->depth_stencil)
+      return;
 
    /* I915_NEW_DEPTH_STENCIL
     */
@@ -160,6 +164,8 @@ const struct i915_tracked_state i915_upload_S5 = {
 static void upload_S6(struct i915_context *i915)
 {
    unsigned LIS6 = (2 << S6_TRISTRIP_PV_SHIFT);
+   if (!i915->blend)
+      return;
 
    /* I915_NEW_FRAMEBUFFER
     */
