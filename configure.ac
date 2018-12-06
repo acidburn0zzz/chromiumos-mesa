@@ -1867,7 +1867,7 @@ for plat in $platforms; do
 
     drm)
         test "x$enable_gbm" = "xno" &&
-                AC_MSG_ERROR([EGL platform drm needs gbm])
+                AC_MSG_WARN([EGL platform drm needs gbm])
         DEFINES="$DEFINES -DHAVE_DRM_PLATFORM"
         ;;
 
