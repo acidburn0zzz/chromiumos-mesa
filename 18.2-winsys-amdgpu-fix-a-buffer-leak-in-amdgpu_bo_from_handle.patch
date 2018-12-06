@@ -1,0 +1,49 @@
+From patchwork Mon Nov 19 23:24:50 2018
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 8bit
+Subject: [1/2] winsys/amdgpu: fix a buffer leak in amdgpu_bo_from_handle
+From: =?UTF-8?q?Marek=20Ol=C5=A1=C3=A1k?= <maraeo@gmail.com>
+X-Patchwork-Id: 262760
+Message-Id: <20181119232451.26648-1-maraeo@gmail.com>
+To: mesa-dev@lists.freedesktop.org
+Date: Mon, 19 Nov 2018 18:24:50 -0500
+
+From: Marek Olšák <marek.olsak@amd.com>
+
+Cc: 18.2 18.3 <mesa-stable@lists.freedesktop.org>
+---
+ src/gallium/winsys/amdgpu/drm/amdgpu_bo.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/gallium/winsys/amdgpu/drm/amdgpu_bo.c b/src/gallium/winsys/amdgpu/drm/amdgpu_bo.c
+index f49fb47b80e..3ee38b8a79f 100644
+--- a/src/gallium/winsys/amdgpu/drm/amdgpu_bo.c
++++ b/src/gallium/winsys/amdgpu/drm/amdgpu_bo.c
+@@ -1303,20 +1303,26 @@ static struct pb_buffer *amdgpu_bo_from_handle(struct radeon_winsys *rws,
+ 
+    simple_mtx_lock(&ws->bo_export_table_lock);
+    bo = util_hash_table_get(ws->bo_export_table, result.buf_handle);
+ 
+    /* If the amdgpu_winsys_bo instance already exists, bump the reference
+     * counter and return it.
+     */
+    if (bo) {
+       p_atomic_inc(&bo->base.reference.count);
+       simple_mtx_unlock(&ws->bo_export_table_lock);
++
++      /* Release the buffer handle, because we don't need it anymore.
++       * This function is returning an existing buffer, which has its own
++       * handle.
++       */
++      amdgpu_bo_free(result.buf_handle);
+       return &bo->base;
+    }
+ 
+    /* Get initial domains. */
+    r = amdgpu_bo_query_info(result.buf_handle, &info);
+    if (r)
+       goto error;
+ 
+    r = amdgpu_va_range_alloc(ws->dev, amdgpu_gpu_va_range_general,
+                              result.alloc_size, 1 << 20, 0, &va, &va_handle,

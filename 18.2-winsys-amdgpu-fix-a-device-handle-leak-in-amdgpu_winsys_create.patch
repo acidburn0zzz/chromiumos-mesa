@@ -1,0 +1,49 @@
+From patchwork Mon Nov 19 23:24:51 2018
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 8bit
+Subject: [2/2] winsys/amdgpu: fix a device handle leak in amdgpu_winsys_create
+From: =?UTF-8?q?Marek=20Ol=C5=A1=C3=A1k?= <maraeo@gmail.com>
+X-Patchwork-Id: 262761
+Message-Id: <20181119232451.26648-2-maraeo@gmail.com>
+To: mesa-dev@lists.freedesktop.org
+Date: Mon, 19 Nov 2018 18:24:51 -0500
+
+From: Marek Olšák <marek.olsak@amd.com>
+
+Cc: 18.2 18.3 <mesa-stable@lists.freedesktop.org>
+---
+ src/gallium/winsys/amdgpu/drm/amdgpu_winsys.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/gallium/winsys/amdgpu/drm/amdgpu_winsys.c b/src/gallium/winsys/amdgpu/drm/amdgpu_winsys.c
+index f32bbd9d086..b20d702670d 100644
+--- a/src/gallium/winsys/amdgpu/drm/amdgpu_winsys.c
++++ b/src/gallium/winsys/amdgpu/drm/amdgpu_winsys.c
+@@ -273,20 +273,26 @@ amdgpu_winsys_create(int fd, const struct pipe_screen_config *config,
+       simple_mtx_unlock(&dev_tab_mutex);
+       fprintf(stderr, "amdgpu: amdgpu_device_initialize failed.\n");
+       return NULL;
+    }
+ 
+    /* Lookup a winsys if we have already created one for this device. */
+    ws = util_hash_table_get(dev_tab, dev);
+    if (ws) {
+       pipe_reference(NULL, &ws->reference);
+       simple_mtx_unlock(&dev_tab_mutex);
++
++      /* Release the device handle, because we don't need it anymore.
++       * This function is returning an existing winsys instance, which
++       * has its own device handle.
++       */
++      amdgpu_device_deinitialize(dev);
+       return &ws->base;
+    }
+ 
+    /* Create a new winsys. */
+    ws = CALLOC_STRUCT(amdgpu_winsys);
+    if (!ws)
+       goto fail;
+ 
+    ws->dev = dev;
+    ws->info.drm_major = drm_major;

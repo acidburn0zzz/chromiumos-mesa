@@ -1,0 +1,82 @@
+From patchwork Wed Oct 10 19:12:15 2018
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 8bit
+Subject: st/va: use provided sizes and coords for vlVaGetImage
+From: <boyuan.zhang@amd.com>
+X-Patchwork-Id: 255764
+Message-Id: <1539198735-15860-1-git-send-email-boyuan.zhang@amd.com>
+To: <mesa-dev@lists.freedesktop.org>
+Cc: ckoenig.leichtzumerken@gmail.com, mesa-stable@lists.freedesktop.org
+Date: Wed, 10 Oct 2018 15:12:15 -0400
+
+From: Boyuan Zhang <boyuan.zhang@amd.com>
+
+vlVaGetImage should respect the width, height, and coordinates x and y that
+passed in. Therefore, pipe_box should be created with the passed in values
+instead of surface width/height.
+
+v2: add input size check, return error when size out of bounds
+v3: fix the size check for vaimage
+v4: add size adjustment for x and y coordinates
+
+Signed-off-by: Boyuan Zhang <boyuan.zhang@amd.com>
+Cc: "18.2" <mesa-stable@lists.freedesktop.org>
+Reviewed-by: Leo Liu <leo.liu@amd.com>
+Reviewed-by: Ilia Mirkin <imirkin@alum.mit.edu>
+Acked-by: Christian König <christian.koenig@amd.com>
+---
+ src/gallium/state_trackers/va/image.c | 31 ++++++++++++++++++++++++++++---
+ 1 file changed, 28 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/state_trackers/va/image.c b/src/gallium/state_trackers/va/image.c
+index 3f892c9..807fc83 100644
+--- a/src/gallium/state_trackers/va/image.c
++++ b/src/gallium/state_trackers/va/image.c
+@@ -353,6 +353,23 @@ vlVaGetImage(VADriverContextP ctx, VASurfaceID surface, int x, int y,
+       return VA_STATUS_ERROR_INVALID_IMAGE;
+    }
+ 
++   if (x < 0 || y < 0) {
++      mtx_unlock(&drv->mutex);
++      return VA_STATUS_ERROR_INVALID_PARAMETER;
++   }
++
++   if (x + width > surf->templat.width ||
++       y + height > surf->templat.height) {
++      mtx_unlock(&drv->mutex);
++      return VA_STATUS_ERROR_INVALID_PARAMETER;
++   }
++
++   if (width > vaimage->width ||
++       height > vaimage->height) {
++      mtx_unlock(&drv->mutex);
++      return VA_STATUS_ERROR_INVALID_PARAMETER;
++   }
++
+    img_buf = handle_table_get(drv->htab, vaimage->buf);
+    if (!img_buf) {
+       mtx_unlock(&drv->mutex);
+@@ -400,11 +417,19 @@ vlVaGetImage(VADriverContextP ctx, VASurfaceID surface, int x, int y,
+    }
+ 
+    for (i = 0; i < vaimage->num_planes; i++) {
+-      unsigned width, height;
++      unsigned box_w = align(width, 2);
++      unsigned box_h = align(height, 2);
++      unsigned box_x = x & ~1;
++      unsigned box_y = y & ~1;
+       if (!views[i]) continue;
+-      vlVaVideoSurfaceSize(surf, i, &width, &height);
++      vl_video_buffer_adjust_size(&box_w, &box_h, i,
++                                  surf->templat.chroma_format,
++                                  surf->templat.interlaced);
++      vl_video_buffer_adjust_size(&box_x, &box_y, i,
++                                  surf->templat.chroma_format,
++                                  surf->templat.interlaced);
+       for (j = 0; j < views[i]->texture->array_size; ++j) {
+-         struct pipe_box box = {0, 0, j, width, height, 1};
++         struct pipe_box box = {box_x, box_y, j, box_w, box_h, 1};
+          struct pipe_transfer *transfer;
+          uint8_t *map;
+          map = drv->pipe->transfer_map(drv->pipe, views[i]->texture, 0,
