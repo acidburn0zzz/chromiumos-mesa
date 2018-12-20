@@ -751,6 +751,45 @@ gbm_dri_bo_get_handle_for_plane(struct gbm_bo *_bo, int plane)
 }
 
 static uint32_t
+gbm_dri_bo_get_height(struct gbm_bo *_bo, int plane)
+{
+   struct gbm_dri_device *dri = gbm_dri_device(_bo->gbm);
+   struct gbm_dri_bo *bo = gbm_dri_bo(_bo);
+   __DRIimage *image;
+   int height = 0;
+
+   if (!dri->image || dri->image->base.version < 11 || !dri->image->fromPlanar) {
+      /* Preserve legacy behavior if plane is 0 */
+      if (plane == 0)
+         return _bo->height;
+
+      errno = ENOSYS;
+      return 0;
+   }
+
+   if (plane >= get_number_planes(dri, bo->image)) {
+      errno = EINVAL;
+      return 0;
+   }
+
+   if (bo->image == NULL) {
+      assert(plane == 0);
+      return _bo->height;
+   }
+
+   image = dri->image->fromPlanar(bo->image, plane, NULL);
+   if (image) {
+      dri->image->queryImage(image, __DRI_IMAGE_ATTRIB_HEIGHT, &height);
+      dri->image->destroyImage(image);
+   } else {
+      assert(plane == 0);
+      dri->image->queryImage(bo->image, __DRI_IMAGE_ATTRIB_HEIGHT, &height);
+   }
+
+   return (uint32_t)height;
+}
+
+static uint32_t
 gbm_dri_bo_get_stride(struct gbm_bo *_bo, int plane)
 {
    struct gbm_dri_device *dri = gbm_dri_device(_bo->gbm);
@@ -1374,6 +1413,7 @@ dri_device_create(int fd)
    dri->base.bo_get_fd = gbm_dri_bo_get_fd;
    dri->base.bo_get_planes = gbm_dri_bo_get_planes;
    dri->base.bo_get_handle = gbm_dri_bo_get_handle_for_plane;
+   dri->base.bo_get_height = gbm_dri_bo_get_height;
    dri->base.bo_get_stride = gbm_dri_bo_get_stride;
    dri->base.bo_get_offset = gbm_dri_bo_get_offset;
    dri->base.bo_get_modifier = gbm_dri_bo_get_modifier;

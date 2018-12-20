@@ -781,7 +781,8 @@ gbm_bo_get_plane_offset(struct gbm_bo *bo, size_t plane)
 GBM_EXPORT uint32_t
 gbm_bo_get_plane_size(struct gbm_bo *bo, size_t plane)
 {
-   return 0;
+   return (gbm_bo_get_stride_for_plane(bo, plane) *
+           bo->gbm->bo_get_height(bo, plane));
 }
 
 GBM_EXPORT uint32_t
