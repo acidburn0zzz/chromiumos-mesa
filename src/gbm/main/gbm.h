@@ -236,6 +236,7 @@ enum gbm_bo_flags {
     */
    GBM_BO_USE_TEXTURING = 0,
    GBM_BO_USE_CAMERA_WRITE = 0,
+   GBM_BO_USE_CAMERA_READ = 0,
    GBM_BO_USE_HW_VIDEO_DECODER = 0,
 };
 
