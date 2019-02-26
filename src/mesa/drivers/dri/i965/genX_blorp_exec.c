@@ -197,7 +197,7 @@ blorp_vf_invalidate_for_vb_48b_transitions(struct blorp_batch *batch,
                                            const struct blorp_address *addrs,
                                            unsigned num_vbs)
 {
-#if GEN_GEN >= 8
+#if GEN_GEN >= 8 && GEN_GEN < 11
    struct brw_context *brw = batch->driver_batch;
    bool need_invalidate = false;
 
@@ -213,7 +213,7 @@ blorp_vf_invalidate_for_vb_48b_transitions(struct blorp_batch *batch,
    }
 
    if (need_invalidate) {
-      brw_emit_pipe_control_flush(brw, PIPE_CONTROL_VF_CACHE_INVALIDATE);
+      brw_emit_pipe_control_flush(brw, PIPE_CONTROL_VF_CACHE_INVALIDATE | PIPE_CONTROL_CS_STALL);
    }
 #endif
 }

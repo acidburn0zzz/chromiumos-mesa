@@ -52,7 +52,9 @@ enum radeon_bo_layout {
 enum radeon_bo_domain { /* bitfield */
     RADEON_DOMAIN_GTT  = 2,
     RADEON_DOMAIN_VRAM = 4,
-    RADEON_DOMAIN_VRAM_GTT = RADEON_DOMAIN_VRAM | RADEON_DOMAIN_GTT
+    RADEON_DOMAIN_VRAM_GTT = RADEON_DOMAIN_VRAM | RADEON_DOMAIN_GTT,
+    RADEON_DOMAIN_GDS = 8,
+    RADEON_DOMAIN_OA = 16,
 };
 
 enum radeon_bo_flag { /* bitfield */
@@ -364,6 +366,7 @@ struct radeon_winsys {
      */
     struct pb_buffer *(*buffer_from_handle)(struct radeon_winsys *ws,
                                             struct winsys_handle *whandle,
+                                            unsigned vm_alignment,
                                             unsigned *stride, unsigned *offset);
 
     /**

@@ -107,8 +107,8 @@ dnl LLVM versions
 LLVM_REQUIRED_GALLIUM=3.3.0
 LLVM_REQUIRED_OPENCL=3.9.0
 LLVM_REQUIRED_R600=3.9.0
-LLVM_REQUIRED_RADEONSI=6.0.0
-LLVM_REQUIRED_RADV=6.0.0
+LLVM_REQUIRED_RADEONSI=7.0.0
+LLVM_REQUIRED_RADV=7.0.0
 LLVM_REQUIRED_SWR=6.0.0
 
 dnl Check for progs
@@ -1716,6 +1716,8 @@ xdri)
             if test x"$enable_dri" = xyes; then
                dri_modules="$dri_modules xcb-dri2 >= $XCBDRI2_REQUIRED"
             fi
+
+            dri_modules="$dri_modules xxf86vm"
         fi
         if test x"$dri_platform" = xapple ; then
             DEFINES="$DEFINES -DGLX_USE_APPLEGL"
@@ -1724,8 +1726,6 @@ xdri)
             DEFINES="$DEFINES -DGLX_USE_WINDOWSGL"
         fi
     fi
-
-    dri_modules="$dri_modules xxf86vm"
 
     PKG_CHECK_MODULES([DRIGL], [$dri_modules])
     GL_PC_REQ_PRIV="$GL_PC_REQ_PRIV $dri_modules"
@@ -2903,6 +2903,7 @@ if test "x$enable_llvm" = xyes; then
     LLVM_LDFLAGS=`$LLVM_CONFIG --ldflags`
     LLVM_CFLAGS=$LLVM_CPPFLAGS   # CPPFLAGS seem to be sufficient
     LLVM_CXXFLAGS=`strip_unwanted_llvm_flags "$LLVM_CONFIG --cxxflags"`
+    LLVM_CXXFLAGS="$CXX11_CXXFLAGS $LLVM_CXXFLAGS"
 
     dnl Set LLVM_LIBS - This is done after the driver configuration so
     dnl that drivers can add additional components to LLVM_COMPONENTS.

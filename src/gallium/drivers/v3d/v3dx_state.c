@@ -30,6 +30,7 @@
 #include "util/u_memory.h"
 #include "util/u_half.h"
 #include "util/u_helpers.h"
+#include "util/u_upload_mgr.h"
 
 #include "v3d_context.h"
 #include "v3d_tiling.h"
@@ -404,11 +405,11 @@ v3d_vertex_state_create(struct pipe_context *pctx, unsigned num_elements,
         /* Set up the default attribute values in case any of the vertex
          * elements use them.
          */
-        so->default_attribute_values = v3d_bo_alloc(v3d->screen,
-                                                    VC5_MAX_ATTRIBUTES *
-                                                    4 * sizeof(float),
-                                                    "default_attributes");
-        uint32_t *attrs = v3d_bo_map(so->default_attribute_values);
+        uint32_t *attrs;
+        u_upload_alloc(v3d->state_uploader, 0,
+                       VC5_MAX_ATTRIBUTES * 4 * sizeof(float), 16,
+                       &so->defaults_offset, &so->defaults, (void **)&attrs);
+
         for (int i = 0; i < VC5_MAX_ATTRIBUTES; i++) {
                 attrs[i * 4 + 0] = 0;
                 attrs[i * 4 + 1] = 0;
@@ -421,6 +422,7 @@ v3d_vertex_state_create(struct pipe_context *pctx, unsigned num_elements,
                 }
         }
 
+        u_upload_unmap(v3d->state_uploader);
         return so;
 }
 
@@ -429,7 +431,7 @@ v3d_vertex_state_delete(struct pipe_context *pctx, void *hwcso)
 {
         struct v3d_vertex_stateobj *so = hwcso;
 
-        v3d_bo_unreference(&so->default_attribute_values);
+        pipe_resource_reference(&so->defaults, NULL);
         free(so);
 }
 
@@ -498,24 +500,6 @@ v3d_set_framebuffer_state(struct pipe_context *pctx,
         }
 
         v3d->dirty |= VC5_DIRTY_FRAMEBUFFER;
-}
-
-static struct v3d_texture_stateobj *
-v3d_get_stage_tex(struct v3d_context *v3d, enum pipe_shader_type shader)
-{
-        switch (shader) {
-        case PIPE_SHADER_FRAGMENT:
-                v3d->dirty |= VC5_DIRTY_FRAGTEX;
-                return &v3d->fragtex;
-                break;
-        case PIPE_SHADER_VERTEX:
-                v3d->dirty |= VC5_DIRTY_VERTTEX;
-                return &v3d->verttex;
-                break;
-        default:
-                fprintf(stderr, "Unknown shader target %d\n", shader);
-                abort();
-        }
 }
 
 static uint32_t translate_wrap(uint32_t pipe_wrap, bool using_nearest)
@@ -642,7 +626,7 @@ v3d_sampler_states_bind(struct pipe_context *pctx,
                         unsigned nr, void **hwcso)
 {
         struct v3d_context *v3d = v3d_context(pctx);
-        struct v3d_texture_stateobj *stage_tex = v3d_get_stage_tex(v3d, shader);
+        struct v3d_texture_stateobj *stage_tex = &v3d->tex[shader];
 
         assert(start == 0);
         unsigned i;
@@ -692,6 +676,69 @@ translate_swizzle(unsigned char pipe_swizzle)
 }
 #endif
 
+static void
+v3d_setup_texture_shader_state(struct V3DX(TEXTURE_SHADER_STATE) *tex,
+                               struct pipe_resource *prsc,
+                               int base_level, int last_level,
+                               int first_layer, int last_layer)
+{
+        struct v3d_resource *rsc = v3d_resource(prsc);
+        int msaa_scale = prsc->nr_samples > 1 ? 2 : 1;
+
+        tex->image_width = prsc->width0 * msaa_scale;
+        tex->image_height = prsc->height0 * msaa_scale;
+
+#if V3D_VERSION >= 40
+        /* On 4.x, the height of a 1D texture is redefined to be the
+         * upper 14 bits of the width (which is only usable with txf).
+         */
+        if (prsc->target == PIPE_TEXTURE_1D ||
+            prsc->target == PIPE_TEXTURE_1D_ARRAY) {
+                tex->image_height = tex->image_width >> 14;
+        }
+#endif
+
+        if (prsc->target == PIPE_TEXTURE_3D) {
+                tex->image_depth = prsc->depth0;
+        } else {
+                tex->image_depth = (last_layer - first_layer) + 1;
+        }
+
+        tex->base_level = base_level;
+#if V3D_VERSION >= 40
+        tex->max_level = last_level;
+        /* Note that we don't have a job to reference the texture's sBO
+         * at state create time, so any time this sampler view is used
+         * we need to add the texture to the job.
+         */
+        tex->texture_base_pointer =
+                cl_address(NULL,
+                           rsc->bo->offset +
+                           v3d_layer_offset(prsc, 0, first_layer));
+#endif
+        tex->array_stride_64_byte_aligned = rsc->cube_map_stride / 64;
+
+        /* Since other platform devices may produce UIF images even
+         * when they're not big enough for V3D to assume they're UIF,
+         * we force images with level 0 as UIF to be always treated
+         * that way.
+         */
+        tex->level_0_is_strictly_uif =
+                (rsc->slices[0].tiling == VC5_TILING_UIF_XOR ||
+                 rsc->slices[0].tiling == VC5_TILING_UIF_NO_XOR);
+        tex->level_0_xor_enable = (rsc->slices[0].tiling == VC5_TILING_UIF_XOR);
+
+        if (tex->level_0_is_strictly_uif)
+                tex->level_0_ub_pad = rsc->slices[0].ub_pad;
+
+#if V3D_VERSION >= 40
+        if (tex->uif_xor_disable ||
+            tex->level_0_is_strictly_uif) {
+                tex->extended = true;
+        }
+#endif /* V3D_VERSION >= 40 */
+}
+
 static struct pipe_sampler_view *
 v3d_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                         const struct pipe_sampler_view *cso)
@@ -726,61 +773,71 @@ v3d_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
         so->base.reference.count = 1;
         so->base.context = pctx;
 
-        int msaa_scale = prsc->nr_samples > 1 ? 2 : 1;
+        /* V3D still doesn't support sampling from raster textures, so we will
+         * have to copy to a temporary tiled texture.
+         */
+        if (!rsc->tiled && !(prsc->target == PIPE_TEXTURE_1D ||
+                             prsc->target == PIPE_TEXTURE_1D_ARRAY)) {
+                struct v3d_resource *shadow_parent = rsc;
+                struct pipe_resource tmpl = {
+                        .target = prsc->target,
+                        .format = prsc->format,
+                        .width0 = u_minify(prsc->width0,
+                                           cso->u.tex.first_level),
+                        .height0 = u_minify(prsc->height0,
+                                            cso->u.tex.first_level),
+                        .depth0 = 1,
+                        .array_size = 1,
+                        .bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET,
+                        .last_level = cso->u.tex.last_level - cso->u.tex.first_level,
+                        .nr_samples = prsc->nr_samples,
+                };
 
+                /* Create the shadow texture.  The rest of the sampler view
+                 * setup will use the shadow.
+                 */
+                prsc = v3d_resource_create(pctx->screen, &tmpl);
+                if (!prsc) {
+                        free(so);
+                        return NULL;
+                }
+                rsc = v3d_resource(prsc);
+
+                /* Flag it as needing update of the contents from the parent. */
+                rsc->writes = shadow_parent->writes - 1;
+                assert(rsc->tiled);
+
+                so->texture = prsc;
+        } else {
+                pipe_resource_reference(&so->texture, prsc);
+        }
+
+        void *map;
 #if V3D_VERSION >= 40
         so->bo = v3d_bo_alloc(v3d->screen,
                               cl_packet_length(TEXTURE_SHADER_STATE), "sampler");
-        void *map = v3d_bo_map(so->bo);
-
-        v3dx_pack(map, TEXTURE_SHADER_STATE, tex) {
+        map = v3d_bo_map(so->bo);
 #else /* V3D_VERSION < 40 */
         STATIC_ASSERT(sizeof(so->texture_shader_state) >=
                       cl_packet_length(TEXTURE_SHADER_STATE));
-        v3dx_pack(&so->texture_shader_state, TEXTURE_SHADER_STATE, tex) {
+        map = &so->texture_shader_state;
 #endif
 
-                tex.image_width = prsc->width0 * msaa_scale;
-                tex.image_height = prsc->height0 * msaa_scale;
-
-#if V3D_VERSION >= 40
-                /* On 4.x, the height of a 1D texture is redefined to be the
-                 * upper 14 bits of the width (which is only usable with txf).
-                 */
-                if (prsc->target == PIPE_TEXTURE_1D ||
-                    prsc->target == PIPE_TEXTURE_1D_ARRAY) {
-                        tex.image_height = tex.image_width >> 14;
-                }
-#endif
-
-                if (prsc->target == PIPE_TEXTURE_3D) {
-                        tex.image_depth = prsc->depth0;
-                } else {
-                        tex.image_depth = (cso->u.tex.last_layer -
-                                           cso->u.tex.first_layer) + 1;
-                }
+        v3dx_pack(map, TEXTURE_SHADER_STATE, tex) {
+                v3d_setup_texture_shader_state(&tex, prsc,
+                                               cso->u.tex.first_level,
+                                               cso->u.tex.last_level,
+                                               cso->u.tex.first_layer,
+                                               cso->u.tex.last_layer);
 
                 tex.srgb = util_format_is_srgb(cso->format);
 
-                tex.base_level = cso->u.tex.first_level;
 #if V3D_VERSION >= 40
-                tex.max_level = cso->u.tex.last_level;
-                /* Note that we don't have a job to reference the texture's sBO
-                 * at state create time, so any time this sampler view is used
-                 * we need to add the texture to the job.
-                 */
-                tex.texture_base_pointer = cl_address(NULL,
-                                                      rsc->bo->offset +
-                                                      rsc->slices[0].offset +
-                                                      cso->u.tex.first_layer *
-                                                      rsc->cube_map_stride),
-
                 tex.swizzle_r = translate_swizzle(so->swizzle[0]);
                 tex.swizzle_g = translate_swizzle(so->swizzle[1]);
                 tex.swizzle_b = translate_swizzle(so->swizzle[2]);
                 tex.swizzle_a = translate_swizzle(so->swizzle[3]);
 #endif
-                tex.array_stride_64_byte_aligned = rsc->cube_map_stride / 64;
 
                 if (prsc->nr_samples > 1 && V3D_VERSION < 40) {
                         /* Using texture views to reinterpret formats on our
@@ -827,30 +884,8 @@ v3d_create_sampler_view(struct pipe_context *pctx, struct pipe_resource *prsc,
                         tex.srgb = false;
                 } else {
                         tex.texture_type = v3d_get_tex_format(&screen->devinfo,
-                                                              cso->format);
+                                                               cso->format);
                 }
-
-                /* Since other platform devices may produce UIF images even
-                 * when they're not big enough for V3D to assume they're UIF,
-                 * we force images with level 0 as UIF to be always treated
-                 * that way.
-                 */
-                tex.level_0_is_strictly_uif = (rsc->slices[0].tiling ==
-                                               VC5_TILING_UIF_XOR ||
-                                               rsc->slices[0].tiling ==
-                                               VC5_TILING_UIF_NO_XOR);
-                tex.level_0_xor_enable = (rsc->slices[0].tiling ==
-                                          VC5_TILING_UIF_XOR);
-
-                if (tex.level_0_is_strictly_uif)
-                        tex.level_0_ub_pad = rsc->slices[0].ub_pad;
-
-#if V3D_VERSION >= 40
-                if (tex.uif_xor_disable ||
-                    tex.level_0_is_strictly_uif) {
-                        tex.extended = true;
-                }
-#endif /* V3D_VERSION >= 40 */
         };
 
         return &so->base;
@@ -864,6 +899,7 @@ v3d_sampler_view_destroy(struct pipe_context *pctx,
 
         v3d_bo_unreference(&sview->bo);
         pipe_resource_reference(&psview->texture, NULL);
+        pipe_resource_reference(&sview->texture, NULL);
         free(psview);
 }
 
@@ -874,7 +910,7 @@ v3d_set_sampler_views(struct pipe_context *pctx,
                       struct pipe_sampler_view **views)
 {
         struct v3d_context *v3d = v3d_context(pctx);
-        struct v3d_texture_stateobj *stage_tex = v3d_get_stage_tex(v3d, shader);
+        struct v3d_texture_stateobj *stage_tex = &v3d->tex[shader];
         unsigned i;
         unsigned new_nr = 0;
 

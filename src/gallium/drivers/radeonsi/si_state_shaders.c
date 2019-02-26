@@ -337,10 +337,10 @@ void si_destroy_shader_cache(struct si_screen *sscreen)
 /* SHADER STATES */
 
 static void si_set_tesseval_regs(struct si_screen *sscreen,
-				 struct si_shader_selector *tes,
+				 const struct si_shader_selector *tes,
 				 struct si_pm4_state *pm4)
 {
-	struct tgsi_shader_info *info = &tes->info;
+	const struct tgsi_shader_info *info = &tes->info;
 	unsigned tes_prim_mode = info->properties[TGSI_PROPERTY_TES_PRIM_MODE];
 	unsigned tes_spacing = info->properties[TGSI_PROPERTY_TES_SPACING];
 	bool tes_vertex_order_cw = info->properties[TGSI_PROPERTY_TES_VERTEX_ORDER_CW];
@@ -464,12 +464,7 @@ static struct si_pm4_state *si_get_shader_pm4_state(struct si_shader *shader)
 static unsigned si_get_num_vs_user_sgprs(unsigned num_always_on_user_sgprs)
 {
 	/* Add the pointer to VBO descriptors. */
-	if (HAVE_32BIT_POINTERS) {
-		return num_always_on_user_sgprs + 1;
-	} else {
-		assert(num_always_on_user_sgprs % 2 == 0);
-		return num_always_on_user_sgprs + 2;
-	}
+	return num_always_on_user_sgprs + 1;
 }
 
 static void si_shader_ls(struct si_screen *sscreen, struct si_shader *shader)
@@ -2243,7 +2238,7 @@ static void *si_create_shader_selector(struct pipe_context *ctx,
 		sel->nir = state->ir.nir;
 
 		si_nir_scan_shader(sel->nir, &sel->info);
-		si_nir_scan_tess_ctrl(sel->nir, &sel->info, &sel->tcs_info);
+		si_nir_scan_tess_ctrl(sel->nir, &sel->tcs_info);
 
 		si_lower_nir(sel);
 	}

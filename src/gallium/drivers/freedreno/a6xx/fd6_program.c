@@ -121,7 +121,7 @@ fd6_emit_shader(struct fd_ringbuffer *ring, const struct ir3_shader_variant *so)
 		OUT_RING(ring, CP_LOAD_STATE6_1_EXT_SRC_ADDR(0));
 		OUT_RING(ring, CP_LOAD_STATE6_2_EXT_SRC_ADDR_HI(0));
 	} else {
-		OUT_RELOC(ring, so->bo, 0, 0, 0);
+		OUT_RELOCD(ring, so->bo, 0, 0, 0);
 	}
 
 	/* for how clever coverity is, it is sometimes rather dull, and
@@ -402,7 +402,7 @@ setup_stateobj(struct fd_ringbuffer *ring,
 	OUT_RING(ring, A6XX_SP_VS_CTRL_REG0_THREADSIZE(fssz) |
 			A6XX_SP_VS_CTRL_REG0_FULLREGFOOTPRINT(s[VS].i->max_reg + 1) |
 			A6XX_SP_VS_CTRL_REG0_MERGEDREGS |
-			A6XX_SP_VS_CTRL_REG0_BRANCHSTACK(0x3) |  // XXX need to figure this out somehow..
+			A6XX_SP_VS_CTRL_REG0_BRANCHSTACK(s[VS].v->branchstack) |
 			COND(s[VS].v->num_samp > 0, A6XX_SP_VS_CTRL_REG0_PIXLODENABLE));
 
 	struct ir3_shader_linkage l = {0};
@@ -524,7 +524,7 @@ setup_stateobj(struct fd_ringbuffer *ring,
 			0x1000000 |
 			A6XX_SP_FS_CTRL_REG0_FULLREGFOOTPRINT(s[FS].i->max_reg + 1) |
 			A6XX_SP_FS_CTRL_REG0_MERGEDREGS |
-			A6XX_SP_FS_CTRL_REG0_BRANCHSTACK(0x3) |  // XXX need to figure this out somehow..
+			A6XX_SP_FS_CTRL_REG0_BRANCHSTACK(s[FS].v->branchstack) |
 			COND(s[FS].v->num_samp > 0, A6XX_SP_FS_CTRL_REG0_PIXLODENABLE));
 
 	OUT_PKT4(ring, REG_A6XX_SP_UNKNOWN_A982, 1);

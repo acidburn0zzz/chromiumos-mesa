@@ -75,7 +75,7 @@ ac_llvm_context_init(struct ac_llvm_context *ctx,
 	ctx->i16 = LLVMIntTypeInContext(ctx->context, 16);
 	ctx->i32 = LLVMIntTypeInContext(ctx->context, 32);
 	ctx->i64 = LLVMIntTypeInContext(ctx->context, 64);
-	ctx->intptr = HAVE_32BIT_POINTERS ? ctx->i32 : ctx->i64;
+	ctx->intptr = ctx->i32;
 	ctx->f16 = LLVMHalfTypeInContext(ctx->context);
 	ctx->f32 = LLVMFloatTypeInContext(ctx->context);
 	ctx->f64 = LLVMDoubleTypeInContext(ctx->context);
@@ -1403,99 +1403,28 @@ ac_build_ddxy(struct ac_llvm_context *ctx,
 	      int idx,
 	      LLVMValueRef val)
 {
-	LLVMValueRef tl, trbl, args[2];
+	unsigned tl_lanes[4], trbl_lanes[4];
+	LLVMValueRef tl, trbl;
 	LLVMValueRef result;
 
-	if (HAVE_LLVM >= 0x0700) {
-		unsigned tl_lanes[4], trbl_lanes[4];
-
-		for (unsigned i = 0; i < 4; ++i) {
-			tl_lanes[i] = i & mask;
-			trbl_lanes[i] = (i & mask) + idx;
-		}
-
-		tl = ac_build_quad_swizzle(ctx, val,
-		                           tl_lanes[0], tl_lanes[1],
-		                           tl_lanes[2], tl_lanes[3]);
-		trbl = ac_build_quad_swizzle(ctx, val,
-		                             trbl_lanes[0], trbl_lanes[1],
-		                             trbl_lanes[2], trbl_lanes[3]);
-	} else if (ctx->chip_class >= VI) {
-		LLVMValueRef thread_id, tl_tid, trbl_tid;
-		thread_id = ac_get_thread_id(ctx);
-
-		tl_tid = LLVMBuildAnd(ctx->builder, thread_id,
-				      LLVMConstInt(ctx->i32, mask, false), "");
-
-		trbl_tid = LLVMBuildAdd(ctx->builder, tl_tid,
-					LLVMConstInt(ctx->i32, idx, false), "");
-
-		args[0] = LLVMBuildMul(ctx->builder, tl_tid,
-				       LLVMConstInt(ctx->i32, 4, false), "");
-		args[1] = val;
-		tl = ac_build_intrinsic(ctx,
-					"llvm.amdgcn.ds.bpermute", ctx->i32,
-					args, 2,
-					AC_FUNC_ATTR_READNONE |
-					AC_FUNC_ATTR_CONVERGENT);
-
-		args[0] = LLVMBuildMul(ctx->builder, trbl_tid,
-				       LLVMConstInt(ctx->i32, 4, false), "");
-		trbl = ac_build_intrinsic(ctx,
-					  "llvm.amdgcn.ds.bpermute", ctx->i32,
-					  args, 2,
-					  AC_FUNC_ATTR_READNONE |
-					  AC_FUNC_ATTR_CONVERGENT);
-	} else {
-		uint32_t masks[2] = {};
-
-		switch (mask) {
-		case AC_TID_MASK_TOP_LEFT:
-			masks[0] = 0x8000;
-			if (idx == 1)
-				masks[1] = 0x8055;
-			else
-				masks[1] = 0x80aa;
-
-			break;
-		case AC_TID_MASK_TOP:
-			masks[0] = 0x8044;
-			masks[1] = 0x80ee;
-			break;
-		case AC_TID_MASK_LEFT:
-			masks[0] = 0x80a0;
-			masks[1] = 0x80f5;
-			break;
-		default:
-			assert(0);
-		}
-
-		args[0] = val;
-		args[1] = LLVMConstInt(ctx->i32, masks[0], false);
-
-		tl = ac_build_intrinsic(ctx,
-					"llvm.amdgcn.ds.swizzle", ctx->i32,
-					args, 2,
-					AC_FUNC_ATTR_READNONE |
-					AC_FUNC_ATTR_CONVERGENT);
-
-		args[1] = LLVMConstInt(ctx->i32, masks[1], false);
-		trbl = ac_build_intrinsic(ctx,
-					"llvm.amdgcn.ds.swizzle", ctx->i32,
-					args, 2,
-					AC_FUNC_ATTR_READNONE |
-					AC_FUNC_ATTR_CONVERGENT);
+	for (unsigned i = 0; i < 4; ++i) {
+		tl_lanes[i] = i & mask;
+		trbl_lanes[i] = (i & mask) + idx;
 	}
+
+	tl = ac_build_quad_swizzle(ctx, val,
+				   tl_lanes[0], tl_lanes[1],
+				   tl_lanes[2], tl_lanes[3]);
+	trbl = ac_build_quad_swizzle(ctx, val,
+				     trbl_lanes[0], trbl_lanes[1],
+				     trbl_lanes[2], trbl_lanes[3]);
 
 	tl = LLVMBuildBitCast(ctx->builder, tl, ctx->f32, "");
 	trbl = LLVMBuildBitCast(ctx->builder, trbl, ctx->f32, "");
 	result = LLVMBuildFSub(ctx->builder, trbl, tl, "");
 
-	if (HAVE_LLVM >= 0x0700) {
-		result = ac_build_intrinsic(ctx,
-			"llvm.amdgcn.wqm.f32", ctx->f32,
-			&result, 1, 0);
-	}
+	result = ac_build_intrinsic(ctx, "llvm.amdgcn.wqm.f32", ctx->f32,
+				    &result, 1, 0);
 
 	return result;
 }
@@ -1740,171 +1669,6 @@ static const char *get_atomic_name(enum ac_atomic_op op)
 	unreachable("bad atomic op");
 }
 
-/* LLVM 6 and older */
-static LLVMValueRef ac_build_image_opcode_llvm6(struct ac_llvm_context *ctx,
-						struct ac_image_args *a)
-{
-	LLVMValueRef args[16];
-	LLVMTypeRef retty = ctx->v4f32;
-	const char *name = NULL;
-	const char *atomic_subop = "";
-	char intr_name[128], coords_type[64];
-
-	bool sample = a->opcode == ac_image_sample ||
-		      a->opcode == ac_image_gather4 ||
-		      a->opcode == ac_image_get_lod;
-	bool atomic = a->opcode == ac_image_atomic ||
-		      a->opcode == ac_image_atomic_cmpswap;
-	bool da = a->dim == ac_image_cube ||
-		  a->dim == ac_image_1darray ||
-		  a->dim == ac_image_2darray ||
-		  a->dim == ac_image_2darraymsaa;
-	if (a->opcode == ac_image_get_lod)
-		da = false;
-
-	unsigned num_coords =
-		a->opcode != ac_image_get_resinfo ? ac_num_coords(a->dim) : 0;
-	LLVMValueRef addr;
-	unsigned num_addr = 0;
-
-	if (a->opcode == ac_image_get_lod) {
-		switch (a->dim) {
-		case ac_image_1darray:
-			num_coords = 1;
-			break;
-		case ac_image_2darray:
-		case ac_image_cube:
-			num_coords = 2;
-			break;
-		default:
-			break;
-		}
-	}
-
-	if (a->offset)
-		args[num_addr++] = ac_to_integer(ctx, a->offset);
-	if (a->bias)
-		args[num_addr++] = ac_to_integer(ctx, a->bias);
-	if (a->compare)
-		args[num_addr++] = ac_to_integer(ctx, a->compare);
-	if (a->derivs[0]) {
-		unsigned num_derivs = ac_num_derivs(a->dim);
-		for (unsigned i = 0; i < num_derivs; ++i)
-			args[num_addr++] = ac_to_integer(ctx, a->derivs[i]);
-	}
-	for (unsigned i = 0; i < num_coords; ++i)
-		args[num_addr++] = ac_to_integer(ctx, a->coords[i]);
-	if (a->lod)
-		args[num_addr++] = ac_to_integer(ctx, a->lod);
-
-	unsigned pad_goal = util_next_power_of_two(num_addr);
-	while (num_addr < pad_goal)
-		args[num_addr++] = LLVMGetUndef(ctx->i32);
-
-	addr = ac_build_gather_values(ctx, args, num_addr);
-
-	unsigned num_args = 0;
-	if (atomic || a->opcode == ac_image_store || a->opcode == ac_image_store_mip) {
-		args[num_args++] = a->data[0];
-		if (a->opcode == ac_image_atomic_cmpswap)
-			args[num_args++] = a->data[1];
-	}
-
-	unsigned coords_arg = num_args;
-	if (sample)
-		args[num_args++] = ac_to_float(ctx, addr);
-	else
-		args[num_args++] = ac_to_integer(ctx, addr);
-
-	args[num_args++] = a->resource;
-	if (sample)
-		args[num_args++] = a->sampler;
-	if (!atomic) {
-		args[num_args++] = LLVMConstInt(ctx->i32, a->dmask, 0);
-		if (sample)
-			args[num_args++] = LLVMConstInt(ctx->i1, a->unorm, 0);
-		args[num_args++] = a->cache_policy & ac_glc ? ctx->i1true : ctx->i1false;
-		args[num_args++] = a->cache_policy & ac_slc ? ctx->i1true : ctx->i1false;
-		args[num_args++] = ctx->i1false; /* lwe */
-		args[num_args++] = LLVMConstInt(ctx->i1, da, 0);
-	} else {
-		args[num_args++] = ctx->i1false; /* r128 */
-		args[num_args++] = LLVMConstInt(ctx->i1, da, 0);
-		args[num_args++] = a->cache_policy & ac_slc ? ctx->i1true : ctx->i1false;
-	}
-
-	switch (a->opcode) {
-	case ac_image_sample:
-		name = "llvm.amdgcn.image.sample";
-		break;
-	case ac_image_gather4:
-		name = "llvm.amdgcn.image.gather4";
-		break;
-	case ac_image_load:
-		name = "llvm.amdgcn.image.load";
-		break;
-	case ac_image_load_mip:
-		name = "llvm.amdgcn.image.load.mip";
-		break;
-	case ac_image_store:
-		name = "llvm.amdgcn.image.store";
-		retty = ctx->voidt;
-		break;
-	case ac_image_store_mip:
-		name = "llvm.amdgcn.image.store.mip";
-		retty = ctx->voidt;
-		break;
-	case ac_image_atomic:
-	case ac_image_atomic_cmpswap:
-		name = "llvm.amdgcn.image.atomic.";
-		retty = ctx->i32;
-		if (a->opcode == ac_image_atomic_cmpswap) {
-			atomic_subop = "cmpswap";
-		} else {
-			atomic_subop = get_atomic_name(a->atomic);
-		}
-		break;
-	case ac_image_get_lod:
-		name = "llvm.amdgcn.image.getlod";
-		break;
-	case ac_image_get_resinfo:
-		name = "llvm.amdgcn.image.getresinfo";
-		break;
-	default:
-		unreachable("invalid image opcode");
-	}
-
-	ac_build_type_name_for_intr(LLVMTypeOf(args[coords_arg]), coords_type,
-				    sizeof(coords_type));
-
-	if (atomic) {
-		snprintf(intr_name, sizeof(intr_name), "llvm.amdgcn.image.atomic.%s.%s",
-			 atomic_subop, coords_type);
-	} else {
-		bool lod_suffix =
-			a->lod && (a->opcode == ac_image_sample || a->opcode == ac_image_gather4);
-
-		snprintf(intr_name, sizeof(intr_name), "%s%s%s%s.v4f32.%s.v8i32",
-			name,
-			a->compare ? ".c" : "",
-			a->bias ? ".b" :
-			lod_suffix ? ".l" :
-			a->derivs[0] ? ".d" :
-			a->level_zero ? ".lz" : "",
-			a->offset ? ".o" : "",
-			coords_type);
-	}
-
-	LLVMValueRef result =
-		ac_build_intrinsic(ctx, intr_name, retty, args, num_args,
-				   a->attributes);
-	if (!sample && retty == ctx->v4f32) {
-		result = LLVMBuildBitCast(ctx->builder, result,
-					  ctx->v4i32, "");
-	}
-	return result;
-}
-
 LLVMValueRef ac_build_image_opcode(struct ac_llvm_context *ctx,
 				   struct ac_image_args *a)
 {
@@ -1928,9 +1692,6 @@ LLVMValueRef ac_build_image_opcode(struct ac_llvm_context *ctx,
 	       (a->lod ? 1 : 0) +
 	       (a->level_zero ? 1 : 0) +
 	       (a->derivs[0] ? 1 : 0) <= 1);
-
-	if (HAVE_LLVM < 0x0700)
-		return ac_build_image_opcode_llvm6(ctx, a);
 
 	if (a->opcode == ac_image_get_lod) {
 		switch (dim) {
@@ -2720,9 +2481,6 @@ LLVMTypeRef ac_array_in_const_addr_space(LLVMTypeRef elem_type)
 
 LLVMTypeRef ac_array_in_const32_addr_space(LLVMTypeRef elem_type)
 {
-	if (!HAVE_32BIT_POINTERS)
-		return ac_array_in_const_addr_space(elem_type);
-
 	return LLVMPointerType(LLVMArrayType(elem_type, 0),
 			       AC_ADDR_SPACE_CONST_32BIT);
 }
@@ -2868,8 +2626,7 @@ void ac_build_endloop(struct ac_llvm_context *ctx, int label_id)
 	ctx->flow_depth--;
 }
 
-static void if_cond_emit(struct ac_llvm_context *ctx, LLVMValueRef cond,
-			 int label_id)
+void ac_build_ifcc(struct ac_llvm_context *ctx, LLVMValueRef cond, int label_id)
 {
 	struct ac_llvm_flow *flow = push_flow(ctx);
 	LLVMBasicBlockRef if_block;
@@ -2886,7 +2643,7 @@ void ac_build_if(struct ac_llvm_context *ctx, LLVMValueRef value,
 {
 	LLVMValueRef cond = LLVMBuildFCmp(ctx->builder, LLVMRealUNE,
 					  value, ctx->f32_0, "");
-	if_cond_emit(ctx, cond, label_id);
+	ac_build_ifcc(ctx, cond, label_id);
 }
 
 void ac_build_uif(struct ac_llvm_context *ctx, LLVMValueRef value,
@@ -2895,7 +2652,7 @@ void ac_build_uif(struct ac_llvm_context *ctx, LLVMValueRef value,
 	LLVMValueRef cond = LLVMBuildICmp(ctx->builder, LLVMIntNE,
 					  ac_to_integer(ctx, value),
 					  ctx->i32_0, "");
-	if_cond_emit(ctx, cond, label_id);
+	ac_build_ifcc(ctx, cond, label_id);
 }
 
 LLVMValueRef ac_build_alloca_undef(struct ac_llvm_context *ac, LLVMTypeRef type,
@@ -2943,9 +2700,11 @@ LLVMValueRef ac_trim_vector(struct ac_llvm_context *ctx, LLVMValueRef value,
 	if (count == num_components)
 		return value;
 
-	LLVMValueRef masks[] = {
-	    ctx->i32_0, ctx->i32_1,
-	    LLVMConstInt(ctx->i32, 2, false), LLVMConstInt(ctx->i32, 3, false)};
+	LLVMValueRef masks[MAX2(count, 2)];
+	masks[0] = ctx->i32_0;
+	masks[1] = ctx->i32_1;
+	for (unsigned i = 2; i < count; i++)
+		masks[i] = LLVMConstInt(ctx->i32, i, false);
 
 	if (count == 1)
 		return LLVMBuildExtractElement(ctx->builder, value, masks[0],
@@ -3353,24 +3112,44 @@ ac_build_alu_op(struct ac_llvm_context *ctx, LLVMValueRef lhs, LLVMValueRef rhs,
 	}
 }
 
-/* TODO: add inclusive and excluse scan functions for SI chip class.  */
+/**
+ * \param maxprefix specifies that the result only needs to be correct for a
+ *     prefix of this many threads
+ *
+ * TODO: add inclusive and excluse scan functions for SI chip class.
+ */
 static LLVMValueRef
-ac_build_scan(struct ac_llvm_context *ctx, nir_op op, LLVMValueRef src, LLVMValueRef identity)
+ac_build_scan(struct ac_llvm_context *ctx, nir_op op, LLVMValueRef src, LLVMValueRef identity,
+	      unsigned maxprefix)
 {
 	LLVMValueRef result, tmp;
 	result = src;
+	if (maxprefix <= 1)
+		return result;
 	tmp = ac_build_dpp(ctx, identity, src, dpp_row_sr(1), 0xf, 0xf, false);
 	result = ac_build_alu_op(ctx, result, tmp, op);
+	if (maxprefix <= 2)
+		return result;
 	tmp = ac_build_dpp(ctx, identity, src, dpp_row_sr(2), 0xf, 0xf, false);
 	result = ac_build_alu_op(ctx, result, tmp, op);
+	if (maxprefix <= 3)
+		return result;
 	tmp = ac_build_dpp(ctx, identity, src, dpp_row_sr(3), 0xf, 0xf, false);
 	result = ac_build_alu_op(ctx, result, tmp, op);
+	if (maxprefix <= 4)
+		return result;
 	tmp = ac_build_dpp(ctx, identity, result, dpp_row_sr(4), 0xf, 0xe, false);
 	result = ac_build_alu_op(ctx, result, tmp, op);
+	if (maxprefix <= 8)
+		return result;
 	tmp = ac_build_dpp(ctx, identity, result, dpp_row_sr(8), 0xf, 0xc, false);
 	result = ac_build_alu_op(ctx, result, tmp, op);
+	if (maxprefix <= 16)
+		return result;
 	tmp = ac_build_dpp(ctx, identity, result, dpp_row_bcast15, 0xa, 0xf, false);
 	result = ac_build_alu_op(ctx, result, tmp, op);
+	if (maxprefix <= 32)
+		return result;
 	tmp = ac_build_dpp(ctx, identity, result, dpp_row_bcast31, 0xc, 0xf, false);
 	result = ac_build_alu_op(ctx, result, tmp, op);
 	return result;
@@ -3379,14 +3158,24 @@ ac_build_scan(struct ac_llvm_context *ctx, nir_op op, LLVMValueRef src, LLVMValu
 LLVMValueRef
 ac_build_inclusive_scan(struct ac_llvm_context *ctx, LLVMValueRef src, nir_op op)
 {
-	ac_build_optimization_barrier(ctx, &src);
 	LLVMValueRef result;
-	LLVMValueRef identity = get_reduction_identity(ctx, op,
-								ac_get_type_size(LLVMTypeOf(src)));
-	result = LLVMBuildBitCast(ctx->builder,
-								ac_build_set_inactive(ctx, src, identity),
-								LLVMTypeOf(identity), "");
-	result = ac_build_scan(ctx, op, result, identity);
+
+	if (LLVMTypeOf(src) == ctx->i1 && op == nir_op_iadd) {
+		LLVMBuilderRef builder = ctx->builder;
+		src = LLVMBuildZExt(builder, src, ctx->i32, "");
+		result = ac_build_ballot(ctx, src);
+		result = ac_build_mbcnt(ctx, result);
+		result = LLVMBuildAdd(builder, result, src, "");
+		return result;
+	}
+
+	ac_build_optimization_barrier(ctx, &src);
+
+	LLVMValueRef identity =
+		get_reduction_identity(ctx, op, ac_get_type_size(LLVMTypeOf(src)));
+	result = LLVMBuildBitCast(ctx->builder, ac_build_set_inactive(ctx, src, identity),
+				  LLVMTypeOf(identity), "");
+	result = ac_build_scan(ctx, op, result, identity, 64);
 
 	return ac_build_wwm(ctx, result);
 }
@@ -3394,15 +3183,24 @@ ac_build_inclusive_scan(struct ac_llvm_context *ctx, LLVMValueRef src, nir_op op
 LLVMValueRef
 ac_build_exclusive_scan(struct ac_llvm_context *ctx, LLVMValueRef src, nir_op op)
 {
-	ac_build_optimization_barrier(ctx, &src);
 	LLVMValueRef result;
-	LLVMValueRef identity = get_reduction_identity(ctx, op,
-								ac_get_type_size(LLVMTypeOf(src)));
-	result = LLVMBuildBitCast(ctx->builder,
-								ac_build_set_inactive(ctx, src, identity),
-								LLVMTypeOf(identity), "");
+
+	if (LLVMTypeOf(src) == ctx->i1 && op == nir_op_iadd) {
+		LLVMBuilderRef builder = ctx->builder;
+		src = LLVMBuildZExt(builder, src, ctx->i32, "");
+		result = ac_build_ballot(ctx, src);
+		result = ac_build_mbcnt(ctx, result);
+		return result;
+	}
+
+	ac_build_optimization_barrier(ctx, &src);
+
+	LLVMValueRef identity =
+		get_reduction_identity(ctx, op, ac_get_type_size(LLVMTypeOf(src)));
+	result = LLVMBuildBitCast(ctx->builder, ac_build_set_inactive(ctx, src, identity),
+				  LLVMTypeOf(identity), "");
 	result = ac_build_dpp(ctx, identity, result, dpp_wf_sr1, 0xf, 0xf, false);
-	result = ac_build_scan(ctx, op, result, identity);
+	result = ac_build_scan(ctx, op, result, identity, 64);
 
 	return ac_build_wwm(ctx, result);
 }
@@ -3458,6 +3256,175 @@ ac_build_reduce(struct ac_llvm_context *ctx, LLVMValueRef src, nir_op op, unsign
 		result = ac_build_alu_op(ctx, result, swap, op);
 		return ac_build_wwm(ctx, result);
 	}
+}
+
+/**
+ * "Top half" of a scan that reduces per-wave values across an entire
+ * workgroup.
+ *
+ * The source value must be present in the highest lane of the wave, and the
+ * highest lane must be live.
+ */
+void
+ac_build_wg_wavescan_top(struct ac_llvm_context *ctx, struct ac_wg_scan *ws)
+{
+	if (ws->maxwaves <= 1)
+		return;
+
+	const LLVMValueRef i32_63 = LLVMConstInt(ctx->i32, 63, false);
+	LLVMBuilderRef builder = ctx->builder;
+	LLVMValueRef tid = ac_get_thread_id(ctx);
+	LLVMValueRef tmp;
+
+	tmp = LLVMBuildICmp(builder, LLVMIntEQ, tid, i32_63, "");
+	ac_build_ifcc(ctx, tmp, 1000);
+	LLVMBuildStore(builder, ws->src, LLVMBuildGEP(builder, ws->scratch, &ws->waveidx, 1, ""));
+	ac_build_endif(ctx, 1000);
+}
+
+/**
+ * "Bottom half" of a scan that reduces per-wave values across an entire
+ * workgroup.
+ *
+ * The caller must place a barrier between the top and bottom halves.
+ */
+void
+ac_build_wg_wavescan_bottom(struct ac_llvm_context *ctx, struct ac_wg_scan *ws)
+{
+	const LLVMTypeRef type = LLVMTypeOf(ws->src);
+	const LLVMValueRef identity =
+		get_reduction_identity(ctx, ws->op, ac_get_type_size(type));
+
+	if (ws->maxwaves <= 1) {
+		ws->result_reduce = ws->src;
+		ws->result_inclusive = ws->src;
+		ws->result_exclusive = identity;
+		return;
+	}
+	assert(ws->maxwaves <= 32);
+
+	LLVMBuilderRef builder = ctx->builder;
+	LLVMValueRef tid = ac_get_thread_id(ctx);
+	LLVMBasicBlockRef bbs[2];
+	LLVMValueRef phivalues_scan[2];
+	LLVMValueRef tmp, tmp2;
+
+	bbs[0] = LLVMGetInsertBlock(builder);
+	phivalues_scan[0] = LLVMGetUndef(type);
+
+	if (ws->enable_reduce)
+		tmp = LLVMBuildICmp(builder, LLVMIntULT, tid, ws->numwaves, "");
+	else if (ws->enable_inclusive)
+		tmp = LLVMBuildICmp(builder, LLVMIntULE, tid, ws->waveidx, "");
+	else
+		tmp = LLVMBuildICmp(builder, LLVMIntULT, tid, ws->waveidx, "");
+	ac_build_ifcc(ctx, tmp, 1001);
+	{
+		tmp = LLVMBuildLoad(builder, LLVMBuildGEP(builder, ws->scratch, &tid, 1, ""), "");
+
+		ac_build_optimization_barrier(ctx, &tmp);
+
+		bbs[1] = LLVMGetInsertBlock(builder);
+		phivalues_scan[1] = ac_build_scan(ctx, ws->op, tmp, identity, ws->maxwaves);
+	}
+	ac_build_endif(ctx, 1001);
+
+	const LLVMValueRef scan = ac_build_phi(ctx, type, 2, phivalues_scan, bbs);
+
+	if (ws->enable_reduce) {
+		tmp = LLVMBuildSub(builder, ws->numwaves, ctx->i32_1, "");
+		ws->result_reduce = ac_build_readlane(ctx, scan, tmp);
+	}
+	if (ws->enable_inclusive)
+		ws->result_inclusive = ac_build_readlane(ctx, scan, ws->waveidx);
+	if (ws->enable_exclusive) {
+		tmp = LLVMBuildSub(builder, ws->waveidx, ctx->i32_1, "");
+		tmp = ac_build_readlane(ctx, scan, tmp);
+		tmp2 = LLVMBuildICmp(builder, LLVMIntEQ, ws->waveidx, ctx->i32_0, "");
+		ws->result_exclusive = LLVMBuildSelect(builder, tmp2, identity, tmp, "");
+	}
+}
+
+/**
+ * Inclusive scan of a per-wave value across an entire workgroup.
+ *
+ * This implies an s_barrier instruction.
+ *
+ * Unlike ac_build_inclusive_scan, the caller \em must ensure that all threads
+ * of the workgroup are live. (This requirement cannot easily be relaxed in a
+ * useful manner because of the barrier in the algorithm.)
+ */
+void
+ac_build_wg_wavescan(struct ac_llvm_context *ctx, struct ac_wg_scan *ws)
+{
+	ac_build_wg_wavescan_top(ctx, ws);
+	ac_build_s_barrier(ctx);
+	ac_build_wg_wavescan_bottom(ctx, ws);
+}
+
+/**
+ * "Top half" of a scan that reduces per-thread values across an entire
+ * workgroup.
+ *
+ * All lanes must be active when this code runs.
+ */
+void
+ac_build_wg_scan_top(struct ac_llvm_context *ctx, struct ac_wg_scan *ws)
+{
+	if (ws->enable_exclusive) {
+		ws->extra = ac_build_exclusive_scan(ctx, ws->src, ws->op);
+		if (LLVMTypeOf(ws->src) == ctx->i1 && ws->op == nir_op_iadd)
+			ws->src = LLVMBuildZExt(ctx->builder, ws->src, ctx->i32, "");
+		ws->src = ac_build_alu_op(ctx, ws->extra, ws->src, ws->op);
+	} else {
+		ws->src = ac_build_inclusive_scan(ctx, ws->src, ws->op);
+	}
+
+	bool enable_inclusive = ws->enable_inclusive;
+	bool enable_exclusive = ws->enable_exclusive;
+	ws->enable_inclusive = false;
+	ws->enable_exclusive = ws->enable_exclusive || enable_inclusive;
+	ac_build_wg_wavescan_top(ctx, ws);
+	ws->enable_inclusive = enable_inclusive;
+	ws->enable_exclusive = enable_exclusive;
+}
+
+/**
+ * "Bottom half" of a scan that reduces per-thread values across an entire
+ * workgroup.
+ *
+ * The caller must place a barrier between the top and bottom halves.
+ */
+void
+ac_build_wg_scan_bottom(struct ac_llvm_context *ctx, struct ac_wg_scan *ws)
+{
+	bool enable_inclusive = ws->enable_inclusive;
+	bool enable_exclusive = ws->enable_exclusive;
+	ws->enable_inclusive = false;
+	ws->enable_exclusive = ws->enable_exclusive || enable_inclusive;
+	ac_build_wg_wavescan_bottom(ctx, ws);
+	ws->enable_inclusive = enable_inclusive;
+	ws->enable_exclusive = enable_exclusive;
+
+	/* ws->result_reduce is already the correct value */
+	if (ws->enable_inclusive)
+		ws->result_inclusive = ac_build_alu_op(ctx, ws->result_exclusive, ws->src, ws->op);
+	if (ws->enable_exclusive)
+		ws->result_exclusive = ac_build_alu_op(ctx, ws->result_exclusive, ws->extra, ws->op);
+}
+
+/**
+ * A scan that reduces per-thread values across an entire workgroup.
+ *
+ * The caller must ensure that all lanes are active when this code runs
+ * (WWM is insufficient!), because there is an implied barrier.
+ */
+void
+ac_build_wg_scan(struct ac_llvm_context *ctx, struct ac_wg_scan *ws)
+{
+	ac_build_wg_scan_top(ctx, ws);
+	ac_build_s_barrier(ctx);
+	ac_build_wg_scan_bottom(ctx, ws);
 }
 
 LLVMValueRef

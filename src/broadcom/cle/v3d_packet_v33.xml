@@ -99,7 +99,7 @@
     <value name="Follows" value="7"/>
   </enum>
 
-  <enum name="Wrap Mode" prefix="V3D_WRAP_MODE" min_ver="41">
+  <enum name="Wrap Mode" prefix="V3D_WRAP_MODE">
       <value name="Wrap mode REPEAT" value="0"/>
       <value name="Wrap mode CLAMP" value="1"/>
       <value name="Wrap mode MIRROR" value="2"/>
@@ -457,6 +457,37 @@
     <field name="mode" size="6" start="0" type="Primitive"/>
   </packet>
 
+  <packet code="33" name="Indirect Indexed Instanced Prim List" cl="B" max_ver="33">
+    <field name="Stride in Multiples of 4 Bytes" size="8" start="104" type="uint"/>
+    <field name="Address of Indices List" size="32" start="72" type="address"/>
+    <field name="Address" size="32" start="40" type="address"/>
+    <field name="Enable Primitive Restarts" size="1" start="39" type="bool"/>
+    <field name="Number of Draw Indirect Indexed Records" size="31" start="8" type="uint"/>
+
+    <field name="Index type" size="2" start="6" type="uint">
+      <value name="Index type 8-bit" value="0"/>
+      <value name="Index type 16-bit" value="1"/>
+      <value name="Index type 32-bit" value="2"/>
+    </field>
+
+    <field name="mode" size="6" start="0" type="Primitive"/>
+  </packet>
+
+  <packet code="33" name="Indirect Indexed Instanced Prim List" cl="B" min_ver="41">
+    <field name="Stride in Multiples of 4 Bytes" size="8" start="72" type="uint"/>
+    <field name="Address" size="32" start="40" type="address"/>
+    <field name="Enable Primitive Restarts" size="1" start="39" type="bool"/>
+    <field name="Number of Draw Indirect Indexed Records" size="31" start="8" type="uint"/>
+
+    <field name="Index type" size="2" start="6" type="uint">
+      <value name="Index type 8-bit" value="0"/>
+      <value name="Index type 16-bit" value="1"/>
+      <value name="Index type 32-bit" value="2"/>
+    </field>
+
+    <field name="mode" size="6" start="0" type="Primitive"/>
+  </packet>
+
   <packet code="34" name="Indexed Instanced Prim List" cl="B" max_ver="33">
     <field name="Enable Primitive Restarts" size="1" start="135" type="bool"/>
     <field name="Maximum index" size="31" start="104" type="uint"/>
@@ -491,6 +522,14 @@
   <packet code="36" name="Vertex Array Prims" cl="B">
     <field name="Index of First Vertex" size="32" start="40" type="uint"/>
     <field name="Length" size="32" start="8" type="uint"/>
+
+    <field name="mode" size="8" start="0" type="Primitive"/>
+  </packet>
+
+  <packet code="37" name="Indirect Vertex Array Instanced Prims" cl="B">
+    <field name="Stride in Multiples of 4 Bytes" size="8" start="72" type="uint"/>
+    <field name="Address" size="32" start="40" type="address"/>
+    <field name="Number of Draw Indirect Array Records" size="32" start="8" type="uint"/>
 
     <field name="mode" size="8" start="0" type="Primitive"/>
   </packet>
@@ -1230,29 +1269,9 @@
     <field name="Texel offset for t coordinate" size="4" start="23" type="int"/>
     <field name="Texel offset for s coordinate" size="4" start="19" type="int"/>
 
-    <field name="R Wrap Mode" size="3" start="16" type="uint">
-      <value name="Wrap mode REPEAT" value="0"/>
-      <value name="Wrap mode CLAMP" value="1"/>
-      <value name="Wrap mode MIRROR" value="2"/>
-      <value name="Wrap mode BORDER" value="3"/>
-      <value name="Wrap mode MIRROR_ONCE" value="4"/>
-    </field>
-
-    <field name="T Wrap Mode" size="3" start="13" type="uint">
-      <value name="Wrap mode REPEAT" value="0"/>
-      <value name="Wrap mode CLAMP" value="1"/>
-      <value name="Wrap mode MIRROR" value="2"/>
-      <value name="Wrap mode BORDER" value="3"/>
-      <value name="Wrap mode MIRROR_ONCE" value="4"/>
-    </field>
-
-    <field name="S Wrap Mode" size="3" start="10" type="uint">
-      <value name="Wrap mode REPEAT" value="0"/>
-      <value name="Wrap mode CLAMP" value="1"/>
-      <value name="Wrap mode MIRROR" value="2"/>
-      <value name="Wrap mode BORDER" value="3"/>
-      <value name="Wrap mode MIRROR_ONCE" value="4"/>
-    </field>
+    <field name="R Wrap Mode" size="3" start="16" type="Wrap Mode"/>
+    <field name="T Wrap Mode" size="3" start="13" type="Wrap Mode"/>
+    <field name="S Wrap Mode" size="3" start="10" type="Wrap Mode"/>
 
     <field name="New configuration mode" size="1" start="9" type="bool" default="1"/>
 

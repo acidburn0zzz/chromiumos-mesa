@@ -509,6 +509,8 @@ get_definer(struct ir3_ra_ctx *ctx, struct ir3_instruction *instr,
 		d = dd;
 	}
 
+	debug_assert(d->opc != OPC_META_FO);
+
 	id->defn = d;
 	id->sz = *sz;
 	id->off = *off;
@@ -915,6 +917,8 @@ ra_add_interference(struct ir3_ra_ctx *ctx)
 	/* need to fix things up to keep outputs live: */
 	for (unsigned i = 0; i < ir->noutputs; i++) {
 		struct ir3_instruction *instr = ir->outputs[i];
+		if (!instr)
+			continue;
 		unsigned name = ra_name(ctx, &ctx->instrd[instr->ip]);
 		ctx->use[name] = ctx->instr_cnt;
 	}

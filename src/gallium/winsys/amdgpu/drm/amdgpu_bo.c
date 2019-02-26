@@ -191,8 +191,10 @@ void amdgpu_bo_destroy(struct pb_buffer *_buf)
    util_hash_table_remove(ws->bo_export_table, bo->bo);
    simple_mtx_unlock(&ws->bo_export_table_lock);
 
-   amdgpu_bo_va_op(bo->bo, 0, bo->base.size, bo->va, 0, AMDGPU_VA_OP_UNMAP);
-   amdgpu_va_range_free(bo->u.real.va_handle);
+   if (bo->initial_domain & RADEON_DOMAIN_VRAM_GTT) {
+      amdgpu_bo_va_op(bo->bo, 0, bo->base.size, bo->va, 0, AMDGPU_VA_OP_UNMAP);
+      amdgpu_va_range_free(bo->u.real.va_handle);
+   }
    amdgpu_bo_free(bo->bo);
 
    amdgpu_bo_remove_fences(bo);
@@ -218,13 +220,21 @@ static void amdgpu_bo_destroy_or_cache(struct pb_buffer *_buf)
       amdgpu_bo_destroy(_buf);
 }
 
+static void amdgpu_clean_up_buffer_managers(struct amdgpu_winsys *ws)
+{
+   for (unsigned i = 0; i < NUM_SLAB_ALLOCATORS; i++)
+      pb_slabs_reclaim(&ws->bo_slabs[i]);
+
+   pb_cache_release_all_buffers(&ws->bo_cache);
+}
+
 static bool amdgpu_bo_do_map(struct amdgpu_winsys_bo *bo, void **cpu)
 {
    assert(!bo->sparse && bo->bo && !bo->is_user_ptr);
    int r = amdgpu_bo_cpu_map(bo->bo, cpu);
    if (r) {
-      /* Clear the cache and try again. */
-      pb_cache_release_all_buffers(&bo->ws->bo_cache);
+      /* Clean up buffer managers and try again. */
+      amdgpu_clean_up_buffer_managers(bo->ws);
       r = amdgpu_bo_cpu_map(bo->bo, cpu);
       if (r)
          return false;
@@ -416,6 +426,27 @@ static void amdgpu_add_buffer_to_global_list(struct amdgpu_winsys_bo *bo)
    }
 }
 
+static uint64_t amdgpu_get_optimal_vm_alignment(struct amdgpu_winsys *ws,
+                                                uint64_t size, unsigned alignment)
+{
+   uint64_t vm_alignment = alignment;
+
+   /* Increase the VM alignment for faster address translation. */
+   if (size >= ws->info.pte_fragment_size)
+      vm_alignment = MAX2(vm_alignment, ws->info.pte_fragment_size);
+
+   /* Gfx9: Increase the VM alignment to the most significant bit set
+    * in the size for faster address translation.
+    */
+   if (ws->info.chip_class >= GFX9) {
+      unsigned msb = util_last_bit64(size); /* 0 = no bit is set */
+      uint64_t msb_alignment = msb ? 1ull << (msb - 1) : 0;
+
+      vm_alignment = MAX2(vm_alignment, msb_alignment);
+   }
+   return vm_alignment;
+}
+
 static struct amdgpu_winsys_bo *amdgpu_create_bo(struct amdgpu_winsys *ws,
                                                  uint64_t size,
                                                  unsigned alignment,
@@ -428,11 +459,12 @@ static struct amdgpu_winsys_bo *amdgpu_create_bo(struct amdgpu_winsys *ws,
    uint64_t va = 0;
    struct amdgpu_winsys_bo *bo;
    amdgpu_va_handle va_handle;
-   unsigned va_gap_size;
    int r;
 
    /* VRAM or GTT must be specified, but not both at the same time. */
-   assert(util_bitcount(initial_domain & RADEON_DOMAIN_VRAM_GTT) == 1);
+   assert(util_bitcount(initial_domain & (RADEON_DOMAIN_VRAM_GTT |
+                                          RADEON_DOMAIN_GDS |
+                                          RADEON_DOMAIN_OA)) == 1);
 
    bo = CALLOC_STRUCT(amdgpu_winsys_bo);
    if (!bo) {
@@ -450,6 +482,10 @@ static struct amdgpu_winsys_bo *amdgpu_create_bo(struct amdgpu_winsys *ws,
       request.preferred_heap |= AMDGPU_GEM_DOMAIN_VRAM;
    if (initial_domain & RADEON_DOMAIN_GTT)
       request.preferred_heap |= AMDGPU_GEM_DOMAIN_GTT;
+   if (initial_domain & RADEON_DOMAIN_GDS)
+      request.preferred_heap |= AMDGPU_GEM_DOMAIN_GDS;
+   if (initial_domain & RADEON_DOMAIN_OA)
+      request.preferred_heap |= AMDGPU_GEM_DOMAIN_OA;
 
    /* Since VRAM and GTT have almost the same performance on APUs, we could
     * just set GTT. However, in order to decrease GTT(RAM) usage, which is
@@ -479,26 +515,29 @@ static struct amdgpu_winsys_bo *amdgpu_create_bo(struct amdgpu_winsys *ws,
       goto error_bo_alloc;
    }
 
-   va_gap_size = ws->check_vm ? MAX2(4 * alignment, 64 * 1024) : 0;
-   if (size > ws->info.pte_fragment_size)
-	   alignment = MAX2(alignment, ws->info.pte_fragment_size);
-   r = amdgpu_va_range_alloc(ws->dev, amdgpu_gpu_va_range_general,
-                             size + va_gap_size, alignment, 0, &va, &va_handle,
-                             (flags & RADEON_FLAG_32BIT ? AMDGPU_VA_RANGE_32_BIT : 0) |
-			     AMDGPU_VA_RANGE_HIGH);
-   if (r)
-      goto error_va_alloc;
+   if (initial_domain & RADEON_DOMAIN_VRAM_GTT) {
+      unsigned va_gap_size = ws->check_vm ? MAX2(4 * alignment, 64 * 1024) : 0;
 
-   unsigned vm_flags = AMDGPU_VM_PAGE_READABLE |
-                       AMDGPU_VM_PAGE_EXECUTABLE;
+      r = amdgpu_va_range_alloc(ws->dev, amdgpu_gpu_va_range_general,
+                                size + va_gap_size,
+                                amdgpu_get_optimal_vm_alignment(ws, size, alignment),
+                                0, &va, &va_handle,
+                                (flags & RADEON_FLAG_32BIT ? AMDGPU_VA_RANGE_32_BIT : 0) |
+                                AMDGPU_VA_RANGE_HIGH);
+      if (r)
+         goto error_va_alloc;
 
-   if (!(flags & RADEON_FLAG_READ_ONLY))
-       vm_flags |= AMDGPU_VM_PAGE_WRITEABLE;
+      unsigned vm_flags = AMDGPU_VM_PAGE_READABLE |
+                          AMDGPU_VM_PAGE_EXECUTABLE;
 
-   r = amdgpu_bo_va_op_raw(ws->dev, buf_handle, 0, size, va, vm_flags,
+      if (!(flags & RADEON_FLAG_READ_ONLY))
+         vm_flags |= AMDGPU_VM_PAGE_WRITEABLE;
+
+      r = amdgpu_bo_va_op_raw(ws->dev, buf_handle, 0, size, va, vm_flags,
 			   AMDGPU_VA_OP_MAP);
-   if (r)
-      goto error_va_map;
+      if (r)
+         goto error_va_map;
+   }
 
    simple_mtx_init(&bo->lock, mtx_plain);
    pipe_reference_init(&bo->base.reference, 1);
@@ -555,13 +594,27 @@ bool amdgpu_bo_can_reclaim_slab(void *priv, struct pb_slab_entry *entry)
    return amdgpu_bo_can_reclaim(&bo->base);
 }
 
+static struct pb_slabs *get_slabs(struct amdgpu_winsys *ws, uint64_t size)
+{
+   /* Find the correct slab allocator for the given size. */
+   for (unsigned i = 0; i < NUM_SLAB_ALLOCATORS; i++) {
+      struct pb_slabs *slabs = &ws->bo_slabs[i];
+
+      if (size <= 1 << (slabs->min_order + slabs->num_orders - 1))
+         return slabs;
+   }
+
+   assert(0);
+   return NULL;
+}
+
 static void amdgpu_bo_slab_destroy(struct pb_buffer *_buf)
 {
    struct amdgpu_winsys_bo *bo = amdgpu_winsys_bo(_buf);
 
    assert(!bo->bo);
 
-   pb_slab_free(&bo->ws->bo_slabs, &bo->u.slab.entry);
+   pb_slab_free(get_slabs(bo->ws, bo->base.size), &bo->u.slab.entry);
 }
 
 static const struct pb_vtbl amdgpu_winsys_bo_slab_vtbl = {
@@ -578,18 +631,36 @@ struct pb_slab *amdgpu_bo_slab_alloc(void *priv, unsigned heap,
    enum radeon_bo_domain domains = radeon_domain_from_heap(heap);
    enum radeon_bo_flag flags = radeon_flags_from_heap(heap);
    uint32_t base_id;
+   unsigned slab_size = 0;
 
    if (!slab)
       return NULL;
 
-   unsigned slab_size = 1 << AMDGPU_SLAB_BO_SIZE_LOG2;
+   /* Determine the slab buffer size. */
+   for (unsigned i = 0; i < NUM_SLAB_ALLOCATORS; i++) {
+      struct pb_slabs *slabs = &ws->bo_slabs[i];
+      unsigned max_entry_size = 1 << (slabs->min_order + slabs->num_orders - 1);
+
+      if (entry_size <= max_entry_size) {
+         /* The slab size is twice the size of the largest possible entry. */
+         slab_size = max_entry_size * 2;
+
+         /* The largest slab should have the same size as the PTE fragment
+          * size to get faster address translation.
+          */
+         if (i == NUM_SLAB_ALLOCATORS - 1 &&
+             slab_size < ws->info.pte_fragment_size)
+            slab_size = ws->info.pte_fragment_size;
+         break;
+      }
+   }
+   assert(slab_size != 0);
+
    slab->buffer = amdgpu_winsys_bo(amdgpu_bo_create(&ws->base,
                                                     slab_size, slab_size,
                                                     domains, flags));
    if (!slab->buffer)
       goto fail;
-
-   assert(slab->buffer->bo);
 
    slab->base.num_entries = slab->buffer->base.size / entry_size;
    slab->base.num_free = slab->base.num_entries;
@@ -615,7 +686,15 @@ struct pb_slab *amdgpu_bo_slab_alloc(void *priv, unsigned heap,
       bo->unique_id = base_id + i;
       bo->u.slab.entry.slab = &slab->base;
       bo->u.slab.entry.group_index = group_index;
-      bo->u.slab.real = slab->buffer;
+
+      if (slab->buffer->bo) {
+         /* The slab is not suballocated. */
+         bo->u.slab.real = slab->buffer;
+      } else {
+         /* The slab is allocated out of a bigger slab. */
+         bo->u.slab.real = slab->buffer->u.slab.real;
+         assert(bo->u.slab.real->bo);
+      }
 
       LIST_ADDTAIL(&bo->u.slab.entry.head, &slab->base.free);
    }
@@ -1229,22 +1308,28 @@ amdgpu_bo_create(struct radeon_winsys *rws,
    /* Sparse buffers must have NO_CPU_ACCESS set. */
    assert(!(flags & RADEON_FLAG_SPARSE) || flags & RADEON_FLAG_NO_CPU_ACCESS);
 
+   struct pb_slabs *last_slab = &ws->bo_slabs[NUM_SLAB_ALLOCATORS - 1];
+   unsigned max_slab_entry_size = 1 << (last_slab->min_order + last_slab->num_orders - 1);
+
    /* Sub-allocate small buffers from slabs. */
    if (!(flags & (RADEON_FLAG_NO_SUBALLOC | RADEON_FLAG_SPARSE)) &&
-       size <= (1 << AMDGPU_SLAB_MAX_SIZE_LOG2) &&
-       alignment <= MAX2(1 << AMDGPU_SLAB_MIN_SIZE_LOG2, util_next_power_of_two(size))) {
+       size <= max_slab_entry_size &&
+       /* The alignment must be at most the size of the smallest slab entry or
+        * the next power of two. */
+       alignment <= MAX2(1 << ws->bo_slabs[0].min_order, util_next_power_of_two(size))) {
       struct pb_slab_entry *entry;
       int heap = radeon_get_heap_index(domain, flags);
 
       if (heap < 0 || heap >= RADEON_MAX_SLAB_HEAPS)
          goto no_slab;
 
-      entry = pb_slab_alloc(&ws->bo_slabs, size, heap);
+      struct pb_slabs *slabs = get_slabs(ws, size);
+      entry = pb_slab_alloc(slabs, size, heap);
       if (!entry) {
-         /* Clear the cache and try again. */
-         pb_cache_release_all_buffers(&ws->bo_cache);
+         /* Clean up buffer managers and try again. */
+         amdgpu_clean_up_buffer_managers(ws);
 
-         entry = pb_slab_alloc(&ws->bo_slabs, size, heap);
+         entry = pb_slab_alloc(slabs, size, heap);
       }
       if (!entry)
          return NULL;
@@ -1271,8 +1356,10 @@ no_slab:
     * BOs. Aligning this here helps the cached bufmgr. Especially small BOs,
     * like constant/uniform buffers, can benefit from better and more reuse.
     */
-   size = align64(size, ws->info.gart_page_size);
-   alignment = align(alignment, ws->info.gart_page_size);
+   if (domain & RADEON_DOMAIN_VRAM_GTT) {
+      size = align64(size, ws->info.gart_page_size);
+      alignment = align(alignment, ws->info.gart_page_size);
+   }
 
    bool use_reusable_pool = flags & RADEON_FLAG_NO_INTERPROCESS_SHARING;
 
@@ -1290,9 +1377,9 @@ no_slab:
    /* Create a new one. */
    bo = amdgpu_create_bo(ws, size, alignment, domain, flags, heap);
    if (!bo) {
-      /* Clear the cache and try again. */
-      pb_slabs_reclaim(&ws->bo_slabs);
-      pb_cache_release_all_buffers(&ws->bo_cache);
+      /* Clean up buffer managers and try again. */
+      amdgpu_clean_up_buffer_managers(ws);
+
       bo = amdgpu_create_bo(ws, size, alignment, domain, flags, heap);
       if (!bo)
          return NULL;
@@ -1304,6 +1391,7 @@ no_slab:
 
 static struct pb_buffer *amdgpu_bo_from_handle(struct radeon_winsys *rws,
                                                struct winsys_handle *whandle,
+                                               unsigned vm_alignment,
                                                unsigned *stride,
                                                unsigned *offset)
 {
@@ -1361,8 +1449,10 @@ static struct pb_buffer *amdgpu_bo_from_handle(struct radeon_winsys *rws,
       goto error;
 
    r = amdgpu_va_range_alloc(ws->dev, amdgpu_gpu_va_range_general,
-                             result.alloc_size, 1 << 20, 0, &va, &va_handle,
-			     AMDGPU_VA_RANGE_HIGH);
+                             result.alloc_size,
+                             amdgpu_get_optimal_vm_alignment(ws, result.alloc_size,
+                                                             vm_alignment),
+                             0, &va, &va_handle, AMDGPU_VA_RANGE_HIGH);
    if (r)
       goto error;
 
@@ -1482,8 +1572,10 @@ static struct pb_buffer *amdgpu_bo_from_ptr(struct radeon_winsys *rws,
         goto error;
 
     if (amdgpu_va_range_alloc(ws->dev, amdgpu_gpu_va_range_general,
-                              aligned_size, 1 << 12, 0, &va, &va_handle,
-			      AMDGPU_VA_RANGE_HIGH))
+                              aligned_size,
+                              amdgpu_get_optimal_vm_alignment(ws, aligned_size,
+                                                              ws->info.gart_page_size),
+                              0, &va, &va_handle, AMDGPU_VA_RANGE_HIGH))
         goto error_va_alloc;
 
     if (amdgpu_bo_va_op(buf_handle, 0, aligned_size, va, 0, AMDGPU_VA_OP_MAP))

@@ -211,6 +211,7 @@
 #define PKT3_SET_SH_REG                        0x76
 #define PKT3_SET_SH_REG_OFFSET                 0x77
 #define PKT3_SET_UCONFIG_REG                   0x79 /* new for CIK */
+#define PKT3_SET_UCONFIG_REG_INDEX             0x7A /* new for GFX9, CP ucode version >= 26 */
 #define PKT3_LOAD_CONST_RAM                    0x80
 #define PKT3_WRITE_CONST_RAM                   0x81
 #define PKT3_DUMP_CONST_RAM                    0x83
@@ -2436,6 +2437,9 @@
 #define   S_008F30_FILTER_MODE(x)                                     (((unsigned)(x) & 0x03) << 29)
 #define   G_008F30_FILTER_MODE(x)                                     (((x) >> 29) & 0x03)
 #define   C_008F30_FILTER_MODE                                        0x9FFFFFFF
+#define     V_008F30_SQ_IMG_FILTER_MODE_BLEND                       0x00
+#define     V_008F30_SQ_IMG_FILTER_MODE_MIN                         0x01
+#define     V_008F30_SQ_IMG_FILTER_MODE_MAX                         0x02
 /* VI */
 #define   S_008F30_COMPAT_MODE(x)                                     (((unsigned)(x) & 0x1) << 31)
 #define   G_008F30_COMPAT_MODE(x)                                     (((x) >> 31) & 0x1)

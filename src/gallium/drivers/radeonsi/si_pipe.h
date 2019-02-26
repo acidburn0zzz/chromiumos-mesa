@@ -47,6 +47,7 @@
  * the number shouldn't be a commonly-used one. */
 #define SI_BASE_VERTEX_UNKNOWN		INT_MIN
 #define SI_RESTART_INDEX_UNKNOWN	INT_MIN
+#define SI_INSTANCE_COUNT_UNKNOWN	INT_MIN
 #define SI_NUM_SMOOTH_AA_SAMPLES	8
 #define SI_MAX_POINT_SIZE		2048
 #define SI_GS_PER_ES			128
@@ -103,7 +104,7 @@
 
 #define SI_RESOURCE_FLAG_TRANSFER	(PIPE_RESOURCE_FLAG_DRV_PRIV << 0)
 #define SI_RESOURCE_FLAG_FLUSHED_DEPTH	(PIPE_RESOURCE_FLAG_DRV_PRIV << 1)
-#define SI_RESOURCE_FLAG_FORCE_TILING	(PIPE_RESOURCE_FLAG_DRV_PRIV << 2)
+#define SI_RESOURCE_FLAG_FORCE_MSAA_TILING (PIPE_RESOURCE_FLAG_DRV_PRIV << 2)
 #define SI_RESOURCE_FLAG_DISABLE_DCC	(PIPE_RESOURCE_FLAG_DRV_PRIV << 3)
 #define SI_RESOURCE_FLAG_UNMAPPABLE	(PIPE_RESOURCE_FLAG_DRV_PRIV << 4)
 #define SI_RESOURCE_FLAG_READ_ONLY	(PIPE_RESOURCE_FLAG_DRV_PRIV << 5)
@@ -174,6 +175,8 @@ enum {
 	DBG_TEST_VMFAULT_SHADER,
 	DBG_TEST_DMA_PERF,
 	DBG_TEST_GDS,
+	DBG_TEST_GDS_MM,
+	DBG_TEST_GDS_OA_MM,
 };
 
 #define DBG_ALL_SHADERS		(((1 << (DBG_CS + 1)) - 1))
@@ -923,6 +926,7 @@ struct si_context {
 	int			last_index_size;
 	int			last_base_vertex;
 	int			last_start_instance;
+	int			last_instance_count;
 	int			last_drawid;
 	int			last_sh_base_reg;
 	int			last_primitive_restart_en;
@@ -1159,10 +1163,10 @@ void si_init_compute_blit_functions(struct si_context *sctx);
 			   SI_CPDMA_SKIP_BO_LIST_UPDATE)
 
 void si_cp_dma_wait_for_idle(struct si_context *sctx);
-void si_cp_dma_clear_buffer(struct si_context *sctx, struct pipe_resource *dst,
-			    uint64_t offset, uint64_t size, unsigned value,
-			    enum si_coherency coher,
-			    enum si_cache_policy cache_policy);
+void si_cp_dma_clear_buffer(struct si_context *sctx, struct radeon_cmdbuf *cs,
+			    struct pipe_resource *dst, uint64_t offset,
+			    uint64_t size, unsigned value, unsigned user_flags,
+			    enum si_coherency coher, enum si_cache_policy cache_policy);
 void si_cp_dma_copy_buffer(struct si_context *sctx,
 			   struct pipe_resource *dst, struct pipe_resource *src,
 			   uint64_t dst_offset, uint64_t src_offset, unsigned size,
@@ -1209,7 +1213,7 @@ void si_cp_release_mem(struct si_context *ctx,
 		       struct r600_resource *buf, uint64_t va,
 		       uint32_t new_fence, unsigned query_type);
 unsigned si_cp_write_fence_dwords(struct si_screen *screen);
-void si_cp_wait_mem(struct si_context *ctx,
+void si_cp_wait_mem(struct si_context *ctx, struct radeon_cmdbuf *cs,
 		      uint64_t va, uint32_t ref, uint32_t mask, unsigned flags);
 void si_init_fence_functions(struct si_context *ctx);
 void si_init_screen_fence_functions(struct si_screen *screen);
@@ -1234,11 +1238,9 @@ unsigned si_end_counter(struct si_screen *sscreen, unsigned type,
 /* si_compute.c */
 void si_init_compute_functions(struct si_context *sctx);
 
-/* r600_perfcounters.c */
-void si_perfcounters_destroy(struct si_screen *sscreen);
-
 /* si_perfcounters.c */
 void si_init_perfcounters(struct si_screen *screen);
+void si_destroy_perfcounters(struct si_screen *screen);
 
 /* si_pipe.c */
 bool si_check_device_reset(struct si_context *sctx);
@@ -1374,6 +1376,7 @@ static inline void
 si_invalidate_draw_sh_constants(struct si_context *sctx)
 {
 	sctx->last_base_vertex = SI_BASE_VERTEX_UNKNOWN;
+	sctx->last_instance_count = SI_INSTANCE_COUNT_UNKNOWN;
 }
 
 static inline unsigned

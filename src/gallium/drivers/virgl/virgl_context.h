@@ -32,6 +32,7 @@ struct pipe_screen;
 struct tgsi_token;
 struct u_upload_mgr;
 struct virgl_cmd_buf;
+struct virgl_vertex_elements_state;
 
 struct virgl_sampler_view {
    struct pipe_sampler_view base;
@@ -48,15 +49,21 @@ struct virgl_textures_info {
    uint32_t enabled_mask;
 };
 
+struct virgl_rasterizer_state {
+   struct pipe_rasterizer_state rs;
+   uint32_t handle;
+};
+
 struct virgl_context {
    struct pipe_context base;
    struct virgl_cmd_buf *cbuf;
 
    struct virgl_textures_info samplers[PIPE_SHADER_TYPES];
+   struct virgl_vertex_elements_state *vertex_elements;
 
    struct pipe_framebuffer_state framebuffer;
 
-   struct slab_child_pool texture_transfer_pool;
+   struct slab_child_pool transfer_pool;
 
    struct u_upload_mgr *uploader;
 
@@ -64,6 +71,7 @@ struct virgl_context {
    unsigned num_vertex_buffers;
    boolean vertex_array_dirty;
 
+   struct virgl_rasterizer_state rs_state;
    struct virgl_so_target so_targets[PIPE_MAX_SO_BUFFERS];
    unsigned num_so_targets;
 
@@ -73,7 +81,6 @@ struct virgl_context {
    struct pipe_resource *images[PIPE_SHADER_TYPES][PIPE_MAX_SHADER_BUFFERS];
    int num_transfers;
    int num_draws;
-   struct list_head to_flush_bufs;
 
    struct pipe_resource *atomic_buffers[PIPE_MAX_HW_ATOMIC_BUFFERS];
 

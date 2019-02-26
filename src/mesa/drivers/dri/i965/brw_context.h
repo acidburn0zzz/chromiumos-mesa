@@ -752,6 +752,8 @@ struct brw_context
                                         struct brw_bo *bo,
                                         uint32_t offset_in_bytes,
                                         uint32_t report_id);
+
+      void (*emit_compute_walker)(struct brw_context *brw);
    } vtbl;
 
    struct brw_bufmgr *bufmgr;
@@ -841,6 +843,8 @@ struct brw_context
    /** @} */
 
    GLuint primitive; /**< Hardware primitive, such as _3DPRIM_TRILIST. */
+
+   bool object_preemption; /**< Object level preemption enabled. */
 
    GLenum reduced_primitive;
 
@@ -1377,13 +1381,6 @@ GLboolean brwCreateContext(gl_api api,
 /*======================================================================
  * brw_misc_state.c
  */
-void
-brw_meta_resolve_color(struct brw_context *brw,
-                       struct intel_mipmap_tree *mt);
-
-/*======================================================================
- * brw_misc_state.c
- */
 void brw_workaround_depthstencil_alignment(struct brw_context *brw,
                                            GLbitfield clear_mask);
 
@@ -1435,10 +1432,10 @@ void brw_load_register_imm32(struct brw_context *brw,
                              uint32_t reg, uint32_t imm);
 void brw_load_register_imm64(struct brw_context *brw,
                              uint32_t reg, uint64_t imm);
-void brw_load_register_reg(struct brw_context *brw, uint32_t src,
-                           uint32_t dest);
-void brw_load_register_reg64(struct brw_context *brw, uint32_t src,
-                             uint32_t dest);
+void brw_load_register_reg(struct brw_context *brw, uint32_t dst,
+                           uint32_t src);
+void brw_load_register_reg64(struct brw_context *brw, uint32_t dst,
+                             uint32_t src);
 void brw_store_data_imm32(struct brw_context *brw, struct brw_bo *bo,
                           uint32_t offset, uint32_t imm);
 void brw_store_data_imm64(struct brw_context *brw, struct brw_bo *bo,

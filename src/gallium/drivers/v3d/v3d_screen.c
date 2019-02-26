@@ -32,6 +32,7 @@
 #include "util/u_format.h"
 #include "util/u_hash_table.h"
 #include "util/u_screen.h"
+#include "util/u_transfer_helper.h"
 #include "util/ralloc.h"
 
 #include <xf86drm.h>
@@ -74,9 +75,24 @@ v3d_screen_destroy(struct pipe_screen *pscreen)
                 v3d_simulator_destroy(screen);
 
         v3d_compiler_free(screen->compiler);
+        u_transfer_helper_destroy(pscreen->transfer_helper);
 
         close(screen->fd);
         ralloc_free(pscreen);
+}
+
+static bool
+v3d_has_feature(struct v3d_screen *screen, enum drm_v3d_param feature)
+{
+        struct drm_v3d_get_param p = {
+                .param = feature,
+        };
+        int ret = v3d_ioctl(screen->fd, DRM_IOCTL_V3D_GET_PARAM, &p);
+
+        if (ret != 0)
+                return false;
+
+        return p.value;
 }
 
 static int
@@ -106,17 +122,27 @@ v3d_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
         case PIPE_CAP_STREAM_OUTPUT_PAUSE_RESUME:
         case PIPE_CAP_COMPUTE:
         case PIPE_CAP_DRAW_INDIRECT:
+        case PIPE_CAP_MULTI_DRAW_INDIRECT:
         case PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION:
         case PIPE_CAP_SIGNED_VERTEX_BUFFER_OFFSET:
         case PIPE_CAP_TGSI_CAN_READ_OUTPUTS:
         case PIPE_CAP_TGSI_PACK_HALF_FLOAT:
+        case PIPE_CAP_TEXTURE_HALF_FLOAT_LINEAR:
                 return 1;
+
+        case PIPE_CAP_GENERATE_MIPMAP:
+                return v3d_has_feature(screen, DRM_V3D_PARAM_SUPPORTS_TFU);
 
         case PIPE_CAP_INDEP_BLEND_ENABLE:
                 return screen->devinfo.ver >= 40;
 
         case PIPE_CAP_CONSTANT_BUFFER_OFFSET_ALIGNMENT:
                 return 256;
+
+        case PIPE_CAP_MAX_TEXTURE_GATHER_COMPONENTS:
+                if (screen->devinfo.ver < 40)
+                        return 0;
+                return 4;
 
         case PIPE_CAP_SHADER_BUFFER_OFFSET_ALIGNMENT:
                 return 4;

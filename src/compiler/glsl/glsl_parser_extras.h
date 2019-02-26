@@ -786,6 +786,8 @@ struct _mesa_glsl_parse_state {
    bool AMD_shader_stencil_export_warn;
    bool AMD_shader_trinary_minmax_enable;
    bool AMD_shader_trinary_minmax_warn;
+   bool AMD_texture_texture4_enable;
+   bool AMD_texture_texture4_warn;
    bool AMD_vertex_shader_layer_enable;
    bool AMD_vertex_shader_layer_warn;
    bool AMD_vertex_shader_viewport_index_enable;
@@ -834,8 +836,6 @@ struct _mesa_glsl_parse_state {
    bool EXT_texture_cube_map_array_warn;
    bool INTEL_conservative_rasterization_enable;
    bool INTEL_conservative_rasterization_warn;
-   bool INTEL_fragment_shader_ordering_enable;
-   bool INTEL_fragment_shader_ordering_warn;
    bool INTEL_shader_atomic_float_minmax_enable;
    bool INTEL_shader_atomic_float_minmax_warn;
    bool MESA_shader_integer_functions_enable;

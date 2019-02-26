@@ -34,6 +34,9 @@ static void
 vir_TMU_WRITE(struct v3d_compile *c, enum v3d_qpu_waddr waddr, struct qreg val,
               int *tmu_writes)
 {
+        /* XXX perf: We should figure out how to merge ALU operations
+         * producing the val with this MOV, when possible.
+         */
         vir_MOV_dest(c, vir_reg(QFILE_MAGIC, waddr), val);
 
         (*tmu_writes)++;
@@ -75,6 +78,8 @@ v3d40_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr)
                 .gather_component = instr->component,
 
                 .coefficient_mode = instr->op == nir_texop_txd,
+
+                .disable_autolod = instr->op == nir_texop_tg4
         };
 
         int non_array_components = instr->coord_components - instr->is_array;
@@ -116,10 +121,8 @@ v3d40_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr)
                                       ntq_get_src(c, instr->src[i].src, 0),
                                       &tmu_writes);
 
-                        if (instr->op != nir_texop_txf &&
-                            instr->op != nir_texop_tg4) {
+                        if (instr->op != nir_texop_txf)
                                 p2_unpacked.disable_autolod = true;
-                        }
                         break;
 
                 case nir_tex_src_comparator:
@@ -129,14 +132,30 @@ v3d40_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr)
                         break;
 
                 case nir_tex_src_offset: {
-                        nir_const_value *offset =
-                                nir_src_as_const_value(instr->src[i].src);
+                        if (nir_src_is_const(instr->src[i].src)) {
+                                nir_const_value *offset =
+                                        nir_src_as_const_value(instr->src[i].src);
 
-                        p2_unpacked.offset_s = offset->i32[0];
-                        if (instr->coord_components >= 2)
-                                p2_unpacked.offset_t = offset->i32[1];
-                        if (instr->coord_components >= 3)
-                                p2_unpacked.offset_r = offset->i32[2];
+                                p2_unpacked.offset_s = offset->i32[0];
+                                if (instr->coord_components >= 2)
+                                        p2_unpacked.offset_t = offset->i32[1];
+                                if (instr->coord_components >= 3)
+                                        p2_unpacked.offset_r = offset->i32[2];
+                        } else {
+                                struct qreg mask = vir_uniform_ui(c, 0xf);
+                                struct qreg x, y, offset;
+
+                                x = vir_AND(c, ntq_get_src(c, instr->src[i].src,
+                                                           0), mask);
+                                y = vir_AND(c, ntq_get_src(c, instr->src[i].src,
+                                                           1), mask);
+                                offset = vir_OR(c, x,
+                                                vir_SHL(c, y,
+                                                        vir_uniform_ui(c, 4)));
+
+                                vir_TMU_WRITE(c, V3D_QPU_WADDR_TMUOFF,
+                                              offset, &tmu_writes);
+                        }
                         break;
                 }
 
@@ -148,13 +167,9 @@ v3d40_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr)
         /* Limit the number of channels returned to both how many the NIR
          * instruction writes and how many the instruction could produce.
          */
-        uint32_t instr_return_channels = nir_tex_instr_dest_size(instr);
-        if (!p1_unpacked.output_type_32_bit)
-                instr_return_channels = (instr_return_channels + 1) / 2;
-
+        assert(instr->dest.is_ssa);
         p0_unpacked.return_words_of_texture_data =
-                (1 << MIN2(instr_return_channels,
-                           c->key->tex[unit].return_channels)) - 1;
+                nir_ssa_def_components_read(&instr->dest.ssa);
 
         /* Word enables can't ask for more channels than the output type could
          * provide (2 for f16, 4 for 32-bit).
@@ -187,6 +202,7 @@ v3d40_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr)
         p1_packed |= unit << 24;
 
         vir_WRTMUC(c, QUNIFORM_TMU_CONFIG_P0, p0_packed);
+        /* XXX perf: Can we skip p1 setup for txf ops? */
         vir_WRTMUC(c, QUNIFORM_TMU_CONFIG_P1, p1_packed);
         if (memcmp(&p2_unpacked, &p2_unpacked_default, sizeof(p2_unpacked)) != 0)
                 vir_WRTMUC(c, QUNIFORM_CONSTANT, p2_packed);
@@ -208,56 +224,8 @@ v3d40_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr)
         while (tmu_writes > 16 / c->threads)
                 c->threads /= 2;
 
-        struct qreg return_values[4];
         for (int i = 0; i < 4; i++) {
-                /* Swizzling .zw of an RG texture should give undefined
-                 * results, not crash the compiler.
-                 */
                 if (p0_unpacked.return_words_of_texture_data & (1 << i))
-                        return_values[i] = vir_LDTMU(c);
-                else
-                        return_values[i] = c->undef;
-        }
-
-        for (int i = 0; i < nir_tex_instr_dest_size(instr); i++) {
-                struct qreg chan;
-
-                if (!p1_unpacked.output_type_32_bit) {
-                        STATIC_ASSERT(PIPE_SWIZZLE_X == 0);
-                        chan = return_values[i / 2];
-
-                        if (nir_alu_type_get_base_type(instr->dest_type) ==
-                            nir_type_float) {
-                                enum v3d_qpu_input_unpack unpack;
-                                if (i & 1)
-                                        unpack = V3D_QPU_UNPACK_H;
-                                else
-                                        unpack = V3D_QPU_UNPACK_L;
-
-                                chan = vir_FMOV(c, chan);
-                                vir_set_unpack(c->defs[chan.index], 0, unpack);
-                        } else {
-                                /* If we're unpacking the low field, shift it
-                                 * up to the top first.
-                                 */
-                                if ((i & 1) == 0) {
-                                        chan = vir_SHL(c, chan,
-                                                       vir_uniform_ui(c, 16));
-                                }
-
-                                /* Do proper sign extension to a 32-bit int. */
-                                if (nir_alu_type_get_base_type(instr->dest_type) ==
-                                    nir_type_int) {
-                                        chan = vir_ASR(c, chan,
-                                                       vir_uniform_ui(c, 16));
-                                } else {
-                                        chan = vir_SHR(c, chan,
-                                                       vir_uniform_ui(c, 16));
-                                }
-                        }
-                } else {
-                        chan = vir_MOV(c, return_values[i]);
-                }
-                ntq_store_dest(c, &instr->dest, i, chan);
+                        ntq_store_dest(c, &instr->dest, i, vir_LDTMU(c));
         }
 }

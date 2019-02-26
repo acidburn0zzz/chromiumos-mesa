@@ -3414,6 +3414,7 @@ struct gl_renderbuffer_attachment
     */
    struct gl_texture_object *Texture;
    GLuint TextureLevel; /**< Attached mipmap level. */
+   GLsizei NumSamples;  /**< from FramebufferTexture2DMultisampleEXT */
    GLuint CubeMapFace;  /**< 0 .. 5, for cube map textures. */
    GLuint Zoffset;      /**< Slice for 3D textures,  or layer for both 1D
                          * and 2D array textures */
@@ -4254,6 +4255,7 @@ struct gl_extensions
    GLboolean EXT_gpu_shader4;
    GLboolean EXT_memory_object;
    GLboolean EXT_memory_object_fd;
+   GLboolean EXT_multisampled_render_to_texture;
    GLboolean EXT_packed_float;
    GLboolean EXT_pixel_buffer_object;
    GLboolean EXT_point_parameters;
@@ -4307,7 +4309,6 @@ struct gl_extensions
    GLboolean ATI_fragment_shader;
    GLboolean GREMEDY_string_marker;
    GLboolean INTEL_conservative_rasterization;
-   GLboolean INTEL_fragment_shader_ordering;
    GLboolean INTEL_performance_query;
    GLboolean INTEL_shader_atomic_float_minmax;
    GLboolean KHR_blend_equation_advanced;

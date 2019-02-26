@@ -45,7 +45,6 @@
 #include "sid.h"
 #include "git_sha1.h"
 #include "gfx9d.h"
-#include "addrlib/gfx9/chip/gfx9_enum.h"
 #include "util/build_id.h"
 #include "util/debug.h"
 #include "util/mesa-sha1.h"
@@ -271,8 +270,6 @@ radv_physical_device_init(struct radv_physical_device *device,
 
 	device->_loader_data.loaderMagic = ICD_LOADER_MAGIC;
 	device->instance = instance;
-	assert(strlen(path) < ARRAY_SIZE(device->path));
-	strncpy(device->path, path, ARRAY_SIZE(device->path));
 
 	device->ws = radv_amdgpu_winsys_create(fd, instance->debug_flags,
 					       instance->perftest_flags);
@@ -737,7 +734,7 @@ void radv_GetPhysicalDeviceFeatures(
 		.shaderTessellationAndGeometryPointSize   = true,
 		.shaderImageGatherExtended                = true,
 		.shaderStorageImageExtendedFormats        = true,
-		.shaderStorageImageMultisample            = false,
+		.shaderStorageImageMultisample            = pdevice->rad_info.chip_class >= VI,
 		.shaderUniformBufferArrayDynamicIndexing  = true,
 		.shaderSampledImageArrayDynamicIndexing   = true,
 		.shaderStorageBufferArrayDynamicIndexing  = true,
@@ -748,7 +745,7 @@ void radv_GetPhysicalDeviceFeatures(
 		.shaderCullDistance                       = true,
 		.shaderFloat64                            = true,
 		.shaderInt64                              = true,
-		.shaderInt16                              = pdevice->rad_info.chip_class >= GFX9 && HAVE_LLVM >= 0x700,
+		.shaderInt16                              = pdevice->rad_info.chip_class >= GFX9,
 		.sparseBinding                            = true,
 		.variableMultisampleRate                  = true,
 		.inheritedQueries                         = true,
@@ -790,7 +787,7 @@ void radv_GetPhysicalDeviceFeatures2(
 		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES: {
 			VkPhysicalDevice16BitStorageFeatures *features =
 			    (VkPhysicalDevice16BitStorageFeatures*)ext;
-			bool enabled = HAVE_LLVM >= 0x0700 && pdevice->rad_info.chip_class >= VI;
+			bool enabled = pdevice->rad_info.chip_class >= VI;
 			features->storageBuffer16BitAccess = enabled;
 			features->uniformAndStorageBuffer16BitAccess = enabled;
 			features->storagePushConstant16 = enabled;
@@ -847,6 +844,12 @@ void radv_GetPhysicalDeviceFeatures2(
 				(VkPhysicalDeviceTransformFeedbackFeaturesEXT*)ext;
 			features->transformFeedback = true;
 			features->geometryStreams = true;
+			break;
+		}
+		case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES_EXT: {
+			VkPhysicalDeviceScalarBlockLayoutFeaturesEXT *features =
+				(VkPhysicalDeviceScalarBlockLayoutFeaturesEXT *)ext;
+			features->scalarBlockLayout = pdevice->rad_info.chip_class >= CIK;
 			break;
 		}
 		default:
@@ -936,9 +939,9 @@ void radv_GetPhysicalDeviceProperties(
 			2048,
 			2048
 		},
-		.subPixelPrecisionBits                    = 4 /* FIXME */,
-		.subTexelPrecisionBits                    = 4 /* FIXME */,
-		.mipmapPrecisionBits                      = 4 /* FIXME */,
+		.subPixelPrecisionBits                    = 8,
+		.subTexelPrecisionBits                    = 8,
+		.mipmapPrecisionBits                      = 8,
 		.maxDrawIndexedIndexValue                 = UINT32_MAX,
 		.maxDrawIndirectCount                     = UINT32_MAX,
 		.maxSamplerLodBias                        = 16,
@@ -970,7 +973,7 @@ void radv_GetPhysicalDeviceProperties(
 		.sampledImageIntegerSampleCounts          = VK_SAMPLE_COUNT_1_BIT,
 		.sampledImageDepthSampleCounts            = sample_counts,
 		.sampledImageStencilSampleCounts          = sample_counts,
-		.storageImageSampleCounts                 = VK_SAMPLE_COUNT_1_BIT,
+		.storageImageSampleCounts                 = pdevice->rad_info.chip_class >= VI ? sample_counts : VK_SAMPLE_COUNT_1_BIT,
 		.maxSampleMaskWords                       = 1,
 		.timestampComputeAndGraphics              = true,
 		.timestampPeriod                          = 1000000.0 / pdevice->rad_info.clock_crystal_freq,
@@ -4526,11 +4529,11 @@ radv_tex_filter_mode(VkSamplerReductionModeEXT mode)
 {
 	switch (mode) {
 	case VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT:
-		return SQ_IMG_FILTER_MODE_BLEND;
+		return V_008F30_SQ_IMG_FILTER_MODE_BLEND;
 	case VK_SAMPLER_REDUCTION_MODE_MIN_EXT:
-		return SQ_IMG_FILTER_MODE_MIN;
+		return V_008F30_SQ_IMG_FILTER_MODE_MIN;
 	case VK_SAMPLER_REDUCTION_MODE_MAX_EXT:
-		return SQ_IMG_FILTER_MODE_MAX;
+		return V_008F30_SQ_IMG_FILTER_MODE_MAX;
 	default:
 		break;
 	}
@@ -4559,7 +4562,7 @@ radv_init_sampler(struct radv_device *device,
 	uint32_t max_aniso = radv_get_max_anisotropy(device, pCreateInfo);
 	uint32_t max_aniso_ratio = radv_tex_aniso_filter(max_aniso);
 	bool is_vi = (device->physical_device->rad_info.chip_class >= VI);
-	unsigned filter_mode = SQ_IMG_FILTER_MODE_BLEND;
+	unsigned filter_mode = V_008F30_SQ_IMG_FILTER_MODE_BLEND;
 
 	const struct VkSamplerReductionModeCreateInfoEXT *sampler_reduction =
 		vk_find_struct_const(pCreateInfo->pNext,

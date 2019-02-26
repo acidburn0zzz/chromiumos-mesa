@@ -136,27 +136,32 @@ anv_shader_compile_to_nir(struct anv_pipeline *pipeline,
    struct spirv_to_nir_options spirv_options = {
       .lower_workgroup_access_to_offsets = true,
       .caps = {
-         .float64 = device->instance->physicalDevice.info.gen >= 8,
-         .int64 = device->instance->physicalDevice.info.gen >= 8,
-         .tessellation = true,
          .device_group = true,
          .draw_parameters = true,
+         .float64 = device->instance->physicalDevice.info.gen >= 8,
          .image_write_without_format = true,
-         .multiview = true,
-         .variable_pointers = true,
-         .storage_16bit = device->instance->physicalDevice.info.gen >= 8,
          .int16 = device->instance->physicalDevice.info.gen >= 8,
+         .int64 = device->instance->physicalDevice.info.gen >= 8,
+         .min_lod = true,
+         .multiview = true,
+         .post_depth_coverage = device->instance->physicalDevice.info.gen >= 9,
          .shader_viewport_index_layer = true,
+         .stencil_export = device->instance->physicalDevice.info.gen >= 9,
+         .storage_8bit = device->instance->physicalDevice.info.gen >= 8,
+         .storage_16bit = device->instance->physicalDevice.info.gen >= 8,
          .subgroup_arithmetic = true,
          .subgroup_basic = true,
          .subgroup_ballot = true,
          .subgroup_quad = true,
          .subgroup_shuffle = true,
          .subgroup_vote = true,
-         .stencil_export = device->instance->physicalDevice.info.gen >= 9,
-         .storage_8bit = device->instance->physicalDevice.info.gen >= 8,
-         .post_depth_coverage = device->instance->physicalDevice.info.gen >= 9,
+         .tessellation = true,
+         .variable_pointers = true,
       },
+      .ubo_ptr_type = glsl_vector_type(GLSL_TYPE_UINT, 2),
+      .ssbo_ptr_type = glsl_vector_type(GLSL_TYPE_UINT, 2),
+      .push_const_ptr_type = glsl_uint_type(),
+      .shared_ptr_type = glsl_uint_type(),
    };
 
    nir_function *entry_point =
@@ -180,10 +185,10 @@ anv_shader_compile_to_nir(struct anv_pipeline *pipeline,
     * inline functions.  That way they get properly initialized at the top
     * of the function and not at the top of its caller.
     */
-   NIR_PASS_V(nir, nir_lower_constant_initializers, nir_var_local);
+   NIR_PASS_V(nir, nir_lower_constant_initializers, nir_var_function);
    NIR_PASS_V(nir, nir_lower_returns);
    NIR_PASS_V(nir, nir_inline_functions);
-   NIR_PASS_V(nir, nir_copy_prop);
+   NIR_PASS_V(nir, nir_opt_deref);
 
    /* Pick off the single entrypoint that we want */
    foreach_list_typed_safe(nir_function, func, node, &nir->functions) {
@@ -207,6 +212,9 @@ anv_shader_compile_to_nir(struct anv_pipeline *pipeline,
 
    NIR_PASS_V(nir, nir_remove_dead_variables,
               nir_var_shader_in | nir_var_shader_out | nir_var_system_value);
+
+   NIR_PASS_V(nir, nir_lower_explicit_io, nir_var_ubo | nir_var_ssbo,
+              nir_address_format_vk_index_offset);
 
    if (stage == MESA_SHADER_FRAGMENT)
       NIR_PASS_V(nir, nir_lower_wpos_center, pipeline->sample_shading_enable);
@@ -780,7 +788,7 @@ anv_pipeline_link_fs(const struct brw_compiler *compiler,
           !(stage->key.wm.color_outputs_valid & (1 << rt))) {
          /* Unused or out-of-bounds, throw it away */
          deleted_output = true;
-         var->data.mode = nir_var_local;
+         var->data.mode = nir_var_function;
          exec_node_remove(&var->node);
          exec_list_push_tail(&impl->locals, &var->node);
          continue;

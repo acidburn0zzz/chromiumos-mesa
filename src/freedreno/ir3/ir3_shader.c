@@ -126,6 +126,7 @@ static void
 assemble_variant(struct ir3_shader_variant *v)
 {
 	struct ir3_compiler *compiler = v->shader->compiler;
+	struct shader_info *info = &v->shader->nir->info;
 	uint32_t gpu_id = compiler->gpu_id;
 	uint32_t sz, *bin;
 
@@ -134,7 +135,8 @@ assemble_variant(struct ir3_shader_variant *v)
 
 	v->bo = fd_bo_new(compiler->dev, sz,
 			DRM_FREEDRENO_GEM_CACHE_WCOMBINE |
-			DRM_FREEDRENO_GEM_TYPE_KMEM);
+			DRM_FREEDRENO_GEM_TYPE_KMEM,
+			"%s:%s", ir3_shader_stage(v->shader), info->name);
 
 	memcpy(fd_bo_map(v->bo), bin, sz);
 
@@ -329,7 +331,7 @@ ir3_shader_disasm(struct ir3_shader_variant *so, uint32_t *bin, FILE *out)
 				so->immediates[i].val[3]);
 	}
 
-	disasm_a3xx(bin, so->info.sizedwords, 0, out);
+	disasm_a3xx(bin, so->info.sizedwords, 0, out, ir->compiler->gpu_id);
 
 	switch (so->type) {
 	case MESA_SHADER_VERTEX:

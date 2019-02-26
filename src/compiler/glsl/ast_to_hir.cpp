@@ -4940,7 +4940,8 @@ ast_declarator_list::hir(exec_list *instructions,
              && process_qualifier_constant(state, &loc, "offset",
                                         type->qualifier.offset,
                                         &qual_offset)) {
-            state->atomic_counter_offsets[qual_binding] = qual_offset;
+            if (qual_binding < ARRAY_SIZE(state->atomic_counter_offsets))
+               state->atomic_counter_offsets[qual_binding] = qual_offset;
          }
       }
 
@@ -7417,7 +7418,7 @@ ast_process_struct_or_iface_block_members(exec_list *instructions,
                   if (member_align == 0 ||
                       member_align & (member_align - 1)) {
                      _mesa_glsl_error(&loc, state, "align layout qualifier "
-                                      "in not a power of 2");
+                                      "is not a power of 2");
                   } else {
                      fields[i].offset = glsl_align(offset, member_align);
                      next_offset = glsl_align(fields[i].offset + size, align);

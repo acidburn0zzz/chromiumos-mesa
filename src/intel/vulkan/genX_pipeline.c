@@ -1296,17 +1296,17 @@ emit_3dstate_hs_te_ds(struct anv_pipeline *pipeline,
          get_scratch_address(pipeline, MESA_SHADER_TESS_CTRL, tcs_bin);
    }
 
-   const VkPipelineTessellationDomainOriginStateCreateInfoKHR *domain_origin_state =
-      tess_info ? vk_find_struct_const(tess_info, PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO_KHR) : NULL;
+   const VkPipelineTessellationDomainOriginStateCreateInfo *domain_origin_state =
+      tess_info ? vk_find_struct_const(tess_info, PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO) : NULL;
 
-   VkTessellationDomainOriginKHR uv_origin =
+   VkTessellationDomainOrigin uv_origin =
       domain_origin_state ? domain_origin_state->domainOrigin :
-                            VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT_KHR;
+                            VK_TESSELLATION_DOMAIN_ORIGIN_UPPER_LEFT;
 
    anv_batch_emit(&pipeline->batch, GENX(3DSTATE_TE), te) {
       te.Partitioning = tes_prog_data->partitioning;
 
-      if (uv_origin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT_KHR) {
+      if (uv_origin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT) {
          te.OutputTopology = tes_prog_data->output_topology;
       } else {
          /* When the origin is upper-left, we have to flip the winding order */
@@ -1956,8 +1956,12 @@ compute_pipeline_create(
       .KernelStartPointer     = cs_bin->kernel.offset,
       /* WA_1606682166 */
       .SamplerCount           = GEN_GEN == 11 ? 0 : get_sampler_count(cs_bin),
-      /* Gen 11 workarounds table #2056 WABTPPrefetchDisable */
-      .BindingTableEntryCount = GEN_GEN == 11 ? 0 : get_binding_table_entry_count(cs_bin),
+      /* Gen 11 workarounds table #2056 WABTPPrefetchDisable
+       *
+       * We add 1 because the CS indirect parameters buffer isn't accounted
+       * for in bind_map.surface_count.
+       */
+      .BindingTableEntryCount = GEN_GEN == 11 ? 0 : 1 + MIN2(cs_bin->bind_map.surface_count, 30),
       .BarrierEnable          = cs_prog_data->uses_barrier,
       .SharedLocalMemorySize  =
          encode_slm_size(GEN_GEN, cs_prog_data->base.total_shared),

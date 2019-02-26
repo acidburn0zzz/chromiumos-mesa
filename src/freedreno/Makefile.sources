@@ -22,6 +22,8 @@ ir3_SOURCES := \
 	ir3/ir3_compiler.c \
 	ir3/ir3_compiler.h \
 	ir3/ir3_compiler_nir.c \
+	ir3/ir3_context.c \
+	ir3/ir3_context.h \
 	ir3/ir3_cp.c \
 	ir3/ir3_depth.c \
 	ir3/ir3_group.c \
@@ -39,3 +41,11 @@ ir3_SOURCES := \
 ir3_GENERATED_FILES := \
 	ir3/ir3_nir_trig.c
 
+registers_FILES := \
+	registers/a2xx.xml.h \
+	registers/a3xx.xml.h \
+	registers/a4xx.xml.h \
+	registers/a5xx.xml.h \
+	registers/a6xx.xml.h \
+	registers/adreno_common.xml.h \
+	registers/adreno_pm4.xml.h

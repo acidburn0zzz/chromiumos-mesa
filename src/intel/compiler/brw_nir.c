@@ -527,7 +527,7 @@ brw_nir_no_indirect_mask(const struct brw_compiler *compiler,
    if (compiler->glsl_compiler_options[stage].EmitNoIndirectOutput)
       indirect_mask |= nir_var_shader_out;
    if (compiler->glsl_compiler_options[stage].EmitNoIndirectTemp)
-      indirect_mask |= nir_var_local;
+      indirect_mask |= nir_var_function;
 
    return indirect_mask;
 }
@@ -542,8 +542,8 @@ brw_nir_optimize(nir_shader *nir, const struct brw_compiler *compiler,
    bool progress;
    do {
       progress = false;
-      OPT(nir_split_array_vars, nir_var_local);
-      OPT(nir_shrink_vec_array_vars, nir_var_local);
+      OPT(nir_split_array_vars, nir_var_function);
+      OPT(nir_shrink_vec_array_vars, nir_var_function);
       OPT(nir_lower_vars_to_ssa);
       if (allow_copies) {
          /* Only run this pass in the first call to brw_nir_optimize.  Later
@@ -568,8 +568,33 @@ brw_nir_optimize(nir_shader *nir, const struct brw_compiler *compiler,
       OPT(nir_copy_prop);
       OPT(nir_opt_dce);
       OPT(nir_opt_cse);
-      OPT(nir_opt_peephole_select, 0);
+
+      /* Passing 0 to the peephole select pass causes it to convert
+       * if-statements that contain only move instructions in the branches
+       * regardless of the count.
+       *
+       * Passing 1 to the peephole select pass causes it to convert
+       * if-statements that contain at most a single ALU instruction (total)
+       * in both branches.  Before Gen6, some math instructions were
+       * prohibitively expensive and the results of compare operations need an
+       * extra resolve step.  For these reasons, this pass is more harmful
+       * than good on those platforms.
+       *
+       * For indirect loads of uniforms (push constants), we assume that array
+       * indices will nearly always be in bounds and the cost of the load is
+       * low.  Therefore there shouldn't be a performance benefit to avoid it.
+       * However, in vec4 tessellation shaders, these loads operate by
+       * actually pulling from memory.
+       */
+      const bool is_vec4_tessellation = !is_scalar &&
+         (nir->info.stage == MESA_SHADER_TESS_CTRL ||
+          nir->info.stage == MESA_SHADER_TESS_EVAL);
+      OPT(nir_opt_peephole_select, 0, !is_vec4_tessellation, false);
+      OPT(nir_opt_peephole_select, 1, !is_vec4_tessellation,
+          compiler->devinfo->gen >= 6);
+
       OPT(nir_opt_intrinsics);
+      OPT(nir_opt_idiv_const, 32);
       OPT(nir_opt_algebraic);
       OPT(nir_opt_constant_folding);
       OPT(nir_opt_dead_cf);
@@ -602,7 +627,7 @@ brw_nir_optimize(nir_shader *nir, const struct brw_compiler *compiler,
    /* Workaround Gfxbench unused local sampler variable which will trigger an
     * assert in the opt_large_constants pass.
     */
-   OPT(nir_remove_dead_variables, nir_var_local);
+   OPT(nir_remove_dead_variables, nir_var_function);
 
    return nir;
 }
@@ -656,6 +681,9 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir)
       .lower_txf_offset = true,
       .lower_rect_offset = true,
       .lower_txd_cube_map = true,
+      .lower_txb_shadow_clamp = true,
+      .lower_txd_shadow_clamp = true,
+      .lower_txd_offset_clamp = true,
    };
 
    OPT(nir_lower_tex, &tex_options);
@@ -664,7 +692,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir)
    OPT(nir_lower_global_vars_to_local);
 
    OPT(nir_split_var_copies);
-   OPT(nir_split_struct_vars, nir_var_local);
+   OPT(nir_split_struct_vars, nir_var_function);
 
    /* Run opt_algebraic before int64 lowering so we can hopefully get rid
     * of some int64 instructions.
@@ -676,7 +704,8 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir)
     */
    OPT(nir_lower_int64, nir_lower_imul64 |
                         nir_lower_isign64 |
-                        nir_lower_divmod64);
+                        nir_lower_divmod64 |
+                        nir_lower_imul_high64);
 
    nir = brw_nir_optimize(nir, compiler, is_scalar, true);
 
@@ -742,7 +771,7 @@ brw_nir_link_shaders(const struct brw_compiler *compiler,
       *consumer = brw_nir_optimize(*consumer, compiler, c_is_scalar, false);
    }
 
-   if (nir_link_constant_varyings(*producer, *consumer))
+   if (nir_link_opt_varyings(*producer, *consumer))
       *consumer = brw_nir_optimize(*consumer, compiler, c_is_scalar, false);
 
    NIR_PASS_V(*producer, nir_remove_dead_variables, nir_var_shader_out);
@@ -802,6 +831,8 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
    OPT(nir_copy_prop);
    OPT(nir_opt_dce);
    OPT(nir_opt_move_comparisons);
+
+   OPT(nir_lower_bool_to_int32);
 
    OPT(nir_lower_locals_to_regs);
 

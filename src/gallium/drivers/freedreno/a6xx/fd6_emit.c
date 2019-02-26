@@ -741,7 +741,6 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 		OUT_PKT4(ring, REG_A6XX_VFD_UNKNOWN_A008, 1);
 		OUT_RING(ring, 0);
 
-
 		OUT_PKT4(ring, REG_A6XX_PC_PRIMITIVE_CNTL_0, 1);
 		OUT_RING(ring, rasterizer->pc_primitive_cntl |
 				 COND(emit->info->primitive_restart && emit->info->index_size,
@@ -769,6 +768,7 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 		struct fd_ringbuffer *vsconstobj = fd_submit_new_ringbuffer(
 				ctx->batch->submit, 0x1000, FD_RINGBUFFER_STREAMING);
 
+		OUT_WFI5(vsconstobj);
 		ir3_emit_vs_consts(vp, vsconstobj, ctx, emit->info);
 		fd6_emit_add_group(emit, vsconstobj, FD6_GROUP_VS_CONST, 0x7);
 		fd_ringbuffer_del(vsconstobj);
@@ -778,6 +778,7 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 		struct fd_ringbuffer *fsconstobj = fd_submit_new_ringbuffer(
 				ctx->batch->submit, 0x1000, FD_RINGBUFFER_STREAMING);
 
+		OUT_WFI5(fsconstobj);
 		ir3_emit_fs_consts(fp, fsconstobj, ctx);
 		fd6_emit_add_group(emit, fsconstobj, FD6_GROUP_FS_CONST, 0x6);
 		fd_ringbuffer_del(fsconstobj);
@@ -879,12 +880,16 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 			OUT_RING(ring, blend_control);
 		}
 
-		OUT_PKT4(ring, REG_A6XX_RB_BLEND_CNTL, 1);
-		OUT_RING(ring, blend->rb_blend_cntl |
-				A6XX_RB_BLEND_CNTL_SAMPLE_MASK(0xffff));
-
 		OUT_PKT4(ring, REG_A6XX_SP_BLEND_CNTL, 1);
 		OUT_RING(ring, blend->sp_blend_cntl);
+	}
+
+	if (dirty & (FD_DIRTY_BLEND | FD_DIRTY_SAMPLE_MASK)) {
+		struct fd6_blend_stateobj *blend = fd6_blend_stateobj(ctx->blend);
+
+		OUT_PKT4(ring, REG_A6XX_RB_BLEND_CNTL, 1);
+		OUT_RING(ring, blend->rb_blend_cntl |
+				A6XX_RB_BLEND_CNTL_SAMPLE_MASK(ctx->sample_mask));
 	}
 
 	if (dirty & FD_DIRTY_BLEND_COLOR) {

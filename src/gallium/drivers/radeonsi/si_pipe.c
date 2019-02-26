@@ -103,6 +103,8 @@ static const struct debug_named_value debug_options[] = {
 	{ "testvmfaultshader", DBG(TEST_VMFAULT_SHADER), "Invoke a shader VM fault test and exit." },
 	{ "testdmaperf", DBG(TEST_DMA_PERF), "Test DMA performance" },
 	{ "testgds", DBG(TEST_GDS), "Test GDS." },
+	{ "testgdsmm", DBG(TEST_GDS_MM), "Test GDS memory management." },
+	{ "testgdsoamm", DBG(TEST_GDS_OA_MM), "Test GDS OA memory management." },
 
 	DEBUG_NAMED_VALUE_END /* must be last */
 };
@@ -125,7 +127,7 @@ static void si_init_compiler(struct si_screen *sscreen,
 		(create_low_opt_compiler ? AC_TM_CREATE_LOW_OPT : 0);
 
 	ac_init_llvm_once();
-	ac_init_llvm_compiler(compiler, true, sscreen->info.family, tm_options);
+	ac_init_llvm_compiler(compiler, sscreen->info.family, tm_options);
 	compiler->passes = ac_create_llvm_passes(compiler->tm);
 
 	if (compiler->low_opt_tm)
@@ -499,7 +501,6 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen,
 	si_init_state_functions(sctx);
 	si_init_shader_functions(sctx);
 	si_init_viewport_functions(sctx);
-	si_init_ia_multi_vgt_param_table(sctx);
 
 	if (sctx->chip_class >= CIK)
 		cik_init_sdma_functions(sctx);
@@ -520,8 +521,9 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen,
 	sctx->blitter = util_blitter_create(&sctx->b);
 	if (sctx->blitter == NULL)
 		goto fail;
-	sctx->blitter->draw_rectangle = si_draw_rectangle;
 	sctx->blitter->skip_viewport_restore = true;
+
+	si_init_draw_functions(sctx);
 
 	sctx->sample_mask = 0xffff;
 
@@ -703,7 +705,7 @@ static void si_destroy_screen(struct pipe_screen* pscreen)
 	mtx_destroy(&sscreen->shader_parts_mutex);
 	si_destroy_shader_cache(sscreen);
 
-	si_perfcounters_destroy(sscreen);
+	si_destroy_perfcounters(sscreen);
 	si_gpu_load_kill_thread(sscreen);
 
 	mtx_destroy(&sscreen->gpu_load_mutex);
@@ -721,39 +723,6 @@ static void si_init_gs_info(struct si_screen *sscreen)
 {
 	sscreen->gs_table_depth = ac_get_gs_table_depth(sscreen->info.chip_class,
 							sscreen->info.family);
-}
-
-static void si_handle_env_var_force_family(struct si_screen *sscreen)
-{
-	const char *family = debug_get_option("SI_FORCE_FAMILY", NULL);
-	unsigned i;
-
-	if (!family)
-		return;
-
-	for (i = CHIP_TAHITI; i < CHIP_LAST; i++) {
-		if (!strcmp(family, ac_get_llvm_processor_name(i))) {
-			/* Override family and chip_class. */
-			sscreen->info.family = i;
-			sscreen->info.name = "GCN-NOOP";
-
-			if (i >= CHIP_VEGA10)
-				sscreen->info.chip_class = GFX9;
-			else if (i >= CHIP_TONGA)
-				sscreen->info.chip_class = VI;
-			else if (i >= CHIP_BONAIRE)
-				sscreen->info.chip_class = CIK;
-			else
-				sscreen->info.chip_class = SI;
-
-			/* Don't submit any IBs. */
-			setenv("RADEON_NOOP", "1", 1);
-			return;
-		}
-	}
-
-	fprintf(stderr, "radeonsi: Unknown family: %s\n", family);
-	exit(1);
 }
 
 static void si_test_vmfault(struct si_screen *sscreen)
@@ -784,6 +753,41 @@ static void si_test_vmfault(struct si_screen *sscreen)
 	if (sscreen->debug_flags & DBG(TEST_VMFAULT_SHADER)) {
 		util_test_constant_buffer(ctx, buf);
 		puts("VM fault test: Shader - done.");
+	}
+	exit(0);
+}
+
+static void si_test_gds_memory_management(struct si_context *sctx,
+					  unsigned alloc_size, unsigned alignment,
+					  enum radeon_bo_domain domain)
+{
+	struct radeon_winsys *ws = sctx->ws;
+	struct radeon_cmdbuf *cs[8];
+	struct pb_buffer *gds_bo[ARRAY_SIZE(cs)];
+
+	for (unsigned i = 0; i < ARRAY_SIZE(cs); i++) {
+		cs[i] = ws->cs_create(sctx->ctx, RING_COMPUTE,
+				      NULL, NULL, false);
+		gds_bo[i] = ws->buffer_create(ws, alloc_size, alignment, domain, 0);
+		assert(gds_bo[i]);
+	}
+
+	for (unsigned iterations = 0; iterations < 20000; iterations++) {
+		for (unsigned i = 0; i < ARRAY_SIZE(cs); i++) {
+			/* This clears GDS with CP DMA.
+			 *
+			 * We don't care if GDS is present. Just add some packet
+			 * to make the GPU busy for a moment.
+			 */
+			si_cp_dma_clear_buffer(sctx, cs[i], NULL, 0, alloc_size, 0,
+					       SI_CPDMA_SKIP_BO_LIST_UPDATE |
+					       SI_CPDMA_SKIP_CHECK_CS_SPACE |
+					       SI_CPDMA_SKIP_GFX_SYNC, 0, 0);
+
+			ws->cs_add_buffer(cs[i], gds_bo[i], domain,
+					  RADEON_USAGE_READWRITE, 0);
+			ws->cs_flush(cs[i], PIPE_FLUSH_ASYNC, NULL);
+		}
 	}
 	exit(0);
 }
@@ -841,7 +845,6 @@ struct pipe_screen *radeonsi_screen_create(struct radeon_winsys *ws,
 
 	sscreen->ws = ws;
 	ws->query_info(ws, &sscreen->info);
-	si_handle_env_var_force_family(sscreen);
 
 	if (sscreen->info.chip_class >= GFX9) {
 		sscreen->se_tile_repeat = 32 * sscreen->info.max_se;
@@ -1032,21 +1035,26 @@ struct pipe_screen *radeonsi_screen_create(struct radeon_winsys *ws,
 					sscreen->info.family == CHIP_RAVEN;
 	sscreen->has_dcc_constant_encode = sscreen->info.family == CHIP_RAVEN2;
 
+	/* Only enable primitive binning on APUs by default. */
+	sscreen->dpbb_allowed = sscreen->info.family == CHIP_RAVEN ||
+				sscreen->info.family == CHIP_RAVEN2;
+
+	sscreen->dfsm_allowed = sscreen->info.family == CHIP_RAVEN ||
+				sscreen->info.family == CHIP_RAVEN2;
+
+	/* Process DPBB enable flags. */
 	if (sscreen->debug_flags & DBG(DPBB)) {
 		sscreen->dpbb_allowed = true;
-	} else {
-		/* Only enable primitive binning on APUs by default. */
-		/* TODO: Investigate if binning is profitable on Vega12. */
-		sscreen->dpbb_allowed = !(sscreen->debug_flags & DBG(NO_DPBB)) &&
-					(sscreen->info.family == CHIP_RAVEN ||
-					 sscreen->info.family == CHIP_RAVEN2);
+		if (sscreen->debug_flags & DBG(DFSM))
+			sscreen->dfsm_allowed = true;
 	}
 
-	if (sscreen->debug_flags & DBG(DFSM)) {
-		sscreen->dfsm_allowed = sscreen->dpbb_allowed;
-	} else {
-		sscreen->dfsm_allowed = sscreen->dpbb_allowed &&
-					!(sscreen->debug_flags & DBG(NO_DFSM));
+	/* Process DPBB disable flags. */
+	if (sscreen->debug_flags & DBG(NO_DPBB)) {
+		sscreen->dpbb_allowed = false;
+		sscreen->dfsm_allowed = false;
+	} else if (sscreen->debug_flags & DBG(NO_DFSM)) {
+		sscreen->dfsm_allowed = false;
 	}
 
 	/* While it would be nice not to have this flag, we are constrained
@@ -1136,6 +1144,15 @@ struct pipe_screen *radeonsi_screen_create(struct radeon_winsys *ws,
 
 	if (sscreen->debug_flags & DBG(TEST_GDS))
 		si_test_gds((struct si_context*)sscreen->aux_context);
+
+	if (sscreen->debug_flags & DBG(TEST_GDS_MM)) {
+		si_test_gds_memory_management((struct si_context*)sscreen->aux_context,
+					      32 * 1024, 4, RADEON_DOMAIN_GDS);
+	}
+	if (sscreen->debug_flags & DBG(TEST_GDS_OA_MM)) {
+		si_test_gds_memory_management((struct si_context*)sscreen->aux_context,
+					      4, 1, RADEON_DOMAIN_OA);
+	}
 
 	return &sscreen->b;
 }
