@@ -550,7 +550,7 @@ GBM_EXPORT void *
 gbm_bo_map(struct gbm_bo *bo,
               uint32_t x, uint32_t y,
               uint32_t width, uint32_t height,
-              uint32_t flags, uint32_t *stride, void **map_data, size_t plane)
+              uint32_t flags, uint32_t *stride, void **map_data)
 {
    if (!bo || width == 0 || height == 0 || !stride || !map_data) {
       errno = EINVAL;
