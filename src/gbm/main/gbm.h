@@ -348,7 +348,7 @@ enum gbm_bo_transfer_flags {
 void *
 gbm_bo_map(struct gbm_bo *bo,
            uint32_t x, uint32_t y, uint32_t width, uint32_t height,
-           uint32_t flags, uint32_t *stride, void **map_data, size_t plane);
+           uint32_t flags, uint32_t *stride, void **map_data);
 
 void
 gbm_bo_unmap(struct gbm_bo *bo, void *map_data);
