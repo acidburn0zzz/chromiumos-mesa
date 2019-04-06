@@ -212,7 +212,8 @@ struct ir3_instruction {
 		IR3_INSTR_MARK  = 0x1000,
 		IR3_INSTR_UNUSED= 0x2000,
 	} flags;
-	int repeat;
+	uint8_t repeat;
+	uint8_t nop;
 #ifdef DEBUG
 	unsigned regs_max;
 #endif
@@ -688,6 +689,7 @@ static inline bool is_load(struct ir3_instruction *instr)
 	switch (instr->opc) {
 	case OPC_LDG:
 	case OPC_LDGB:
+	case OPC_LDIB:
 	case OPC_LDL:
 	case OPC_LDP:
 	case OPC_L2G:
@@ -1001,6 +1003,8 @@ void ir3_group(struct ir3 *ir);
 void ir3_sched_add_deps(struct ir3 *ir);
 int ir3_sched(struct ir3 *ir);
 
+void ir3_a6xx_fixup_atomic_dests(struct ir3 *ir, struct ir3_shader_variant *so);
+
 /* register assignment: */
 struct ir3_ra_reg_set * ir3_ra_alloc_reg_set(struct ir3_compiler *compiler);
 int ir3_ra(struct ir3 *ir3, gl_shader_stage type,
@@ -1012,6 +1016,59 @@ void ir3_legalize(struct ir3 *ir, int *num_samp, bool *has_ssbo, int *max_bary);
 /* ************************************************************************* */
 /* instruction helpers */
 
+static inline struct ir3_instruction *
+create_immed_typed(struct ir3_block *block, uint32_t val, type_t type)
+{
+	struct ir3_instruction *mov;
+	unsigned flags = (type_size(type) < 32) ? IR3_REG_HALF : 0;
+
+	mov = ir3_instr_create(block, OPC_MOV);
+	mov->cat1.src_type = type;
+	mov->cat1.dst_type = type;
+	ir3_reg_create(mov, 0, flags);
+	ir3_reg_create(mov, 0, IR3_REG_IMMED)->uim_val = val;
+
+	return mov;
+}
+
+static inline struct ir3_instruction *
+create_immed(struct ir3_block *block, uint32_t val)
+{
+	return create_immed_typed(block, val, TYPE_U32);
+}
+
+static inline struct ir3_instruction *
+create_uniform(struct ir3_block *block, unsigned n)
+{
+	struct ir3_instruction *mov;
+
+	mov = ir3_instr_create(block, OPC_MOV);
+	/* TODO get types right? */
+	mov->cat1.src_type = TYPE_F32;
+	mov->cat1.dst_type = TYPE_F32;
+	ir3_reg_create(mov, 0, 0);
+	ir3_reg_create(mov, n, IR3_REG_CONST);
+
+	return mov;
+}
+
+static inline struct ir3_instruction *
+create_uniform_indirect(struct ir3_block *block, int n,
+		struct ir3_instruction *address)
+{
+	struct ir3_instruction *mov;
+
+	mov = ir3_instr_create(block, OPC_MOV);
+	mov->cat1.src_type = TYPE_U32;
+	mov->cat1.dst_type = TYPE_U32;
+	ir3_reg_create(mov, 0, 0);
+	ir3_reg_create(mov, 0, IR3_REG_CONST | IR3_REG_RELATIV)->array.offset = n;
+
+	ir3_instr_set_address(mov, address);
+
+	return mov;
+}
+
 /* creates SSA src of correct type (ie. half vs full precision) */
 static inline struct ir3_register * __ssa_src(struct ir3_instruction *instr,
 		struct ir3_instruction *src, unsigned flags)
@@ -1021,6 +1078,7 @@ static inline struct ir3_register * __ssa_src(struct ir3_instruction *instr,
 		flags |= IR3_REG_HALF;
 	reg = ir3_reg_create(instr, 0, IR3_REG_SSA | flags);
 	reg->instr = src;
+	reg->wrmask = src->regs[0]->wrmask;
 	return reg;
 }
 
@@ -1033,7 +1091,7 @@ ir3_MOV(struct ir3_block *block, struct ir3_instruction *src, type_t type)
 		struct ir3_register *src_reg = __ssa_src(instr, src, IR3_REG_ARRAY);
 		src_reg->array = src->regs[0]->array;
 	} else {
-		__ssa_src(instr, src, 0);
+		__ssa_src(instr, src, src->regs[0]->flags & IR3_REG_HIGH);
 	}
 	debug_assert(!(src->regs[0]->flags & IR3_REG_RELATIV));
 	instr->cat1.src_type = type;
@@ -1113,6 +1171,23 @@ ir3_##name(struct ir3_block *block,                                      \
 	__ssa_src(instr, a, aflags);                                         \
 	__ssa_src(instr, b, bflags);                                         \
 	__ssa_src(instr, c, cflags);                                         \
+	return instr;                                                        \
+}
+
+#define INSTR3F(f, name)                                                 \
+static inline struct ir3_instruction *                                   \
+ir3_##name##_##f(struct ir3_block *block,                                \
+		struct ir3_instruction *a, unsigned aflags,                      \
+		struct ir3_instruction *b, unsigned bflags,                      \
+		struct ir3_instruction *c, unsigned cflags)                      \
+{                                                                        \
+	struct ir3_instruction *instr =                                      \
+		ir3_instr_create2(block, OPC_##name, 5);                         \
+	ir3_reg_create(instr, 0, 0);   /* dst */                             \
+	__ssa_src(instr, a, aflags);                                         \
+	__ssa_src(instr, b, bflags);                                         \
+	__ssa_src(instr, c, cflags);                                         \
+	instr->flags |= IR3_INSTR_##f;                                       \
 	return instr;                                                        \
 }
 
@@ -1272,9 +1347,6 @@ INSTR2(LDG)
 INSTR2(LDL)
 INSTR3(STG)
 INSTR3(STL)
-INSTR3(LDGB)
-INSTR4(STGB)
-INSTR4(STIB)
 INSTR1(RESINFO)
 INSTR1(RESFMT)
 INSTR2(ATOMIC_ADD)
@@ -1288,6 +1360,24 @@ INSTR2(ATOMIC_MAX)
 INSTR2(ATOMIC_AND)
 INSTR2(ATOMIC_OR)
 INSTR2(ATOMIC_XOR)
+#if GPU >= 600
+INSTR3(STIB);
+INSTR2(LDIB);
+INSTR3F(G, ATOMIC_ADD)
+INSTR3F(G, ATOMIC_SUB)
+INSTR3F(G, ATOMIC_XCHG)
+INSTR3F(G, ATOMIC_INC)
+INSTR3F(G, ATOMIC_DEC)
+INSTR3F(G, ATOMIC_CMPXCHG)
+INSTR3F(G, ATOMIC_MIN)
+INSTR3F(G, ATOMIC_MAX)
+INSTR3F(G, ATOMIC_AND)
+INSTR3F(G, ATOMIC_OR)
+INSTR3F(G, ATOMIC_XOR)
+#elif GPU >= 400
+INSTR3(LDGB)
+INSTR4(STGB)
+INSTR4(STIB)
 INSTR4F(G, ATOMIC_ADD)
 INSTR4F(G, ATOMIC_SUB)
 INSTR4F(G, ATOMIC_XCHG)
@@ -1299,6 +1389,7 @@ INSTR4F(G, ATOMIC_MAX)
 INSTR4F(G, ATOMIC_AND)
 INSTR4F(G, ATOMIC_OR)
 INSTR4F(G, ATOMIC_XOR)
+#endif
 
 /* cat7 instructions: */
 INSTR0(BAR)

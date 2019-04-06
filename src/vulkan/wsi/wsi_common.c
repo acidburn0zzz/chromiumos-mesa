@@ -22,7 +22,7 @@
  */
 
 #include "wsi_common_private.h"
-#include "drm_fourcc.h"
+#include "drm-uapi/drm_fourcc.h"
 #include "util/macros.h"
 #include "vk_util.h"
 
@@ -57,6 +57,8 @@ wsi_device_init(struct wsi_device *wsi,
       .pNext = &wsi->pci_bus_info,
    };
    GetPhysicalDeviceProperties2(pdevice, &pdp2);
+
+   wsi->maxImageDimension2D = pdp2.properties.limits.maxImageDimension2D;
 
    GetPhysicalDeviceMemoryProperties(pdevice, &wsi->memory_props);
    GetPhysicalDeviceQueueFamilyProperties(pdevice, &wsi->queue_family_count, NULL);
@@ -278,8 +280,8 @@ wsi_create_native_image(const struct wsi_swapchain *chain,
          .sType = VK_STRUCTURE_TYPE_WSI_FORMAT_MODIFIER_PROPERTIES_LIST_MESA,
          .pNext = NULL,
       };
-      VkFormatProperties2KHR format_props = {
-         .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2_KHR,
+      VkFormatProperties2 format_props = {
+         .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
          .pNext = &modifier_props_list,
       };
       wsi->GetPhysicalDeviceFormatProperties2KHR(wsi->pdevice,
@@ -379,13 +381,13 @@ wsi_create_native_image(const struct wsi_swapchain *chain,
       .pNext = NULL,
       .implicit_sync = true,
    };
-   const VkExportMemoryAllocateInfoKHR memory_export_info = {
-      .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO_KHR,
+   const VkExportMemoryAllocateInfo memory_export_info = {
+      .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
       .pNext = &memory_wsi_info,
       .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
    };
-   const VkMemoryDedicatedAllocateInfoKHR memory_dedicated_info = {
-      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_KHR,
+   const VkMemoryDedicatedAllocateInfo memory_dedicated_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
       .pNext = &memory_export_info,
       .image = image->image,
       .buffer = VK_NULL_HANDLE,
@@ -431,7 +433,7 @@ wsi_create_native_image(const struct wsi_swapchain *chain,
 
       for (uint32_t p = 0; p < image->num_planes; p++) {
          const VkImageSubresource image_subresource = {
-            .aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT_KHR << p,
+            .aspectMask = VK_IMAGE_ASPECT_PLANE_0_BIT << p,
             .mipLevel = 0,
             .arrayLayer = 0,
          };
@@ -504,8 +506,8 @@ wsi_create_prime_image(const struct wsi_swapchain *chain,
    uint32_t linear_size = linear_stride * pCreateInfo->imageExtent.height;
    linear_size = align_u32(linear_size, 4096);
 
-   const VkExternalMemoryBufferCreateInfoKHR prime_buffer_external_info = {
-      .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO_KHR,
+   const VkExternalMemoryBufferCreateInfo prime_buffer_external_info = {
+      .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
       .pNext = NULL,
       .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
    };
@@ -530,13 +532,13 @@ wsi_create_prime_image(const struct wsi_swapchain *chain,
       .pNext = NULL,
       .implicit_sync = true,
    };
-   const VkExportMemoryAllocateInfoKHR prime_memory_export_info = {
-      .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO_KHR,
+   const VkExportMemoryAllocateInfo prime_memory_export_info = {
+      .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
       .pNext = &memory_wsi_info,
       .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
    };
-   const VkMemoryDedicatedAllocateInfoKHR prime_memory_dedicated_info = {
-      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_KHR,
+   const VkMemoryDedicatedAllocateInfo prime_memory_dedicated_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
       .pNext = &prime_memory_export_info,
       .image = VK_NULL_HANDLE,
       .buffer = image->prime.buffer,
@@ -585,8 +587,8 @@ wsi_create_prime_image(const struct wsi_swapchain *chain,
 
    wsi->GetImageMemoryRequirements(chain->device, image->image, &reqs);
 
-   const VkMemoryDedicatedAllocateInfoKHR memory_dedicated_info = {
-      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO_KHR,
+   const VkMemoryDedicatedAllocateInfo memory_dedicated_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
       .pNext = NULL,
       .image = image->image,
       .buffer = VK_NULL_HANDLE,
@@ -734,7 +736,7 @@ wsi_common_get_surface_capabilities(struct wsi_device *wsi_device,
       .sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR,
    };
 
-   VkResult result = iface->get_capabilities2(surface, NULL, &caps2);
+   VkResult result = iface->get_capabilities2(surface, wsi_device, NULL, &caps2);
 
    if (result == VK_SUCCESS)
       *pSurfaceCapabilities = caps2.surfaceCapabilities;
@@ -750,7 +752,7 @@ wsi_common_get_surface_capabilities2(struct wsi_device *wsi_device,
    ICD_FROM_HANDLE(VkIcdSurfaceBase, surface, pSurfaceInfo->surface);
    struct wsi_interface *iface = wsi_device->wsi[surface->platform];
 
-   return iface->get_capabilities2(surface, pSurfaceInfo->pNext,
+   return iface->get_capabilities2(surface, wsi_device, pSurfaceInfo->pNext,
                                    pSurfaceCapabilities);
 }
 
@@ -777,7 +779,7 @@ wsi_common_get_surface_capabilities2ext(
       .pNext = &counters,
    };
 
-   VkResult result = iface->get_capabilities2(surface, NULL, &caps2);
+   VkResult result = iface->get_capabilities2(surface, wsi_device, NULL, &caps2);
 
    if (result == VK_SUCCESS) {
       VkSurfaceCapabilities2EXT *ext_caps = pSurfaceCapabilities;

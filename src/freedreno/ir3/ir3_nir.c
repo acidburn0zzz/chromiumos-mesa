@@ -40,6 +40,7 @@ static const nir_shader_compiler_options options = {
 		.lower_fmod32 = true,
 		.lower_fmod64 = true,
 		.lower_fdiv = true,
+		.lower_isign = true,
 		.lower_ldexp = true,
 		.fuse_ffma = true,
 		.native_integers = true,
@@ -50,9 +51,32 @@ static const nir_shader_compiler_options options = {
 		.lower_helper_invocation = true,
 };
 
+/* we don't want to lower vertex_id to _zero_based on newer gpus: */
+static const nir_shader_compiler_options options_a6xx = {
+		.lower_fpow = true,
+		.lower_scmp = true,
+		.lower_flrp32 = true,
+		.lower_flrp64 = true,
+		.lower_ffract = true,
+		.lower_fmod32 = true,
+		.lower_fmod64 = true,
+		.lower_fdiv = true,
+		.lower_isign = true,
+		.lower_ldexp = true,
+		.fuse_ffma = true,
+		.native_integers = true,
+		.vertex_id_zero_based = false,
+		.lower_extract_byte = true,
+		.lower_extract_word = true,
+		.lower_all_io_to_temps = true,
+		.lower_helper_invocation = true,
+};
+
 const nir_shader_compiler_options *
 ir3_get_compiler_options(struct ir3_compiler *compiler)
 {
+	if (compiler->gpu_id >= 600)
+		return &options_a6xx;
 	return &options;
 }
 
@@ -97,7 +121,7 @@ ir3_optimize_loop(nir_shader *s)
 			progress |= OPT(s, nir_opt_gcm, true);
 		else if (gcm == 2)
 			progress |= OPT(s, nir_opt_gcm, false);
-		progress |= OPT(s, nir_opt_peephole_select, 16);
+		progress |= OPT(s, nir_opt_peephole_select, 16, true, true);
 		progress |= OPT(s, nir_opt_intrinsics);
 		progress |= OPT(s, nir_opt_algebraic);
 		progress |= OPT(s, nir_opt_constant_folding);
@@ -194,7 +218,7 @@ ir3_optimize_nir(struct ir3_shader *shader, nir_shader *s,
 	if (OPT(s, nir_lower_idiv))
 		ir3_optimize_loop(s);
 
-	OPT_V(s, nir_remove_dead_variables, nir_var_local);
+	OPT_V(s, nir_remove_dead_variables, nir_var_function_temp);
 
 	OPT_V(s, nir_move_load_const);
 

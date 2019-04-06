@@ -186,7 +186,7 @@ static inline void
 NineVolume9_MarkContainerDirty( struct NineVolume9 *This )
 {
     struct NineBaseTexture9 *tex;
-#ifdef DEBUG
+#if defined(DEBUG) || !defined(NDEBUG)
     /* This is always contained by a NineVolumeTexture9. */
     GUID id = IID_IDirect3DVolumeTexture9;
     REFIID ref = &id;
@@ -449,7 +449,7 @@ NineVolume9_CopyMemToDefault( struct NineVolume9 *This,
 
     nine_context_box_upload(This->base.device,
                             &From->pending_uploads_counter,
-                            (struct NineUnknown *)This,
+                            (struct NineUnknown *)From,
                             r_dst,
                             This->level,
                             &dst_box,

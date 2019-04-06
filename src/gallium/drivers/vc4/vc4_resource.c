@@ -31,8 +31,8 @@
 #include "util/u_transfer_helper.h"
 #include "util/u_upload_mgr.h"
 
-#include "drm_fourcc.h"
-#include "vc4_drm.h"
+#include "drm-uapi/drm_fourcc.h"
+#include "drm-uapi/vc4_drm.h"
 #include "vc4_screen.h"
 #include "vc4_context.h"
 #include "vc4_resource.h"
@@ -1013,6 +1013,7 @@ void
 vc4_update_shadow_baselevel_texture(struct pipe_context *pctx,
                                     struct pipe_sampler_view *pview)
 {
+        struct vc4_context *vc4 = vc4_context(pctx);
         struct vc4_sampler_view *view = vc4_sampler_view(pview);
         struct vc4_resource *shadow = vc4_resource(view->texture);
         struct vc4_resource *orig = vc4_resource(pview->texture);

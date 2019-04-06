@@ -96,12 +96,16 @@ hash_deref(uint32_t hash, const nir_deref_instr *instr)
       break;
 
    case nir_deref_type_array:
+   case nir_deref_type_ptr_as_array:
       hash = hash_src(hash, &instr->arr.index);
+      break;
+
+   case nir_deref_type_cast:
+      hash = HASH(hash, instr->cast.ptr_stride);
       break;
 
    case nir_deref_type_var:
    case nir_deref_type_array_wildcard:
-   case nir_deref_type_cast:
       /* Nothing to do */
       break;
 
@@ -117,8 +121,15 @@ hash_load_const(uint32_t hash, const nir_load_const_instr *instr)
 {
    hash = HASH(hash, instr->def.num_components);
 
-   unsigned size = instr->def.num_components * (instr->def.bit_size / 8);
-   hash = _mesa_fnv32_1a_accumulate_block(hash, instr->value.f32, size);
+   if (instr->def.bit_size == 1) {
+      for (unsigned i = 0; i < instr->def.num_components; i++) {
+         uint8_t b = instr->value.b[i];
+         hash = HASH(hash, b);
+      }
+   } else {
+      unsigned size = instr->def.num_components * (instr->def.bit_size / 8);
+      hash = _mesa_fnv32_1a_accumulate_block(hash, instr->value.f32, size);
+   }
 
    return hash;
 }
@@ -344,13 +355,18 @@ nir_instrs_equal(const nir_instr *instr1, const nir_instr *instr2)
          break;
 
       case nir_deref_type_array:
+      case nir_deref_type_ptr_as_array:
          if (!nir_srcs_equal(deref1->arr.index, deref2->arr.index))
+            return false;
+         break;
+
+      case nir_deref_type_cast:
+         if (deref1->cast.ptr_stride != deref2->cast.ptr_stride)
             return false;
          break;
 
       case nir_deref_type_var:
       case nir_deref_type_array_wildcard:
-      case nir_deref_type_cast:
          /* Nothing to do */
          break;
 
@@ -399,8 +415,13 @@ nir_instrs_equal(const nir_instr *instr1, const nir_instr *instr2)
       if (load1->def.bit_size != load2->def.bit_size)
          return false;
 
-      return memcmp(load1->value.f32, load2->value.f32,
-                    load1->def.num_components * (load1->def.bit_size / 8u)) == 0;
+      if (load1->def.bit_size == 1) {
+         unsigned size = load1->def.num_components * sizeof(bool);
+         return memcmp(load1->value.b, load2->value.b, size) == 0;
+      } else {
+         unsigned size = load1->def.num_components * (load1->def.bit_size / 8);
+         return memcmp(load1->value.f32, load2->value.f32, size) == 0;
+      }
    }
    case nir_instr_type_phi: {
       nir_phi_instr *phi1 = nir_instr_as_phi(instr1);
@@ -477,6 +498,16 @@ dest_is_ssa(nir_dest *dest, void *data)
    return dest->is_ssa;
 }
 
+static inline bool
+instr_each_src_and_dest_is_ssa(nir_instr *instr)
+{
+   if (!nir_foreach_dest(instr, dest_is_ssa, NULL) ||
+       !nir_foreach_src(instr, src_is_ssa, NULL))
+      return false;
+
+   return true;
+}
+
 /* This function determines if uses of an instruction can safely be rewritten
  * to use another identical instruction instead. Note that this function must
  * be kept in sync with hash_instr() and nir_instrs_equal() -- only
@@ -488,9 +519,7 @@ static bool
 instr_can_rewrite(nir_instr *instr)
 {
    /* We only handle SSA. */
-   if (!nir_foreach_dest(instr, dest_is_ssa, NULL) ||
-       !nir_foreach_src(instr, src_is_ssa, NULL))
-      return false;
+   assert(instr_each_src_and_dest_is_ssa(instr));
 
    switch (instr->type) {
    case nir_instr_type_alu:
@@ -567,10 +596,11 @@ nir_instr_set_add_or_rewrite(struct set *instr_set, nir_instr *instr)
    if (!instr_can_rewrite(instr))
       return false;
 
-   struct set_entry *entry = _mesa_set_search(instr_set, instr);
-   if (entry) {
+   uint32_t hash = hash_instr(instr);
+   struct set_entry *e = _mesa_set_search_pre_hashed(instr_set, hash, instr);
+   if (e) {
       nir_ssa_def *def = nir_instr_get_dest_ssa_def(instr);
-      nir_instr *match = (nir_instr *) entry->key;
+      nir_instr *match = (nir_instr *) e->key;
       nir_ssa_def *new_def = nir_instr_get_dest_ssa_def(match);
 
       /* It's safe to replace an exact instruction with an inexact one as
@@ -585,7 +615,7 @@ nir_instr_set_add_or_rewrite(struct set *instr_set, nir_instr *instr)
       return true;
    }
 
-   _mesa_set_add(instr_set, instr);
+   _mesa_set_add_pre_hashed(instr_set, hash, instr);
    return false;
 }
 

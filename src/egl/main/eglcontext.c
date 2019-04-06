@@ -37,6 +37,7 @@
 #include "eglcurrent.h"
 #include "eglsurface.h"
 #include "egllog.h"
+#include "util/macros.h"
 
 
 /**
@@ -81,7 +82,7 @@ _eglGetContextAPIBit(_EGLContext *ctx)
  * Parse the list of context attributes and return the proper error code.
  */
 static EGLint
-_eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
+_eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *disp,
                            const EGLint *attrib_list)
 {
    EGLenum api = ctx->ClientAPI;
@@ -118,7 +119,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
           *      generate an error."
           */
          if ((api != EGL_OPENGL_ES_API &&
-             (!dpy->Extensions.KHR_create_context || api != EGL_OPENGL_API))) {
+             (!disp->Extensions.KHR_create_context || api != EGL_OPENGL_API))) {
                err = EGL_BAD_ATTRIBUTE;
                break;
          }
@@ -135,7 +136,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
           *      contexts, and specifying them for other types of contexts will
           *      generate an error."
           */
-         if (!dpy->Extensions.KHR_create_context ||
+         if (!disp->Extensions.KHR_create_context ||
              (api != EGL_OPENGL_ES_API && api != EGL_OPENGL_API)) {
             err = EGL_BAD_ATTRIBUTE;
             break;
@@ -145,7 +146,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
          break;
 
       case EGL_CONTEXT_FLAGS_KHR:
-         if (!dpy->Extensions.KHR_create_context) {
+         if (!disp->Extensions.KHR_create_context) {
             err = EGL_BAD_ATTRIBUTE;
             break;
          }
@@ -219,7 +220,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
          break;
 
       case EGL_CONTEXT_OPENGL_PROFILE_MASK_KHR:
-         if (!dpy->Extensions.KHR_create_context) {
+         if (!disp->Extensions.KHR_create_context) {
             err = EGL_BAD_ATTRIBUTE;
             break;
          }
@@ -247,7 +248,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
           *     types of contexts, including OpenGL ES contexts, will generate
           *     an error."
           */
-           if (!dpy->Extensions.KHR_create_context
+           if (!disp->Extensions.KHR_create_context
                || api != EGL_OPENGL_API) {
             err = EGL_BAD_ATTRIBUTE;
             break;
@@ -263,7 +264,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
           *     meaningful for OpenGL ES contexts, and specifying it for other
           *     types of contexts will generate an EGL_BAD_ATTRIBUTE error."
           */
-         if (!dpy->Extensions.EXT_create_context_robustness
+         if (!disp->Extensions.EXT_create_context_robustness
              || api != EGL_OPENGL_ES_API) {
             err = EGL_BAD_ATTRIBUTE;
             break;
@@ -273,7 +274,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
          break;
 
       case EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT:
-         if (!dpy->Extensions.EXT_create_context_robustness) {
+         if (!disp->Extensions.EXT_create_context_robustness) {
             err = EGL_BAD_ATTRIBUTE;
             break;
          }
@@ -283,7 +284,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
          break;
 
       case EGL_CONTEXT_OPENGL_ROBUST_ACCESS:
-         if (dpy->Version < 15) {
+         if (disp->Version < 15) {
             err = EGL_BAD_ATTRIBUTE;
             break;
          }
@@ -293,7 +294,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
          break;
 
       case EGL_CONTEXT_OPENGL_DEBUG:
-         if (dpy->Version < 15) {
+         if (disp->Version < 15) {
             err = EGL_BAD_ATTRIBUTE;
             break;
          }
@@ -303,7 +304,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
          break;
 
       case EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE:
-         if (dpy->Version < 15) {
+         if (disp->Version < 15) {
             err = EGL_BAD_ATTRIBUTE;
             break;
          }
@@ -313,8 +314,8 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
          break;
 
       case EGL_CONTEXT_OPENGL_NO_ERROR_KHR:
-         if (dpy->Version < 14 ||
-             !dpy->Extensions.KHR_create_context_no_error) {
+         if (disp->Version < 14 ||
+             !disp->Extensions.KHR_create_context_no_error) {
             err = EGL_BAD_ATTRIBUTE;
             break;
          }
@@ -380,7 +381,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
              * the driver would fail, and ctx->ContextPriority matches the
              * hint applied to the driver/hardware backend.
              */
-            if (dpy->Extensions.IMG_context_priority & (1 << bit))
+            if (disp->Extensions.IMG_context_priority & (1 << bit))
                ctx->ContextPriority = val;
 
             break;
@@ -576,7 +577,7 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *dpy,
  * responsible for determining whether that's an API it supports.
  */
 EGLBoolean
-_eglInitContext(_EGLContext *ctx, _EGLDisplay *dpy, _EGLConfig *conf,
+_eglInitContext(_EGLContext *ctx, _EGLDisplay *disp, _EGLConfig *conf,
                 const EGLint *attrib_list)
 {
    const EGLenum api = eglQueryAPI();
@@ -585,7 +586,7 @@ _eglInitContext(_EGLContext *ctx, _EGLDisplay *dpy, _EGLConfig *conf,
    if (api == EGL_NONE)
       return _eglError(EGL_BAD_MATCH, "eglCreateContext(no client API)");
 
-   _eglInitResource(&ctx->Resource, sizeof(*ctx), dpy);
+   _eglInitResource(&ctx->Resource, sizeof(*ctx), disp);
    ctx->ClientAPI = api;
    ctx->Config = conf;
    ctx->Profile = EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT_KHR;
@@ -597,7 +598,7 @@ _eglInitContext(_EGLContext *ctx, _EGLDisplay *dpy, _EGLConfig *conf,
    ctx->ContextPriority = EGL_CONTEXT_PRIORITY_MEDIUM_IMG;
    ctx->ReleaseBehavior = EGL_CONTEXT_RELEASE_BEHAVIOR_FLUSH_KHR;
 
-   err = _eglParseContextAttribList(ctx, dpy, attrib_list);
+   err = _eglParseContextAttribList(ctx, disp, attrib_list);
    if (err == EGL_SUCCESS && ctx->Config) {
       EGLint api_bit;
 
@@ -659,11 +660,11 @@ _eglQueryContextRenderBuffer(_EGLContext *ctx)
 
 
 EGLBoolean
-_eglQueryContext(_EGLDriver *drv, _EGLDisplay *dpy, _EGLContext *c,
+_eglQueryContext(_EGLDriver *drv, _EGLDisplay *disp, _EGLContext *c,
                  EGLint attribute, EGLint *value)
 {
    (void) drv;
-   (void) dpy;
+   (void) disp;
 
    if (!value)
       return _eglError(EGL_BAD_PARAMETER, "eglQueryContext");
@@ -730,7 +731,7 @@ static EGLBoolean
 _eglCheckMakeCurrent(_EGLContext *ctx, _EGLSurface *draw, _EGLSurface *read)
 {
    _EGLThreadInfo *t = _eglGetCurrentThread();
-   _EGLDisplay *dpy;
+   _EGLDisplay *disp;
 
    if (_eglIsCurrentThreadDummy())
       return _eglError(EGL_BAD_ALLOC, "eglMakeCurrent");
@@ -742,8 +743,8 @@ _eglCheckMakeCurrent(_EGLContext *ctx, _EGLSurface *draw, _EGLSurface *read)
       return EGL_TRUE;
    }
 
-   dpy = ctx->Resource.Display;
-   if (!dpy->Extensions.KHR_surfaceless_context
+   disp = ctx->Resource.Display;
+   if (!disp->Extensions.KHR_surfaceless_context
        && (draw == NULL || read == NULL))
       return _eglError(EGL_BAD_MATCH, "eglMakeCurrent");
 
@@ -779,7 +780,7 @@ _eglCheckMakeCurrent(_EGLContext *ctx, _EGLSurface *draw, _EGLSurface *read)
    } else {
       /* Otherwise we must be using the EGL_KHR_no_config_context
        * extension */
-      assert(dpy->Extensions.KHR_no_config_context);
+      assert(disp->Extensions.KHR_no_config_context);
 
       /* The extension doesn't permit binding draw and read buffers with
        * differing contexts */

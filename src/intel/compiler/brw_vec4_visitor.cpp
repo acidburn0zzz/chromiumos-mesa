@@ -863,7 +863,7 @@ vec4_visitor::emit_mcs_fetch(const glsl_type *coordinate_type,
                                     dst_reg(this, glsl_type::uvec4_type));
    inst->base_mrf = 2;
    inst->src[1] = surface;
-   inst->src[2] = surface;
+   inst->src[2] = brw_imm_ud(0); /* sampler */
 
    int param_base;
 
@@ -1337,8 +1337,8 @@ vec4_visitor::emit_urb_slot(dst_reg reg, int varying)
    }
 }
 
-static int
-align_interleaved_urb_mlen(const struct gen_device_info *devinfo, int mlen)
+static unsigned
+align_interleaved_urb_mlen(const struct gen_device_info *devinfo, unsigned mlen)
 {
    if (devinfo->gen >= 6) {
       /* URB data written (does not include the message header reg) must
@@ -1747,8 +1747,6 @@ vec4_visitor::emit_pull_constant_load(bblock_t *block, vec4_instruction *inst,
 
       src = byte_offset(src, 16);
    }
-
-   brw_mark_surface_used(&prog_data->base, index);
 
    if (is_64bit) {
       temp = retype(temp, BRW_REGISTER_TYPE_DF);

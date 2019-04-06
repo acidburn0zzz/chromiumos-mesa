@@ -712,14 +712,6 @@ public:
       unsigned interpolation:2;
 
       /**
-       * \name ARB_fragment_coord_conventions
-       * @{
-       */
-      unsigned origin_upper_left:1;
-      unsigned pixel_center_integer:1;
-      /*@}*/
-
-      /**
        * Was the location explicitly set in the shader?
        *
        * If the location is explicitly set in the shader, it \b cannot be changed
@@ -1122,7 +1114,6 @@ enum ir_intrinsic_id {
    ir_intrinsic_memory_barrier_shared,
    ir_intrinsic_begin_invocation_interlock,
    ir_intrinsic_end_invocation_interlock,
-   ir_intrinsic_begin_fragment_shader_ordering,
 
    ir_intrinsic_vote_all,
    ir_intrinsic_vote_any,

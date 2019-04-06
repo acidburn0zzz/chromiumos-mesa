@@ -32,7 +32,7 @@
 #include "util/u_upload_mgr.h"
 #include "util/u_format_zs.h"
 
-#include "drm_fourcc.h"
+#include "drm-uapi/drm_fourcc.h"
 #include "v3d_screen.h"
 #include "v3d_context.h"
 #include "v3d_resource.h"
@@ -146,37 +146,13 @@ v3d_resource_transfer_unmap(struct pipe_context *pctx,
         slab_free(&v3d->transfer_pool, ptrans);
 }
 
-static void *
-v3d_resource_transfer_map(struct pipe_context *pctx,
-                          struct pipe_resource *prsc,
-                          unsigned level, unsigned usage,
-                          const struct pipe_box *box,
-                          struct pipe_transfer **pptrans)
+static void
+v3d_map_usage_prep(struct pipe_context *pctx,
+                   struct pipe_resource *prsc,
+                   unsigned usage)
 {
         struct v3d_context *v3d = v3d_context(pctx);
         struct v3d_resource *rsc = v3d_resource(prsc);
-        struct v3d_transfer *trans;
-        struct pipe_transfer *ptrans;
-        enum pipe_format format = prsc->format;
-        char *buf;
-
-        /* MSAA maps should have been handled by u_transfer_helper. */
-        assert(prsc->nr_samples <= 1);
-
-        /* Upgrade DISCARD_RANGE to WHOLE_RESOURCE if the whole resource is
-         * being mapped.
-         */
-        if ((usage & PIPE_TRANSFER_DISCARD_RANGE) &&
-            !(usage & PIPE_TRANSFER_UNSYNCHRONIZED) &&
-            !(prsc->flags & PIPE_RESOURCE_FLAG_MAP_PERSISTENT) &&
-            prsc->last_level == 0 &&
-            prsc->width0 == box->width &&
-            prsc->height0 == box->height &&
-            prsc->depth0 == box->depth &&
-            prsc->array_size == 1 &&
-            rsc->bo->private) {
-                usage |= PIPE_TRANSFER_DISCARD_WHOLE_RESOURCE;
-        }
 
         if (usage & PIPE_TRANSFER_DISCARD_WHOLE_RESOURCE) {
                 if (v3d_resource_bo_alloc(rsc)) {
@@ -209,6 +185,41 @@ v3d_resource_transfer_map(struct pipe_context *pctx,
                 rsc->writes++;
                 rsc->initialized_buffers = ~0;
         }
+}
+
+static void *
+v3d_resource_transfer_map(struct pipe_context *pctx,
+                          struct pipe_resource *prsc,
+                          unsigned level, unsigned usage,
+                          const struct pipe_box *box,
+                          struct pipe_transfer **pptrans)
+{
+        struct v3d_context *v3d = v3d_context(pctx);
+        struct v3d_resource *rsc = v3d_resource(prsc);
+        struct v3d_transfer *trans;
+        struct pipe_transfer *ptrans;
+        enum pipe_format format = prsc->format;
+        char *buf;
+
+        /* MSAA maps should have been handled by u_transfer_helper. */
+        assert(prsc->nr_samples <= 1);
+
+        /* Upgrade DISCARD_RANGE to WHOLE_RESOURCE if the whole resource is
+         * being mapped.
+         */
+        if ((usage & PIPE_TRANSFER_DISCARD_RANGE) &&
+            !(usage & PIPE_TRANSFER_UNSYNCHRONIZED) &&
+            !(prsc->flags & PIPE_RESOURCE_FLAG_MAP_PERSISTENT) &&
+            prsc->last_level == 0 &&
+            prsc->width0 == box->width &&
+            prsc->height0 == box->height &&
+            prsc->depth0 == box->depth &&
+            prsc->array_size == 1 &&
+            rsc->bo->private) {
+                usage |= PIPE_TRANSFER_DISCARD_WHOLE_RESOURCE;
+        }
+
+        v3d_map_usage_prep(pctx, prsc, usage);
 
         trans = slab_alloc(&v3d->transfer_pool);
         if (!trans)
@@ -293,6 +304,51 @@ v3d_resource_transfer_map(struct pipe_context *pctx,
 fail:
         v3d_resource_transfer_unmap(pctx, ptrans);
         return NULL;
+}
+
+static void
+v3d_texture_subdata(struct pipe_context *pctx,
+                    struct pipe_resource *prsc,
+                    unsigned level,
+                    unsigned usage,
+                    const struct pipe_box *box,
+                    const void *data,
+                    unsigned stride,
+                    unsigned layer_stride)
+{
+        struct v3d_resource *rsc = v3d_resource(prsc);
+        struct v3d_resource_slice *slice = &rsc->slices[level];
+
+        /* For a direct mapping, we can just take the u_transfer path. */
+        if (!rsc->tiled) {
+                return u_default_texture_subdata(pctx, prsc, level, usage, box,
+                                                 data, stride, layer_stride);
+        }
+
+        /* Otherwise, map and store the texture data directly into the tiled
+         * texture.  Note that gallium's texture_subdata may be called with
+         * obvious usage flags missing!
+         */
+        v3d_map_usage_prep(pctx, prsc, usage | (PIPE_TRANSFER_WRITE |
+                                                PIPE_TRANSFER_DISCARD_RANGE));
+
+        void *buf;
+        if (usage & PIPE_TRANSFER_UNSYNCHRONIZED)
+                buf = v3d_bo_map_unsynchronized(rsc->bo);
+        else
+                buf = v3d_bo_map(rsc->bo);
+
+        for (int i = 0; i < box->depth; i++) {
+                v3d_store_tiled_image(buf +
+                                      v3d_layer_offset(&rsc->base,
+                                                       level,
+                                                       box->z + i),
+                                      slice->stride,
+                                      (void *)data + layer_stride * i,
+                                      stride,
+                                      slice->tiling, rsc->cpp, slice->padded_height,
+                                      box);
+        }
 }
 
 static void
@@ -431,6 +487,12 @@ v3d_setup_slices(struct v3d_resource *rsc, uint32_t winsys_stride)
          * UIF.
          */
         bool uif_top = msaa;
+
+        /* Check some easy mistakes to make in a resource_create() call that
+         * will break our setup.
+         */
+        assert(prsc->array_size != 0);
+        assert(prsc->depth0 != 0);
 
         for (int i = prsc->last_level; i >= 0; i--) {
                 struct v3d_resource_slice *slice = &rsc->slices[i];
@@ -643,6 +705,42 @@ v3d_resource_create_with_modifiers(struct pipe_screen *pscreen,
                                    int count)
 {
         struct v3d_screen *screen = v3d_screen(pscreen);
+
+        /* If we're in a renderonly setup, use the other device to perform our
+         * (linear) allocation and just import it to v3d.  The other device
+         * may be using CMA, and V3D can import from CMA but doesn't do CMA
+         * allocations on its own.
+         *
+         * We always allocate this way for SHARED, because get_handle will
+         * need a resource on the display fd.
+         */
+        if (screen->ro && (tmpl->bind & (PIPE_BIND_SCANOUT |
+                                         PIPE_BIND_SHARED))) {
+                struct winsys_handle handle;
+                struct pipe_resource scanout_tmpl = *tmpl;
+                struct renderonly_scanout *scanout =
+                        renderonly_scanout_for_resource(&scanout_tmpl,
+                                                        screen->ro,
+                                                        &handle);
+                if (!scanout) {
+                        fprintf(stderr, "Failed to create scanout resource\n");
+                        return NULL;
+                }
+                assert(handle.type == WINSYS_HANDLE_TYPE_FD);
+                /* The fd is all we need.  Destroy the old scanout (and its
+                 * GEM handle on kms_fd) before resource_from_handle()'s
+                 * renderonly_create_gpu_import_for_resource() call which will
+                 * also get a kms_fd GEM handle for the fd.
+                 */
+                renderonly_scanout_destroy(scanout, screen->ro);
+                struct pipe_resource *prsc =
+                        pscreen->resource_from_handle(pscreen, tmpl,
+                                                      &handle,
+                                                      PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
+                close(handle.handle);
+                return prsc;
+        }
+
         bool linear_ok = find_modifier(DRM_FORMAT_MOD_LINEAR, modifiers, count);
         struct v3d_resource *rsc = v3d_resource_setup(pscreen, tmpl);
         struct pipe_resource *prsc = &rsc->base;
@@ -656,10 +754,6 @@ v3d_resource_create_with_modifiers(struct pipe_screen *pscreen,
         /* Cursors are always linear, and the user can request linear as well.
          */
         if (tmpl->bind & (PIPE_BIND_LINEAR | PIPE_BIND_CURSOR))
-                should_tile = false;
-
-        /* No tiling when we're sharing with another device (pl111). */
-        if (screen->ro && (tmpl->bind & PIPE_BIND_SCANOUT))
                 should_tile = false;
 
         /* 1D and 1D_ARRAY textures are always raster-order. */
@@ -686,38 +780,15 @@ v3d_resource_create_with_modifiers(struct pipe_screen *pscreen,
                 rsc->tiled = false;
         } else {
                 fprintf(stderr, "Unsupported modifier requested\n");
-                return NULL;
+                goto fail;
         }
 
         rsc->internal_format = prsc->format;
 
         v3d_setup_slices(rsc, 0);
 
-        /* If we're in a renderonly setup, use the other device to perform our
-         * (linear) allocaton and just import it to v3d.  The other device may
-         * be using CMA, and V3D can import from CMA but doesn't do CMA
-         * allocations on its own.
-         *
-         * Note that DRI3 doesn't give us tmpl->bind flags, so we have to use
-         * the modifiers to see if we're allocating a scanout object.
-         */
-        if (screen->ro &&
-            ((tmpl->bind & PIPE_BIND_SCANOUT) ||
-             (count == 1 && modifiers[0] == DRM_FORMAT_MOD_LINEAR))) {
-                struct winsys_handle handle;
-                rsc->scanout =
-                   renderonly_scanout_for_resource(prsc, screen->ro, &handle);
-                if (!rsc->scanout) {
-                        fprintf(stderr, "Failed to create scanout resource\n");
-                        goto fail;
-                }
-                assert(handle.type == WINSYS_HANDLE_TYPE_FD);
-                rsc->bo = v3d_bo_open_dmabuf(screen, handle.handle);
-                v3d_debug_resource_layout(rsc, "scanout");
-        } else {
-                if (!v3d_resource_bo_alloc(rsc))
-                        goto fail;
-        }
+        if (!v3d_resource_bo_alloc(rsc))
+           goto fail;
 
         return prsc;
 fail:
@@ -752,8 +823,10 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
                 rsc->tiled = false;
                 break;
         case DRM_FORMAT_MOD_BROADCOM_UIF:
-        case DRM_FORMAT_MOD_INVALID:
                 rsc->tiled = true;
+                break;
+        case DRM_FORMAT_MOD_INVALID:
+                rsc->tiled = screen->ro == NULL;
                 break;
         default:
                 fprintf(stderr,
@@ -826,6 +899,62 @@ v3d_resource_from_handle(struct pipe_screen *pscreen,
 fail:
         v3d_resource_destroy(pscreen, prsc);
         return NULL;
+}
+
+void
+v3d_update_shadow_texture(struct pipe_context *pctx,
+                          struct pipe_sampler_view *pview)
+{
+        struct v3d_context *v3d = v3d_context(pctx);
+        struct v3d_sampler_view *view = v3d_sampler_view(pview);
+        struct v3d_resource *shadow = v3d_resource(view->texture);
+        struct v3d_resource *orig = v3d_resource(pview->texture);
+
+        assert(view->texture != pview->texture);
+
+        if (shadow->writes == orig->writes && orig->bo->private)
+                return;
+
+        perf_debug("Updating %dx%d@%d shadow for linear texture\n",
+                   orig->base.width0, orig->base.height0,
+                   pview->u.tex.first_level);
+
+        for (int i = 0; i <= shadow->base.last_level; i++) {
+                unsigned width = u_minify(shadow->base.width0, i);
+                unsigned height = u_minify(shadow->base.height0, i);
+                struct pipe_blit_info info = {
+                        .dst = {
+                                .resource = &shadow->base,
+                                .level = i,
+                                .box = {
+                                        .x = 0,
+                                        .y = 0,
+                                        .z = 0,
+                                        .width = width,
+                                        .height = height,
+                                        .depth = 1,
+                                },
+                                .format = shadow->base.format,
+                        },
+                        .src = {
+                                .resource = &orig->base,
+                                .level = pview->u.tex.first_level + i,
+                                .box = {
+                                        .x = 0,
+                                        .y = 0,
+                                        .z = 0,
+                                        .width = width,
+                                        .height = height,
+                                        .depth = 1,
+                                },
+                                .format = orig->base.format,
+                        },
+                        .mask = util_format_get_mask(orig->base.format),
+                };
+                pctx->blit(pctx, &info);
+        }
+
+        shadow->writes = orig->writes;
 }
 
 static struct pipe_surface *
@@ -980,10 +1109,11 @@ v3d_resource_context_init(struct pipe_context *pctx)
         pctx->transfer_flush_region = u_transfer_helper_transfer_flush_region;
         pctx->transfer_unmap = u_transfer_helper_transfer_unmap;
         pctx->buffer_subdata = u_default_buffer_subdata;
-        pctx->texture_subdata = u_default_texture_subdata;
+        pctx->texture_subdata = v3d_texture_subdata;
         pctx->create_surface = v3d_create_surface;
         pctx->surface_destroy = v3d_surface_destroy;
         pctx->resource_copy_region = util_resource_copy_region;
         pctx->blit = v3d_blit;
+        pctx->generate_mipmap = v3d_generate_mipmap;
         pctx->flush_resource = v3d_flush_resource;
 }

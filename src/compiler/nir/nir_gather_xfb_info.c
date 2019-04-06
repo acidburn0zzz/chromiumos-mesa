@@ -28,60 +28,76 @@
 static void
 add_var_xfb_outputs(nir_xfb_info *xfb,
                     nir_variable *var,
+                    unsigned buffer,
                     unsigned *location,
                     unsigned *offset,
                     const struct glsl_type *type)
 {
-   if (glsl_type_is_array(type) || glsl_type_is_matrix(type)) {
+   /* If this type contains a 64-bit value, align to 8 bytes */
+   if (glsl_type_contains_64bit(type))
+      *offset = ALIGN_POT(*offset, 8);
+
+   if (glsl_type_is_array_or_matrix(type) && !var->data.compact) {
       unsigned length = glsl_get_length(type);
       const struct glsl_type *child_type = glsl_get_array_element(type);
       for (unsigned i = 0; i < length; i++)
-         add_var_xfb_outputs(xfb, var, location, offset, child_type);
+         add_var_xfb_outputs(xfb, var, buffer, location, offset, child_type);
    } else if (glsl_type_is_struct(type)) {
       unsigned length = glsl_get_length(type);
       for (unsigned i = 0; i < length; i++) {
          const struct glsl_type *child_type = glsl_get_struct_field(type, i);
-         add_var_xfb_outputs(xfb, var, location, offset, child_type);
+         add_var_xfb_outputs(xfb, var, buffer, location, offset, child_type);
       }
    } else {
-      assert(var->data.xfb_buffer < NIR_MAX_XFB_BUFFERS);
-      if (xfb->buffers_written & (1 << var->data.xfb_buffer)) {
-         assert(xfb->strides[var->data.xfb_buffer] == var->data.xfb_stride);
-         assert(xfb->buffer_to_stream[var->data.xfb_buffer] == var->data.stream);
+      assert(buffer < NIR_MAX_XFB_BUFFERS);
+      if (xfb->buffers_written & (1 << buffer)) {
+         assert(xfb->strides[buffer] == var->data.xfb_stride);
+         assert(xfb->buffer_to_stream[buffer] == var->data.stream);
       } else {
-         xfb->buffers_written |= (1 << var->data.xfb_buffer);
-         xfb->strides[var->data.xfb_buffer] = var->data.xfb_stride;
-         xfb->buffer_to_stream[var->data.xfb_buffer] = var->data.stream;
+         xfb->buffers_written |= (1 << buffer);
+         xfb->strides[buffer] = var->data.xfb_stride;
+         xfb->buffer_to_stream[buffer] = var->data.stream;
       }
 
       assert(var->data.stream < NIR_MAX_XFB_STREAMS);
       xfb->streams_written |= (1 << var->data.stream);
 
-      unsigned comp_slots = glsl_get_component_slots(type);
-      unsigned attrib_slots = DIV_ROUND_UP(comp_slots, 4);
-      assert(attrib_slots == glsl_count_attribute_slots(type, false));
+      unsigned comp_slots;
+      if (var->data.compact) {
+         /* This only happens for clip/cull which are float arrays */
+         assert(glsl_without_array(type) == glsl_float_type());
+         assert(var->data.location == VARYING_SLOT_CLIP_DIST0 ||
+                var->data.location == VARYING_SLOT_CLIP_DIST1);
+         comp_slots = glsl_get_length(type);
+      } else {
+         comp_slots = glsl_get_component_slots(type);
 
-      /* Ensure that we don't have, for instance, a dvec2 with a location_frac
-       * of 2 which would make it crass a location boundary even though it
-       * fits in a single slot.  However, you can have a dvec3 which crosses
-       * the slot boundary with a location_frac of 2.
-       */
-      assert(DIV_ROUND_UP(var->data.location_frac + comp_slots, 4) == attrib_slots);
+         UNUSED unsigned attrib_slots = DIV_ROUND_UP(comp_slots, 4);
+         assert(attrib_slots == glsl_count_attribute_slots(type, false));
+
+         /* Ensure that we don't have, for instance, a dvec2 with a
+          * location_frac of 2 which would make it crass a location boundary
+          * even though it fits in a single slot.  However, you can have a
+          * dvec3 which crosses the slot boundary with a location_frac of 2.
+          */
+         assert(DIV_ROUND_UP(var->data.location_frac + comp_slots, 4) ==
+                attrib_slots);
+      }
 
       assert(var->data.location_frac + comp_slots <= 8);
       uint8_t comp_mask = ((1 << comp_slots) - 1) << var->data.location_frac;
 
-      assert(attrib_slots <= 2);
-      for (unsigned s = 0; s < attrib_slots; s++) {
+      while (comp_mask) {
          nir_xfb_output_info *output = &xfb->outputs[xfb->output_count++];
 
-         output->buffer = var->data.xfb_buffer;
+         output->buffer = buffer;
          output->offset = *offset;
          output->location = *location;
-         output->component_mask = (comp_mask >> (s * 4)) & 0xf;
+         output->component_mask = comp_mask & 0xf;
 
+         *offset += util_bitcount(output->component_mask) * 4;
          (*location)++;
-         *offset += comp_slots * 4;
+         comp_mask >>= 4;
       }
    }
 }
@@ -103,17 +119,14 @@ nir_gather_xfb_info(const nir_shader *shader, void *mem_ctx)
    /* Compute the number of outputs we have.  This is simply the number of
     * cumulative locations consumed by all the variables.  If a location is
     * represented by multiple variables, then they each count separately in
-    * number of outputs.
+    * number of outputs.  This is only an estimate as some variables may have
+    * an xfb_buffer but not an output so it may end up larger than we need but
+    * it should be good enough for allocation.
     */
    unsigned num_outputs = 0;
    nir_foreach_variable(var, &shader->outputs) {
-      if (var->data.explicit_xfb_buffer ||
-          var->data.explicit_xfb_stride) {
-         assert(var->data.explicit_xfb_buffer &&
-                var->data.explicit_xfb_stride &&
-                var->data.explicit_offset);
+      if (var->data.explicit_xfb_buffer)
          num_outputs += glsl_count_attribute_slots(var->type, false);
-      }
    }
    if (num_outputs == 0)
       return NULL;
@@ -122,14 +135,46 @@ nir_gather_xfb_info(const nir_shader *shader, void *mem_ctx)
 
    /* Walk the list of outputs and add them to the array */
    nir_foreach_variable(var, &shader->outputs) {
-      if (var->data.explicit_xfb_buffer ||
-          var->data.explicit_xfb_stride) {
-         unsigned location = var->data.location;
+      if (!var->data.explicit_xfb_buffer)
+         continue;
+
+      unsigned location = var->data.location;
+
+      /* In order to know if we have a array of blocks can't be done just by
+       * checking if we have an interface type and is an array, because due
+       * splitting we could end on a case were we received a split struct
+       * that contains an array.
+       */
+      bool is_array_block = var->interface_type != NULL &&
+         glsl_type_is_array(var->type) &&
+         glsl_without_array(var->type) == glsl_get_bare_type(var->interface_type);
+
+      if (var->data.explicit_offset && !is_array_block) {
          unsigned offset = var->data.offset;
-         add_var_xfb_outputs(xfb, var, &location, &offset, var->type);
+         add_var_xfb_outputs(xfb, var, var->data.xfb_buffer,
+                             &location, &offset, var->type);
+      } else if (is_array_block) {
+         assert(glsl_type_is_struct(var->interface_type));
+
+         unsigned aoa_size = glsl_get_aoa_size(var->type);
+         const struct glsl_type *itype = var->interface_type;
+         unsigned nfields = glsl_get_length(itype);
+         for (unsigned b = 0; b < aoa_size; b++) {
+            for (unsigned f = 0; f < nfields; f++) {
+               int foffset = glsl_get_struct_field_offset(itype, f);
+               const struct glsl_type *ftype = glsl_get_struct_field(itype, f);
+               if (foffset < 0) {
+                  location += glsl_count_attribute_slots(ftype, false);
+                  continue;
+               }
+
+               unsigned offset = foffset;
+               add_var_xfb_outputs(xfb, var, var->data.xfb_buffer + b,
+                                   &location, &offset, ftype);
+            }
+         }
       }
    }
-   assert(xfb->output_count == num_outputs);
 
    /* Everything is easier in the state setup code if the list is sorted in
     * order of output offset.
@@ -137,6 +182,7 @@ nir_gather_xfb_info(const nir_shader *shader, void *mem_ctx)
    qsort(xfb->outputs, xfb->output_count, sizeof(xfb->outputs[0]),
          compare_xfb_output_offsets);
 
+#ifndef NDEBUG
    /* Finally, do a sanity check */
    unsigned max_offset[NIR_MAX_XFB_BUFFERS] = {0};
    for (unsigned i = 0; i < xfb->output_count; i++) {
@@ -145,6 +191,7 @@ nir_gather_xfb_info(const nir_shader *shader, void *mem_ctx)
       unsigned slots = util_bitcount(xfb->outputs[i].component_mask);
       max_offset[xfb->outputs[i].buffer] = xfb->outputs[i].offset + slots * 4;
    }
+#endif
 
    return xfb;
 }

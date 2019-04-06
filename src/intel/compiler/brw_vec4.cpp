@@ -409,7 +409,7 @@ vec4_visitor::opt_vector_float()
    bool progress = false;
 
    foreach_block(block, cfg) {
-      int last_reg = -1, last_offset = -1;
+      unsigned last_reg = ~0u, last_offset = ~0u;
       enum brw_reg_file last_reg_file = BAD_FILE;
 
       uint8_t imm[4] = { 0 };
@@ -442,7 +442,7 @@ vec4_visitor::opt_vector_float()
                need_type = BRW_REGISTER_TYPE_F;
             }
          } else {
-            last_reg = -1;
+            last_reg = ~0u;
          }
 
          /* If this wasn't a MOV, or the destination register doesn't match,
@@ -470,7 +470,7 @@ vec4_visitor::opt_vector_float()
             }
 
             inst_count = 0;
-            last_reg = -1;
+            last_reg = ~0u;;
             writemask = 0;
             dest_type = BRW_REGISTER_TYPE_F;
 
@@ -892,18 +892,6 @@ vec4_visitor::opt_algebraic()
             progress = true;
 	 }
 	 break;
-      case BRW_OPCODE_CMP:
-         if (inst->conditional_mod == BRW_CONDITIONAL_GE &&
-             inst->src[0].abs &&
-             inst->src[0].negate &&
-             inst->src[1].is_zero()) {
-            inst->src[0].abs = false;
-            inst->src[0].negate = false;
-            inst->conditional_mod = BRW_CONDITIONAL_Z;
-            progress = true;
-            break;
-         }
-         break;
       case SHADER_OPCODE_BROADCAST:
          if (is_uniform(inst->src[0]) ||
              inst->src[1].is_zero()) {
@@ -1409,8 +1397,10 @@ vec4_visitor::opt_register_coalesce()
           * in the register instead.
           */
          if (to_mrf && scan_inst->mlen > 0) {
-            if (inst->dst.nr >= scan_inst->base_mrf &&
-                inst->dst.nr < scan_inst->base_mrf + scan_inst->mlen) {
+            unsigned start = scan_inst->base_mrf;
+            unsigned end = scan_inst->base_mrf + scan_inst->mlen;
+
+            if (inst->dst.nr >= start && inst->dst.nr < end) {
                break;
             }
          } else {

@@ -63,6 +63,9 @@ assign_fs_binding_table_offsets(const struct gen_device_info *devinfo,
          next_binding_table_offset;
       next_binding_table_offset += key->nr_color_regions;
    }
+
+   /* Update the binding table size */
+   prog_data->base.binding_table.size_bytes = next_binding_table_offset * 4;
 }
 
 static void
@@ -267,11 +270,19 @@ brw_debug_recompile_sampler_key(struct brw_context *brw,
    found |= key_debug(brw, "ayuv image bound",
                       old_key->ayuv_image_mask,
                       key->ayuv_image_mask);
-
+   found |= key_debug(brw, "xyuv image bound",
+                      old_key->xyuv_image_mask,
+                      key->xyuv_image_mask);
 
    for (unsigned int i = 0; i < MAX_SAMPLERS; i++) {
       found |= key_debug(brw, "textureGather workarounds",
                          old_key->gen6_gather_wa[i], key->gen6_gather_wa[i]);
+   }
+
+   for (unsigned int i = 0; i < MAX_SAMPLERS; i++) {
+      found |= key_debug_float(brw, "scale factor",
+                               old_key->scale_factors[i],
+                               key->scale_factors[i]);
    }
 
    return found;
@@ -306,6 +317,7 @@ brw_populate_sampler_prog_key_data(struct gl_context *ctx,
       const int s = u_bit_scan(&mask);
 
       key->swizzles[s] = SWIZZLE_NOOP;
+      key->scale_factors[s] = 0.0f;
 
       int unit_id = prog->SamplerUnits[s];
       const struct gl_texture_unit *unit = &ctx->Texture.Unit[unit_id];
@@ -403,6 +415,10 @@ brw_populate_sampler_prog_key_data(struct gl_context *ctx,
          }
 
          if (t->Target == GL_TEXTURE_EXTERNAL_OES && intel_tex->planar_format) {
+
+            /* Setup possible scaling factor. */
+            key->scale_factors[s] = intel_tex->planar_format->scaling_factor;
+
             switch (intel_tex->planar_format->components) {
             case __DRI_IMAGE_COMPONENTS_Y_UV:
                key->y_uv_image_mask |= 1 << s;
@@ -418,6 +434,9 @@ brw_populate_sampler_prog_key_data(struct gl_context *ctx,
                break;
             case __DRI_IMAGE_COMPONENTS_AYUV:
                key->ayuv_image_mask |= 1 << s;
+               break;
+            case __DRI_IMAGE_COMPONENTS_XYUV:
+               key->xyuv_image_mask |= 1 << s;
                break;
             default:
                break;

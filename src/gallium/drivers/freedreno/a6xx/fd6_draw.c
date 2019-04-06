@@ -53,8 +53,7 @@ draw_emit_indirect(struct fd_batch *batch, struct fd_ringbuffer *ring,
 
 	if (info->index_size) {
 		struct pipe_resource *idx = info->index.resource;
-		unsigned max_indicies = (idx->width0 - info->indirect->offset) /
-			info->index_size;
+		unsigned max_indicies = idx->width0 / info->index_size;
 
 		OUT_PKT7(ring, CP_DRAW_INDX_INDIRECT, 6);
 		OUT_RINGP(ring, DRAW4(primtype, DI_SRC_SEL_DMA,
@@ -186,6 +185,10 @@ fd6_draw_vbo(struct fd_context *ctx, const struct pipe_draw_info *info,
 		fd6_ctx->prog = fd6_emit_get_prog(&emit);
 	}
 
+	/* bail if compile failed: */
+	if (!fd6_ctx->prog)
+		return NULL;
+
 	emit.dirty = ctx->dirty;      /* *after* fixup_shader_state() */
 	emit.bs = fd6_emit_get_prog(&emit)->bs;
 	emit.vs = fd6_emit_get_prog(&emit)->vs;
@@ -193,11 +196,6 @@ fd6_draw_vbo(struct fd_context *ctx, const struct pipe_draw_info *info,
 
 	const struct ir3_shader_variant *vp = emit.vs;
 	const struct ir3_shader_variant *fp = emit.fs;
-
-	/* do regular pass first, since that is more likely to fail compiling: */
-
-	if (!vp || !fp)
-		return false;
 
 	ctx->stats.vs_regs += ir3_shader_halfregs(vp);
 	ctx->stats.fs_regs += ir3_shader_halfregs(fp);
@@ -305,7 +303,7 @@ fd6_clear_lrz(struct fd_batch *batch, struct fd_resource *zsbuf, double depth)
 	OUT_RING(ring, 0x00000000);
 	OUT_RING(ring, 0x00000000);
 
-	OUT_PKT4(ring, REG_A6XX_SP_UNKNOWN_ACC0, 1);
+	OUT_PKT4(ring, REG_A6XX_SP_2D_SRC_FORMAT, 1);
 	OUT_RING(ring, 0x0000f410);
 
 	OUT_PKT4(ring, REG_A6XX_GRAS_2D_BLIT_CNTL, 1);
@@ -368,7 +366,7 @@ fd6_clear_lrz(struct fd_batch *batch, struct fd_resource *zsbuf, double depth)
 	fd6_event_write(batch, ring, FACENESS_FLUSH, true);
 	fd6_event_write(batch, ring, CACHE_FLUSH_TS, true);
 
-	fd6_cache_flush(batch, ring);
+	fd6_cache_inv(batch, ring);
 }
 
 static bool is_z32(enum pipe_format format)

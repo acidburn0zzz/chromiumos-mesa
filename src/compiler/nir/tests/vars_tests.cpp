@@ -34,14 +34,14 @@ protected:
    ~nir_vars_test();
 
    nir_variable *create_int(nir_variable_mode mode, const char *name) {
-      if (mode == nir_var_local)
+      if (mode == nir_var_function_temp)
          return nir_local_variable_create(b->impl, glsl_int_type(), name);
       return nir_variable_create(b->shader, mode, glsl_int_type(), name);
    }
 
    nir_variable *create_ivec2(nir_variable_mode mode, const char *name) {
       const glsl_type *var_type = glsl_vector_type(GLSL_TYPE_INT, 2);
-      if (mode == nir_var_local)
+      if (mode == nir_var_function_temp)
          return nir_local_variable_create(b->impl, var_type, name);
       return nir_variable_create(b->shader, mode, var_type, name);
    }
@@ -62,8 +62,8 @@ protected:
 
    unsigned count_intrinsics(nir_intrinsic_op intrinsic);
 
-   nir_intrinsic_instr *find_next_intrinsic(nir_intrinsic_op intrinsic,
-                                            nir_intrinsic_instr *after);
+   nir_intrinsic_instr *get_intrinsic(nir_intrinsic_op intrinsic,
+                                      unsigned index);
 
    void *mem_ctx;
    void *lin_ctx;
@@ -107,24 +107,19 @@ nir_vars_test::count_intrinsics(nir_intrinsic_op intrinsic)
 }
 
 nir_intrinsic_instr *
-nir_vars_test::find_next_intrinsic(nir_intrinsic_op intrinsic,
-                                   nir_intrinsic_instr *after)
+nir_vars_test::get_intrinsic(nir_intrinsic_op intrinsic,
+                             unsigned index)
 {
-   bool seen = after == NULL;
    nir_foreach_block(block, b->impl) {
-      /* Skip blocks before the 'after' instruction. */
-      if (!seen && block != after->instr.block)
-         continue;
       nir_foreach_instr(instr, block) {
          if (instr->type != nir_instr_type_intrinsic)
             continue;
          nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
-         if (!seen) {
-            seen = (after == intrin);
-            continue;
+         if (intrin->intrinsic == intrinsic) {
+            if (index == 0)
+               return intrin;
+            index--;
          }
-         if (intrin->intrinsic == intrinsic)
-            return intrin;
       }
    }
    return NULL;
@@ -191,7 +186,7 @@ TEST_F(nir_redundant_load_vars_test, invalidate_inside_if_block)
     * if statement.  They should be invalidated accordingly.
     */
 
-   nir_variable **g = create_many_int(nir_var_global, "g", 3);
+   nir_variable **g = create_many_int(nir_var_shader_temp, "g", 3);
    nir_variable **out = create_many_int(nir_var_shader_out, "out", 3);
 
    nir_load_var(b, g[0]);
@@ -222,11 +217,10 @@ TEST_F(nir_redundant_load_vars_test, invalidate_inside_if_block)
 
    /* We only load g[2] once. */
    unsigned g2_load_count = 0;
-   nir_intrinsic_instr *load = NULL;
    for (int i = 0; i < 5; i++) {
-      load = find_next_intrinsic(nir_intrinsic_load_deref, load);
-      if (nir_intrinsic_get_var(load, 0) == g[2])
-         g2_load_count++;
+         nir_intrinsic_instr *load = get_intrinsic(nir_intrinsic_load_deref, i);
+         if (nir_intrinsic_get_var(load, 0) == g[2])
+            g2_load_count++;
    }
    EXPECT_EQ(g2_load_count, 1);
 }
@@ -237,7 +231,7 @@ TEST_F(nir_redundant_load_vars_test, invalidate_live_load_in_the_end_of_loop)
     * body.
     */
 
-   nir_variable *v = create_int(nir_var_shader_storage, "v");
+   nir_variable *v = create_int(nir_var_mem_ssbo, "v");
 
    nir_load_var(b, v);
 
@@ -258,9 +252,9 @@ TEST_F(nir_redundant_load_vars_test, invalidate_live_load_in_the_end_of_loop)
 
 TEST_F(nir_copy_prop_vars_test, simple_copies)
 {
-   nir_variable *in   = create_int(nir_var_shader_in,  "in");
-   nir_variable *temp = create_int(nir_var_local,      "temp");
-   nir_variable *out  = create_int(nir_var_shader_out, "out");
+   nir_variable *in   = create_int(nir_var_shader_in,     "in");
+   nir_variable *temp = create_int(nir_var_function_temp, "temp");
+   nir_variable *out  = create_int(nir_var_shader_out,    "out");
 
    nir_copy_var(b, temp, in);
    nir_copy_var(b, out, temp);
@@ -272,19 +266,20 @@ TEST_F(nir_copy_prop_vars_test, simple_copies)
 
    nir_validate_shader(b->shader, NULL);
 
-   nir_intrinsic_instr *copy = NULL;
-   copy = find_next_intrinsic(nir_intrinsic_copy_deref, copy);
-   ASSERT_TRUE(copy->src[1].is_ssa);
-   nir_ssa_def *first_src = copy->src[1].ssa;
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_copy_deref), 2);
 
-   copy = find_next_intrinsic(nir_intrinsic_copy_deref, copy);
-   ASSERT_TRUE(copy->src[1].is_ssa);
-   EXPECT_EQ(copy->src[1].ssa, first_src);
+   nir_intrinsic_instr *first_copy = get_intrinsic(nir_intrinsic_copy_deref, 0);
+   ASSERT_TRUE(first_copy->src[1].is_ssa);
+
+   nir_intrinsic_instr *second_copy = get_intrinsic(nir_intrinsic_copy_deref, 1);
+   ASSERT_TRUE(second_copy->src[1].is_ssa);
+
+   EXPECT_EQ(first_copy->src[1].ssa, second_copy->src[1].ssa);
 }
 
 TEST_F(nir_copy_prop_vars_test, simple_store_load)
 {
-   nir_variable **v = create_many_ivec2(nir_var_local, "v", 2);
+   nir_variable **v = create_many_ivec2(nir_var_function_temp, "v", 2);
    unsigned mask = 1 | 2;
 
    nir_ssa_def *stored_value = nir_imm_ivec2(b, 10, 20);
@@ -302,9 +297,8 @@ TEST_F(nir_copy_prop_vars_test, simple_store_load)
 
    ASSERT_EQ(count_intrinsics(nir_intrinsic_store_deref), 2);
 
-   nir_intrinsic_instr *store = NULL;
    for (int i = 0; i < 2; i++) {
-      store = find_next_intrinsic(nir_intrinsic_store_deref, store);
+      nir_intrinsic_instr *store = get_intrinsic(nir_intrinsic_store_deref, i);
       ASSERT_TRUE(store->src[1].is_ssa);
       EXPECT_EQ(store->src[1].ssa, stored_value);
    }
@@ -312,7 +306,7 @@ TEST_F(nir_copy_prop_vars_test, simple_store_load)
 
 TEST_F(nir_copy_prop_vars_test, store_store_load)
 {
-   nir_variable **v = create_many_ivec2(nir_var_local, "v", 2);
+   nir_variable **v = create_many_ivec2(nir_var_function_temp, "v", 2);
    unsigned mask = 1 | 2;
 
    nir_ssa_def *first_value = nir_imm_ivec2(b, 10, 20);
@@ -331,21 +325,18 @@ TEST_F(nir_copy_prop_vars_test, store_store_load)
 
    nir_validate_shader(b->shader, NULL);
 
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_store_deref), 3);
+
    /* Store to v[1] should use second_value directly. */
-   nir_intrinsic_instr *store_to_v1 = NULL;
-   while ((store_to_v1 = find_next_intrinsic(nir_intrinsic_store_deref, store_to_v1)) != NULL) {
-      if (nir_intrinsic_get_var(store_to_v1, 0) == v[1]) {
-         ASSERT_TRUE(store_to_v1->src[1].is_ssa);
-         EXPECT_EQ(store_to_v1->src[1].ssa, second_value);
-         break;
-      }
-   }
-   EXPECT_TRUE(store_to_v1);
+   nir_intrinsic_instr *store_to_v1 = get_intrinsic(nir_intrinsic_store_deref, 2);
+   ASSERT_EQ(nir_intrinsic_get_var(store_to_v1, 0), v[1]);
+   ASSERT_TRUE(store_to_v1->src[1].is_ssa);
+   EXPECT_EQ(store_to_v1->src[1].ssa, second_value);
 }
 
 TEST_F(nir_copy_prop_vars_test, store_store_load_different_components)
 {
-   nir_variable **v = create_many_ivec2(nir_var_local, "v", 2);
+   nir_variable **v = create_many_ivec2(nir_var_function_temp, "v", 2);
 
    nir_ssa_def *first_value = nir_imm_ivec2(b, 10, 20);
    nir_store_var(b, v[0], first_value, 1 << 1);
@@ -366,25 +357,19 @@ TEST_F(nir_copy_prop_vars_test, store_store_load_different_components)
    nir_opt_constant_folding(b->shader);
    nir_validate_shader(b->shader, NULL);
 
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_store_deref), 3);
+
    /* Store to v[1] should use first_value directly.  The write of
     * second_value did not overwrite the component it uses.
     */
-   nir_intrinsic_instr *store_to_v1 = NULL;
-   while ((store_to_v1 = find_next_intrinsic(nir_intrinsic_store_deref, store_to_v1)) != NULL) {
-      if (nir_intrinsic_get_var(store_to_v1, 0) == v[1]) {
-         ASSERT_TRUE(store_to_v1->src[1].is_ssa);
-
-         ASSERT_TRUE(nir_src_is_const(store_to_v1->src[1]));
-         ASSERT_EQ(nir_src_comp_as_uint(store_to_v1->src[1], 1), 20);
-         break;
-      }
-   }
-   EXPECT_TRUE(store_to_v1);
+   nir_intrinsic_instr *store_to_v1 = get_intrinsic(nir_intrinsic_store_deref, 2);
+   ASSERT_EQ(nir_intrinsic_get_var(store_to_v1, 0), v[1]);
+   ASSERT_EQ(nir_src_comp_as_uint(store_to_v1->src[1], 1), 20);
 }
 
 TEST_F(nir_copy_prop_vars_test, store_store_load_different_components_in_many_blocks)
 {
-   nir_variable **v = create_many_ivec2(nir_var_local, "v", 2);
+   nir_variable **v = create_many_ivec2(nir_var_function_temp, "v", 2);
 
    nir_ssa_def *first_value = nir_imm_ivec2(b, 10, 20);
    nir_store_var(b, v[0], first_value, 1 << 1);
@@ -403,37 +388,27 @@ TEST_F(nir_copy_prop_vars_test, store_store_load_different_components_in_many_bl
 
    nir_validate_shader(b->shader, NULL);
 
-   nir_print_shader(b->shader, stdout);
-
    bool progress = nir_opt_copy_prop_vars(b->shader);
    EXPECT_TRUE(progress);
-
-   nir_print_shader(b->shader, stdout);
 
    nir_validate_shader(b->shader, NULL);
 
    nir_opt_constant_folding(b->shader);
    nir_validate_shader(b->shader, NULL);
 
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_store_deref), 3);
+
    /* Store to v[1] should use first_value directly.  The write of
     * second_value did not overwrite the component it uses.
     */
-   nir_intrinsic_instr *store_to_v1 = NULL;
-   while ((store_to_v1 = find_next_intrinsic(nir_intrinsic_store_deref, store_to_v1)) != NULL) {
-      if (nir_intrinsic_get_var(store_to_v1, 0) == v[1]) {
-         ASSERT_TRUE(store_to_v1->src[1].is_ssa);
-
-         ASSERT_TRUE(nir_src_is_const(store_to_v1->src[1]));
-         ASSERT_EQ(nir_src_comp_as_uint(store_to_v1->src[1], 1), 20);
-         break;
-      }
-   }
-   EXPECT_TRUE(store_to_v1);
+   nir_intrinsic_instr *store_to_v1 = get_intrinsic(nir_intrinsic_store_deref, 2);
+   ASSERT_EQ(nir_intrinsic_get_var(store_to_v1, 0), v[1]);
+   ASSERT_EQ(nir_src_comp_as_uint(store_to_v1->src[1], 1), 20);
 }
 
 TEST_F(nir_copy_prop_vars_test, memory_barrier_in_two_blocks)
 {
-   nir_variable **v = create_many_int(nir_var_shader_storage, "v", 4);
+   nir_variable **v = create_many_int(nir_var_mem_ssbo, "v", 4);
 
    nir_store_var(b, v[0], nir_imm_int(b, 1), 1);
    nir_store_var(b, v[1], nir_imm_int(b, 2), 1);
@@ -452,14 +427,13 @@ TEST_F(nir_copy_prop_vars_test, memory_barrier_in_two_blocks)
 
    /* Only the second load will remain after the optimization. */
    ASSERT_EQ(1, count_intrinsics(nir_intrinsic_load_deref));
-   nir_intrinsic_instr *load = NULL;
-   load = find_next_intrinsic(nir_intrinsic_load_deref, load);
+   nir_intrinsic_instr *load = get_intrinsic(nir_intrinsic_load_deref, 0);
    ASSERT_EQ(nir_intrinsic_get_var(load, 0), v[1]);
 }
 
 TEST_F(nir_copy_prop_vars_test, simple_store_load_in_two_blocks)
 {
-   nir_variable **v = create_many_ivec2(nir_var_local, "v", 2);
+   nir_variable **v = create_many_ivec2(nir_var_function_temp, "v", 2);
    unsigned mask = 1 | 2;
 
    nir_ssa_def *stored_value = nir_imm_ivec2(b, 10, 20);
@@ -480,17 +454,155 @@ TEST_F(nir_copy_prop_vars_test, simple_store_load_in_two_blocks)
 
    ASSERT_EQ(count_intrinsics(nir_intrinsic_store_deref), 2);
 
-   nir_intrinsic_instr *store = NULL;
    for (int i = 0; i < 2; i++) {
-      store = find_next_intrinsic(nir_intrinsic_store_deref, store);
+      nir_intrinsic_instr *store = get_intrinsic(nir_intrinsic_store_deref, i);
       ASSERT_TRUE(store->src[1].is_ssa);
       EXPECT_EQ(store->src[1].ssa, stored_value);
    }
 }
 
+TEST_F(nir_copy_prop_vars_test, DISABLED_load_direct_array_deref_on_vector_reuses_previous_load)
+{
+   nir_variable *in0 = create_ivec2(nir_var_mem_ssbo, "in0");
+   nir_variable *in1 = create_ivec2(nir_var_mem_ssbo, "in1");
+   nir_variable *vec = create_ivec2(nir_var_mem_ssbo, "vec");
+   nir_variable *out = create_int(nir_var_mem_ssbo, "out");
+
+   nir_store_var(b, vec, nir_load_var(b, in0), 1 << 0);
+   nir_store_var(b, vec, nir_load_var(b, in1), 1 << 1);
+
+   /* This load will be dropped, as vec.y (or vec[1]) is already known. */
+   nir_deref_instr *deref =
+      nir_build_deref_array(b, nir_build_deref_var(b, vec), nir_imm_int(b, 1));
+   nir_ssa_def *loaded_from_deref = nir_load_deref(b, deref);
+
+   /* This store should use the value loaded from in1. */
+   nir_store_var(b, out, loaded_from_deref, 1 << 0);
+
+   nir_validate_shader(b->shader, NULL);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_deref), 3);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_store_deref), 3);
+
+   bool progress = nir_opt_copy_prop_vars(b->shader);
+   EXPECT_TRUE(progress);
+
+   nir_validate_shader(b->shader, NULL);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_deref), 2);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_store_deref), 3);
+
+   nir_intrinsic_instr *store = get_intrinsic(nir_intrinsic_store_deref, 2);
+   ASSERT_TRUE(store->src[1].is_ssa);
+
+   /* NOTE: The ALU instruction is how we get the vec.y. */
+   ASSERT_TRUE(nir_src_as_alu_instr(&store->src[1]));
+}
+
+TEST_F(nir_copy_prop_vars_test, DISABLED_load_direct_array_deref_on_vector_reuses_previous_copy)
+{
+   nir_variable *in0 = create_ivec2(nir_var_mem_ssbo, "in0");
+   nir_variable *vec = create_ivec2(nir_var_mem_ssbo, "vec");
+
+   nir_copy_var(b, vec, in0);
+
+   /* This load will be replaced with one from in0. */
+   nir_deref_instr *deref =
+      nir_build_deref_array(b, nir_build_deref_var(b, vec), nir_imm_int(b, 1));
+   nir_load_deref(b, deref);
+
+   nir_validate_shader(b->shader, NULL);
+
+   bool progress = nir_opt_copy_prop_vars(b->shader);
+   EXPECT_TRUE(progress);
+
+   nir_validate_shader(b->shader, NULL);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_deref), 1);
+
+   nir_intrinsic_instr *load = get_intrinsic(nir_intrinsic_load_deref, 0);
+   ASSERT_EQ(nir_intrinsic_get_var(load, 0), in0);
+}
+
+TEST_F(nir_copy_prop_vars_test, DISABLED_load_direct_array_deref_on_vector_gets_reused)
+{
+   nir_variable *in0 = create_ivec2(nir_var_mem_ssbo, "in0");
+   nir_variable *vec = create_ivec2(nir_var_mem_ssbo, "vec");
+   nir_variable *out = create_ivec2(nir_var_mem_ssbo, "out");
+
+   /* Loading "vec[1]" deref will save the information about vec.y. */
+   nir_deref_instr *deref =
+      nir_build_deref_array(b, nir_build_deref_var(b, vec), nir_imm_int(b, 1));
+   nir_load_deref(b, deref);
+
+   /* Store to vec.x. */
+   nir_store_var(b, vec, nir_load_var(b, in0), 1 << 0);
+
+   /* This load will be dropped, since both vec.x and vec.y are known. */
+   nir_ssa_def *loaded_from_vec = nir_load_var(b, vec);
+   nir_store_var(b, out, loaded_from_vec, 0x3);
+
+   nir_validate_shader(b->shader, NULL);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_deref), 3);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_store_deref), 2);
+
+   bool progress = nir_opt_copy_prop_vars(b->shader);
+   EXPECT_TRUE(progress);
+
+   nir_validate_shader(b->shader, NULL);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_deref), 2);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_store_deref), 2);
+
+   nir_intrinsic_instr *store = get_intrinsic(nir_intrinsic_store_deref, 1);
+   ASSERT_TRUE(store->src[1].is_ssa);
+   ASSERT_TRUE(nir_src_as_alu_instr(&store->src[1]));
+}
+
+TEST_F(nir_copy_prop_vars_test, DISABLED_store_load_direct_array_deref_on_vector)
+{
+   nir_variable *vec = create_ivec2(nir_var_mem_ssbo, "vec");
+   nir_variable *out0 = create_int(nir_var_mem_ssbo, "out0");
+   nir_variable *out1 = create_ivec2(nir_var_mem_ssbo, "out1");
+
+   /* Store to "vec[1]" and "vec[0]". */
+   nir_deref_instr *store_deref_y =
+      nir_build_deref_array(b, nir_build_deref_var(b, vec), nir_imm_int(b, 1));
+   nir_store_deref(b, store_deref_y, nir_imm_int(b, 20), 1);
+
+   nir_deref_instr *store_deref_x =
+      nir_build_deref_array(b, nir_build_deref_var(b, vec), nir_imm_int(b, 0));
+   nir_store_deref(b, store_deref_x, nir_imm_int(b, 10), 1);
+
+   /* Both loads below will be dropped, because the values are already known. */
+   nir_deref_instr *load_deref_y =
+      nir_build_deref_array(b, nir_build_deref_var(b, vec), nir_imm_int(b, 1));
+   nir_store_var(b, out0, nir_load_deref(b, load_deref_y), 1);
+
+   nir_store_var(b, out1, nir_load_var(b, vec), 1);
+
+   nir_validate_shader(b->shader, NULL);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_deref), 2);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_store_deref), 4);
+
+   bool progress = nir_opt_copy_prop_vars(b->shader);
+   EXPECT_TRUE(progress);
+
+   nir_validate_shader(b->shader, NULL);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_load_deref), 0);
+   ASSERT_EQ(count_intrinsics(nir_intrinsic_store_deref), 4);
+
+   /* Third store will just use the value from first store. */
+   nir_intrinsic_instr *first_store = get_intrinsic(nir_intrinsic_store_deref, 0);
+   nir_intrinsic_instr *third_store = get_intrinsic(nir_intrinsic_store_deref, 2);
+   ASSERT_TRUE(third_store->src[1].is_ssa);
+   EXPECT_EQ(third_store->src[1].ssa, first_store->src[1].ssa);
+
+   /* Fourth store will compose first and second store values. */
+   nir_intrinsic_instr *fourth_store = get_intrinsic(nir_intrinsic_store_deref, 3);
+   ASSERT_TRUE(fourth_store->src[1].is_ssa);
+   EXPECT_TRUE(nir_src_as_alu_instr(&fourth_store->src[1]));
+}
+
 TEST_F(nir_dead_write_vars_test, no_dead_writes_in_block)
 {
-   nir_variable **v = create_many_int(nir_var_shader_storage, "v", 2);
+   nir_variable **v = create_many_int(nir_var_mem_ssbo, "v", 2);
 
    nir_store_var(b, v[0], nir_load_var(b, v[1]), 1);
 
@@ -500,7 +612,7 @@ TEST_F(nir_dead_write_vars_test, no_dead_writes_in_block)
 
 TEST_F(nir_dead_write_vars_test, no_dead_writes_different_components_in_block)
 {
-   nir_variable **v = create_many_ivec2(nir_var_shader_storage, "v", 3);
+   nir_variable **v = create_many_ivec2(nir_var_mem_ssbo, "v", 3);
 
    nir_store_var(b, v[0], nir_load_var(b, v[1]), 1 << 0);
    nir_store_var(b, v[0], nir_load_var(b, v[2]), 1 << 1);
@@ -511,7 +623,7 @@ TEST_F(nir_dead_write_vars_test, no_dead_writes_different_components_in_block)
 
 TEST_F(nir_dead_write_vars_test, no_dead_writes_in_if_statement)
 {
-   nir_variable **v = create_many_int(nir_var_shader_storage, "v", 6);
+   nir_variable **v = create_many_int(nir_var_mem_ssbo, "v", 6);
 
    nir_store_var(b, v[2], nir_load_var(b, v[0]), 1);
    nir_store_var(b, v[3], nir_load_var(b, v[1]), 1);
@@ -531,7 +643,7 @@ TEST_F(nir_dead_write_vars_test, no_dead_writes_in_if_statement)
 
 TEST_F(nir_dead_write_vars_test, no_dead_writes_in_loop_statement)
 {
-   nir_variable **v = create_many_int(nir_var_shader_storage, "v", 3);
+   nir_variable **v = create_many_int(nir_var_mem_ssbo, "v", 3);
 
    nir_store_var(b, v[0], nir_load_var(b, v[1]), 1);
 
@@ -553,7 +665,7 @@ TEST_F(nir_dead_write_vars_test, no_dead_writes_in_loop_statement)
 
 TEST_F(nir_dead_write_vars_test, dead_write_in_block)
 {
-   nir_variable **v = create_many_int(nir_var_shader_storage, "v", 3);
+   nir_variable **v = create_many_int(nir_var_mem_ssbo, "v", 3);
 
    nir_store_var(b, v[0], nir_load_var(b, v[1]), 1);
    nir_ssa_def *load_v2 = nir_load_var(b, v[2]);
@@ -564,14 +676,14 @@ TEST_F(nir_dead_write_vars_test, dead_write_in_block)
 
    EXPECT_EQ(1, count_intrinsics(nir_intrinsic_store_deref));
 
-   nir_intrinsic_instr *store = find_next_intrinsic(nir_intrinsic_store_deref, NULL);
+   nir_intrinsic_instr *store = get_intrinsic(nir_intrinsic_store_deref, 0);
    ASSERT_TRUE(store->src[1].is_ssa);
    EXPECT_EQ(store->src[1].ssa, load_v2);
 }
 
 TEST_F(nir_dead_write_vars_test, dead_write_components_in_block)
 {
-   nir_variable **v = create_many_ivec2(nir_var_shader_storage, "v", 3);
+   nir_variable **v = create_many_ivec2(nir_var_mem_ssbo, "v", 3);
 
    nir_store_var(b, v[0], nir_load_var(b, v[1]), 1 << 0);
    nir_ssa_def *load_v2 = nir_load_var(b, v[2]);
@@ -582,7 +694,7 @@ TEST_F(nir_dead_write_vars_test, dead_write_components_in_block)
 
    EXPECT_EQ(1, count_intrinsics(nir_intrinsic_store_deref));
 
-   nir_intrinsic_instr *store = find_next_intrinsic(nir_intrinsic_store_deref, NULL);
+   nir_intrinsic_instr *store = get_intrinsic(nir_intrinsic_store_deref, 0);
    ASSERT_TRUE(store->src[1].is_ssa);
    EXPECT_EQ(store->src[1].ssa, load_v2);
 }
@@ -595,7 +707,7 @@ TEST_F(nir_dead_write_vars_test, dead_write_components_in_block)
 
 TEST_F(nir_dead_write_vars_test, DISABLED_dead_write_in_two_blocks)
 {
-   nir_variable **v = create_many_int(nir_var_shader_storage, "v", 3);
+   nir_variable **v = create_many_int(nir_var_mem_ssbo, "v", 3);
 
    nir_store_var(b, v[0], nir_load_var(b, v[1]), 1);
    nir_ssa_def *load_v2 = nir_load_var(b, v[2]);
@@ -610,14 +722,14 @@ TEST_F(nir_dead_write_vars_test, DISABLED_dead_write_in_two_blocks)
 
    EXPECT_EQ(1, count_intrinsics(nir_intrinsic_store_deref));
 
-   nir_intrinsic_instr *store = find_next_intrinsic(nir_intrinsic_store_deref, NULL);
+   nir_intrinsic_instr *store = get_intrinsic(nir_intrinsic_store_deref, 0);
    ASSERT_TRUE(store->src[1].is_ssa);
    EXPECT_EQ(store->src[1].ssa, load_v2);
 }
 
 TEST_F(nir_dead_write_vars_test, DISABLED_dead_write_components_in_two_blocks)
 {
-   nir_variable **v = create_many_ivec2(nir_var_shader_storage, "v", 3);
+   nir_variable **v = create_many_ivec2(nir_var_mem_ssbo, "v", 3);
 
    nir_store_var(b, v[0], nir_load_var(b, v[1]), 1 << 0);
 
@@ -632,14 +744,14 @@ TEST_F(nir_dead_write_vars_test, DISABLED_dead_write_components_in_two_blocks)
 
    EXPECT_EQ(1, count_intrinsics(nir_intrinsic_store_deref));
 
-   nir_intrinsic_instr *store = find_next_intrinsic(nir_intrinsic_store_deref, NULL);
+   nir_intrinsic_instr *store = get_intrinsic(nir_intrinsic_store_deref, 0);
    ASSERT_TRUE(store->src[1].is_ssa);
    EXPECT_EQ(store->src[1].ssa, load_v2);
 }
 
 TEST_F(nir_dead_write_vars_test, DISABLED_dead_writes_in_if_statement)
 {
-   nir_variable **v = create_many_int(nir_var_shader_storage, "v", 4);
+   nir_variable **v = create_many_int(nir_var_mem_ssbo, "v", 4);
 
    /* Both branches will overwrite, making the previous store dead. */
    nir_store_var(b, v[0], nir_load_var(b, v[1]), 1);
@@ -658,19 +770,18 @@ TEST_F(nir_dead_write_vars_test, DISABLED_dead_writes_in_if_statement)
    ASSERT_TRUE(progress);
    EXPECT_EQ(2, count_intrinsics(nir_intrinsic_store_deref));
 
-   nir_intrinsic_instr *store = NULL;
-   store = find_next_intrinsic(nir_intrinsic_store_deref, store);
-   ASSERT_TRUE(store->src[1].is_ssa);
-   EXPECT_EQ(store->src[1].ssa, load_v2);
+   nir_intrinsic_instr *first_store = get_intrinsic(nir_intrinsic_store_deref, 0);
+   ASSERT_TRUE(first_store->src[1].is_ssa);
+   EXPECT_EQ(first_store->src[1].ssa, load_v2);
 
-   store = find_next_intrinsic(nir_intrinsic_store_deref, store);
-   ASSERT_TRUE(store->src[1].is_ssa);
-   EXPECT_EQ(store->src[1].ssa, load_v3);
+   nir_intrinsic_instr *second_store = get_intrinsic(nir_intrinsic_store_deref, 1);
+   ASSERT_TRUE(second_store->src[1].is_ssa);
+   EXPECT_EQ(second_store->src[1].ssa, load_v3);
 }
 
 TEST_F(nir_dead_write_vars_test, DISABLED_memory_barrier_in_two_blocks)
 {
-   nir_variable **v = create_many_int(nir_var_shader_storage, "v", 2);
+   nir_variable **v = create_many_int(nir_var_mem_ssbo, "v", 2);
 
    nir_store_var(b, v[0], nir_imm_int(b, 1), 1);
    nir_store_var(b, v[1], nir_imm_int(b, 2), 1);
@@ -693,7 +804,7 @@ TEST_F(nir_dead_write_vars_test, DISABLED_memory_barrier_in_two_blocks)
 
 TEST_F(nir_dead_write_vars_test, DISABLED_unrelated_barrier_in_two_blocks)
 {
-   nir_variable **v = create_many_int(nir_var_shader_storage, "v", 3);
+   nir_variable **v = create_many_int(nir_var_mem_ssbo, "v", 3);
    nir_variable *out = create_int(nir_var_shader_out, "out");
 
    nir_store_var(b, out, nir_load_var(b, v[1]), 1);
@@ -716,11 +827,12 @@ TEST_F(nir_dead_write_vars_test, DISABLED_unrelated_barrier_in_two_blocks)
    /* Verify the first write to v[0] was removed. */
    EXPECT_EQ(3, count_intrinsics(nir_intrinsic_store_deref));
 
-   nir_intrinsic_instr *store = NULL;
-   store = find_next_intrinsic(nir_intrinsic_store_deref, store);
-   EXPECT_EQ(nir_intrinsic_get_var(store, 0), out);
-   store = find_next_intrinsic(nir_intrinsic_store_deref, store);
-   EXPECT_EQ(nir_intrinsic_get_var(store, 0), out);
-   store = find_next_intrinsic(nir_intrinsic_store_deref, store);
-   EXPECT_EQ(nir_intrinsic_get_var(store, 0), v[0]);
+   nir_intrinsic_instr *first_store = get_intrinsic(nir_intrinsic_store_deref, 0);
+   EXPECT_EQ(nir_intrinsic_get_var(first_store, 0), out);
+
+   nir_intrinsic_instr *second_store = get_intrinsic(nir_intrinsic_store_deref, 1);
+   EXPECT_EQ(nir_intrinsic_get_var(second_store, 0), out);
+
+   nir_intrinsic_instr *third_store = get_intrinsic(nir_intrinsic_store_deref, 2);
+   EXPECT_EQ(nir_intrinsic_get_var(third_store, 0), v[0]);
 }

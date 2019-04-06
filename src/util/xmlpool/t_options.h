@@ -210,6 +210,11 @@ DRI_CONF_OPT_BEGIN_V(vblank_mode,enum,def,"0:3") \
         DRI_CONF_DESC_END \
 DRI_CONF_OPT_END
 
+#define DRI_CONF_ADAPTIVE_SYNC(def) \
+DRI_CONF_OPT_BEGIN_B(adaptive_sync,def) \
+        DRI_CONF_DESC(en,gettext("Adapt the monitor sync to the application performance (when possible)")) \
+DRI_CONF_OPT_END
+
 #define DRI_CONF_MESA_GLTHREAD(def) \
 DRI_CONF_OPT_BEGIN_B(mesa_glthread, def) \
         DRI_CONF_DESC(en,gettext("Enable offloading GL driver work to a separate thread")) \
@@ -257,6 +262,11 @@ DRI_CONF_OPT_END
 #define DRI_CONF_ALLOW_RGB10_CONFIGS(def) \
 DRI_CONF_OPT_BEGIN_B(allow_rgb10_configs, def) \
 DRI_CONF_DESC(en,gettext("Allow exposure of visuals and fbconfigs with rgb10a2 formats")) \
+DRI_CONF_OPT_END
+
+#define DRI_CONF_ALLOW_RGB565_CONFIGS(def) \
+DRI_CONF_OPT_BEGIN_B(allow_rgb565_configs, def) \
+DRI_CONF_DESC(en,gettext("Allow exposure of visuals and fbconfigs with rgb565 formats")) \
 DRI_CONF_OPT_END
 
 /**
@@ -341,4 +351,9 @@ DRI_CONF_OPT_END
 #define DRI_CONF_RADEONSI_ZERO_ALL_VRAM_ALLOCS(def) \
 DRI_CONF_OPT_BEGIN_B(radeonsi_zerovram, def) \
         DRI_CONF_DESC(en,"Zero all vram allocations") \
+DRI_CONF_OPT_END
+
+#define DRI_CONF_RADEONSI_ENABLE_NIR(def) \
+DRI_CONF_OPT_BEGIN_B(radeonsi_enable_nir, def) \
+        DRI_CONF_DESC(en,gettext("Enable NIR")) \
 DRI_CONF_OPT_END

@@ -144,19 +144,11 @@ lower_res_index_intrinsic(nir_intrinsic_instr *intrin,
    uint32_t array_size =
       state->layout->set[set].layout->binding[binding].array_size;
 
-   nir_ssa_def *block_index;
-   if (nir_src_is_const(intrin->src[0])) {
-      unsigned array_index = nir_src_as_uint(intrin->src[0]);
-      array_index = MIN2(array_index, array_size - 1);
-      block_index = nir_imm_int(b, surface_index + array_index);
-   } else {
-      block_index = nir_ssa_for_src(b, intrin->src[0], 1);
+   nir_ssa_def *array_index = nir_ssa_for_src(b, intrin->src[0], 1);
+   if (nir_src_is_const(intrin->src[0]) || state->add_bounds_checks)
+      array_index = nir_umin(b, array_index, nir_imm_int(b, array_size - 1));
 
-      if (state->add_bounds_checks)
-         block_index = nir_umin(b, block_index, nir_imm_int(b, array_size - 1));
-
-      block_index = nir_iadd(b, nir_imm_int(b, surface_index), block_index);
-   }
+   nir_ssa_def *block_index = nir_iadd_imm(b, array_index, surface_index);
 
    assert(intrin->dest.is_ssa);
    nir_ssa_def_rewrite_uses(&intrin->dest.ssa, nir_src_for_ssa(block_index));
@@ -169,6 +161,8 @@ lower_res_reindex_intrinsic(nir_intrinsic_instr *intrin,
 {
    nir_builder *b = &state->builder;
 
+   b->cursor = nir_before_instr(&intrin->instr);
+
    /* For us, the resource indices are just indices into the binding table and
     * array elements are sequential.  A resource_reindex just turns into an
     * add of the two indices.
@@ -179,6 +173,23 @@ lower_res_reindex_intrinsic(nir_intrinsic_instr *intrin,
 
    assert(intrin->dest.is_ssa);
    nir_ssa_def_rewrite_uses(&intrin->dest.ssa, nir_src_for_ssa(new_index));
+   nir_instr_remove(&intrin->instr);
+}
+
+static void
+lower_load_vulkan_descriptor(nir_intrinsic_instr *intrin,
+                             struct apply_pipeline_layout_state *state)
+{
+   nir_builder *b = &state->builder;
+
+   b->cursor = nir_before_instr(&intrin->instr);
+
+   /* We follow the nir_address_format_vk_index_offset model */
+   assert(intrin->src[0].is_ssa);
+   nir_ssa_def *vec2 = nir_vec2(b, intrin->src[0].ssa, nir_imm_int(b, 0));
+
+   assert(intrin->dest.is_ssa);
+   nir_ssa_def_rewrite_uses(&intrin->dest.ssa, nir_src_for_ssa(vec2));
    nir_instr_remove(&intrin->instr);
 }
 
@@ -378,6 +389,9 @@ apply_pipeline_layout_block(nir_block *block,
          case nir_intrinsic_vulkan_resource_reindex:
             lower_res_reindex_intrinsic(intrin, state);
             break;
+         case nir_intrinsic_load_vulkan_descriptor:
+            lower_load_vulkan_descriptor(intrin, state);
+            break;
          case nir_intrinsic_image_deref_load:
          case nir_intrinsic_image_deref_store:
          case nir_intrinsic_image_deref_atomic_add:
@@ -514,8 +528,8 @@ anv_nir_apply_pipeline_layout(const struct anv_physical_device *pdevice,
       }
    }
 
-   if (map->image_count > 0) {
-      assert(map->image_count <= MAX_IMAGES);
+   if (map->image_count > 0 && pdevice->compiler->devinfo->gen < 9) {
+      assert(map->image_count <= MAX_GEN8_IMAGES);
       assert(shader->num_uniforms == prog_data->nr_params * 4);
       state.first_image_uniform = shader->num_uniforms;
       uint32_t *param = brw_stage_prog_data_add_params(prog_data,

@@ -68,7 +68,7 @@ static void default_logger(int level, const char *fmt, ...)
    }
 }
 
-static void (*log_)(int level, const char *fmt, ...) = default_logger;
+static loader_logger *log_ = default_logger;
 
 int
 loader_open_device(const char *device_name)
@@ -137,7 +137,7 @@ loader_open_render_node(const char *name)
           (device->bustype == DRM_BUS_PLATFORM)) {
          drmVersionPtr version;
 
-         fd = open(device->nodes[DRM_NODE_RENDER], O_RDWR | O_CLOEXEC);
+         fd = loader_open_device(device->nodes[DRM_NODE_RENDER]);
          if (fd < 0)
             continue;
 
@@ -491,7 +491,7 @@ out:
 }
 
 void
-loader_set_logger(void (*logger)(int level, const char *fmt, ...))
+loader_set_logger(loader_logger *logger)
 {
    log_ = logger;
 }

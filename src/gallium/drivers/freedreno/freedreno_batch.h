@@ -145,6 +145,18 @@ struct fd_batch {
 	 */
 	struct util_dynarray rbrc_patches;
 
+	/* Keep track of GMEM related values that need to be patched up once we
+	 * know the gmem layout:
+	 */
+	struct util_dynarray gmem_patches;
+
+	/* Keep track of pointer to start of MEM exports for a20x binning shaders
+	 *
+	 * this is so the end of the shader can be cut off at the right point
+	 * depending on the GMEM configuration
+	 */
+	struct util_dynarray shader_patches;
+
 	struct pipe_framebuffer_state framebuffer;
 
 	struct fd_submit *submit;
@@ -231,6 +243,10 @@ void __fd_batch_destroy(struct fd_batch *batch);
  * WARNING the _locked() version can briefly drop the lock.  Without
  * recursive mutexes, I'm not sure there is much else we can do (since
  * __fd_batch_destroy() needs to unref resources)
+ *
+ * WARNING you must acquire the screen->lock and use the _locked()
+ * version in case that the batch being ref'd can disappear under
+ * you.
  */
 
 /* fwd-decl prototypes to untangle header dependency :-/ */

@@ -156,6 +156,8 @@ append_bo(struct msm_submit_sp *submit, struct fd_bo *bo, uint32_t flags)
 		submit->submit_bos[idx].flags |= MSM_SUBMIT_BO_READ;
 	if (flags & FD_RELOC_WRITE)
 		submit->submit_bos[idx].flags |= MSM_SUBMIT_BO_WRITE;
+	if (flags & FD_RELOC_DUMP)
+		submit->submit_bos[idx].flags |= MSM_SUBMIT_BO_DUMP;
 	return idx;
 }
 
@@ -184,8 +186,8 @@ msm_submit_suballoc_ring_bo(struct fd_submit *submit,
 
 	if (!suballoc_bo) {
 		// TODO possibly larger size for streaming bo?
-		msm_ring->ring_bo = fd_bo_new_ring(
-				submit->pipe->dev, 0x8000, 0);
+		msm_ring->ring_bo = fd_bo_new_ring(submit->pipe->dev,
+				0x8000, DRM_FREEDRENO_GEM_GPUREADONLY);
 		msm_ring->offset = 0;
 	} else {
 		msm_ring->ring_bo = fd_bo_ref(suballoc_bo);
@@ -223,7 +225,8 @@ msm_submit_sp_new_ringbuffer(struct fd_submit *submit, uint32_t size,
 			size = INIT_SIZE;
 
 		msm_ring->offset = 0;
-		msm_ring->ring_bo = fd_bo_new_ring(submit->pipe->dev, size, 0);
+		msm_ring->ring_bo = fd_bo_new_ring(submit->pipe->dev, size,
+				DRM_FREEDRENO_GEM_GPUREADONLY);
 	}
 
 	if (!msm_ringbuffer_sp_init(msm_ring, size, flags))
@@ -257,8 +260,8 @@ msm_submit_sp_flush(struct fd_submit *submit, int in_fence_fd,
 
 	for (unsigned i = 0; i < primary->u.nr_cmds; i++) {
 		cmds[i].type = MSM_SUBMIT_CMD_BUF;
-		cmds[i].submit_idx =
-			append_bo(msm_submit, primary->u.cmds[i].ring_bo, FD_RELOC_READ);
+		cmds[i].submit_idx = append_bo(msm_submit,
+				primary->u.cmds[i].ring_bo, FD_RELOC_READ | FD_RELOC_DUMP);
 		cmds[i].submit_offset = primary->offset;
 		cmds[i].size = primary->u.cmds[i].size;
 		cmds[i].pad = 0;
@@ -373,7 +376,8 @@ msm_ringbuffer_sp_grow(struct fd_ringbuffer *ring, uint32_t size)
 	finalize_current_cmd(ring);
 
 	fd_bo_del(msm_ring->ring_bo);
-	msm_ring->ring_bo = fd_bo_new_ring(pipe->dev, size, 0);
+	msm_ring->ring_bo = fd_bo_new_ring(pipe->dev, size,
+			DRM_FREEDRENO_GEM_GPUREADONLY);
 
 	ring->start = fd_bo_map(msm_ring->ring_bo);
 	ring->end = &(ring->start[size/4]);
@@ -447,16 +451,28 @@ msm_ringbuffer_sp_emit_reloc_ring(struct fd_ringbuffer *ring,
 
 	msm_ringbuffer_sp_emit_reloc(ring, &(struct fd_reloc){
 		.bo     = bo,
-		.flags  = FD_RELOC_READ,
+		.flags  = FD_RELOC_READ | FD_RELOC_DUMP,
 		.offset = msm_target->offset,
 	});
 
-	if ((target->flags & _FD_RINGBUFFER_OBJECT) &&
-			!(ring->flags & _FD_RINGBUFFER_OBJECT)) {
+	if (!(target->flags & _FD_RINGBUFFER_OBJECT))
+		return size;
+
+	struct msm_ringbuffer_sp *msm_ring = to_msm_ringbuffer_sp(ring);
+
+	if (ring->flags & _FD_RINGBUFFER_OBJECT) {
+		for (unsigned i = 0; i < msm_target->u.nr_reloc_bos; i++) {
+			unsigned idx = APPEND(&msm_ring->u, reloc_bos);
+
+			msm_ring->u.reloc_bos[idx].bo =
+				fd_bo_ref(msm_target->u.reloc_bos[i].bo);
+			msm_ring->u.reloc_bos[idx].flags =
+				msm_target->u.reloc_bos[i].flags;
+		}
+	} else {
 		// TODO it would be nice to know whether we have already
 		// seen this target before.  But hopefully we hit the
 		// append_bo() fast path enough for this to not matter:
-		struct msm_ringbuffer_sp *msm_ring = to_msm_ringbuffer_sp(ring);
 		struct msm_submit_sp *msm_submit = to_msm_submit_sp(msm_ring->u.submit);
 
 		for (unsigned i = 0; i < msm_target->u.nr_reloc_bos; i++) {
@@ -544,7 +560,8 @@ msm_ringbuffer_sp_new_object(struct fd_pipe *pipe, uint32_t size)
 
 	msm_ring->u.pipe = pipe;
 	msm_ring->offset = 0;
-	msm_ring->ring_bo = fd_bo_new_ring(pipe->dev, size, 0);
+	msm_ring->ring_bo = fd_bo_new_ring(pipe->dev, size,
+			DRM_FREEDRENO_GEM_GPUREADONLY);
 	msm_ring->base.refcnt = 1;
 
 	return msm_ringbuffer_sp_init(msm_ring, size, _FD_RINGBUFFER_OBJECT);

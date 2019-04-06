@@ -28,6 +28,7 @@
 #ifndef ST_CONTEXT_H
 #define ST_CONTEXT_H
 
+#include "main/arrayobj.h"
 #include "main/mtypes.h"
 #include "state_tracker/st_api.h"
 #include "main/fbobject.h"
@@ -127,6 +128,9 @@ struct st_context
    boolean has_shareable_shaders;
    boolean has_half_float_packing;
    boolean has_multi_draw_indirect;
+   boolean has_single_pipe_stat;
+   boolean has_indep_blend_func;
+   boolean needs_rgb_dst_alpha_override;
    boolean can_bind_const_buffer_as_vertex;
 
    /**
@@ -224,14 +228,12 @@ struct st_context
       struct pipe_sampler_state sampler;
       struct pipe_sampler_state atlas_sampler;
       enum pipe_format tex_format;
-      void *vs;
       struct st_bitmap_cache cache;
    } bitmap;
 
    /** for glDraw/CopyPixels */
    struct {
       void *zs_shaders[4];
-      void *vert_shaders[2];   /**< ureg shaders */
    } drawpix;
 
    /** Cache of glDrawPixels images */
@@ -278,7 +280,8 @@ struct st_context
    /** for drawing with st_util_vertex */
    struct pipe_vertex_element util_velems[3];
 
-   void *passthrough_fs;  /**< simple pass-through frag shader */
+   /** passthrough vertex shader matching the util_velem attributes */
+   void *passthrough_vs;
 
    enum pipe_texture_target internal_target;
 
@@ -394,6 +397,14 @@ st_user_clip_planes_enabled(struct gl_context *ctx)
    return (ctx->API == API_OPENGL_COMPAT ||
            ctx->API == API_OPENGLES) && /* only ES 1.x */
           ctx->Transform.ClipPlanesEnabled;
+}
+
+
+static inline bool
+st_vp_uses_current_values(const struct gl_context *ctx)
+{
+   const uint64_t inputs = ctx->VertexProgram._Current->info.inputs_read;
+   return _mesa_draw_current_bits(ctx) & inputs;
 }
 
 /** clear-alloc a struct-sized object, with casting */

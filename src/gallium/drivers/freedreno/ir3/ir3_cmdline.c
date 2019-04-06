@@ -165,6 +165,7 @@ load_glsl(unsigned num_files, char* const* files, gl_shader_stage stage)
 				ir3_glsl_type_size);
 		break;
 	case MESA_SHADER_COMPUTE:
+	case MESA_SHADER_KERNEL:
 		break;
 	default:
 		errx(1, "unhandled shader stage: %d", stage);
@@ -229,6 +230,7 @@ load_spirv(const char *filename, const char *entry, gl_shader_stage stage)
 			.variable_pointers = true,
 		},
 		.lower_workgroup_access_to_offsets = true,
+		.lower_ubo_ssbo_access_to_offsets = true,
 		.debug = {
 			.func = debug_func,
 		}

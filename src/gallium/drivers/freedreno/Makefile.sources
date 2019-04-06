@@ -1,6 +1,4 @@
 C_SOURCES := \
-	adreno_common.xml.h \
-	adreno_pm4.xml.h \
 	disasm.h \
 	freedreno_batch.c \
 	freedreno_batch.h \
@@ -41,12 +39,9 @@ C_SOURCES := \
 	freedreno_util.h
 
 a2xx_SOURCES := \
-	a2xx/a2xx.xml.h \
 	a2xx/disasm-a2xx.c \
 	a2xx/fd2_blend.c \
 	a2xx/fd2_blend.h \
-	a2xx/fd2_compiler.c \
-	a2xx/fd2_compiler.h \
 	a2xx/fd2_context.c \
 	a2xx/fd2_context.h \
 	a2xx/fd2_draw.c \
@@ -55,8 +50,11 @@ a2xx_SOURCES := \
 	a2xx/fd2_emit.h \
 	a2xx/fd2_gmem.c \
 	a2xx/fd2_gmem.h \
+	a2xx/fd2_perfcntr.c \
 	a2xx/fd2_program.c \
 	a2xx/fd2_program.h \
+	a2xx/fd2_query.c \
+	a2xx/fd2_query.h \
 	a2xx/fd2_rasterizer.c \
 	a2xx/fd2_rasterizer.h \
 	a2xx/fd2_resource.c \
@@ -70,11 +68,16 @@ a2xx_SOURCES := \
 	a2xx/fd2_zsa.c \
 	a2xx/fd2_zsa.h \
 	a2xx/instr-a2xx.h \
-	a2xx/ir-a2xx.c \
-	a2xx/ir-a2xx.h
+	a2xx/ir2.c \
+	a2xx/ir2.h \
+	a2xx/ir2_assemble.c \
+	a2xx/ir2_cp.c \
+	a2xx/ir2_nir.c \
+	a2xx/ir2_nir_lower_scalar.c \
+	a2xx/ir2_private.h \
+	a2xx/ir2_ra.c
 
 a3xx_SOURCES := \
-	a3xx/a3xx.xml.h \
 	a3xx/fd3_blend.c \
 	a3xx/fd3_blend.h \
 	a3xx/fd3_context.c \
@@ -101,7 +104,6 @@ a3xx_SOURCES := \
 	a3xx/fd3_zsa.h
 
 a4xx_SOURCES := \
-	a4xx/a4xx.xml.h \
 	a4xx/fd4_blend.c \
 	a4xx/fd4_blend.h \
 	a4xx/fd4_context.c \
@@ -128,7 +130,6 @@ a4xx_SOURCES := \
 	a4xx/fd4_zsa.h
 
 a5xx_SOURCES := \
-	a5xx/a5xx.xml.h \
 	a5xx/fd5_blend.c \
 	a5xx/fd5_blend.h \
 	a5xx/fd5_blitter.c \
@@ -164,11 +165,12 @@ a5xx_SOURCES := \
 	a5xx/fd5_zsa.h
 
 a6xx_SOURCES := \
-	a6xx/a6xx.xml.h \
 	a6xx/fd6_blend.c \
 	a6xx/fd6_blend.h \
 	a6xx/fd6_blitter.c \
 	a6xx/fd6_blitter.h \
+	a6xx/fd6_compute.c \
+	a6xx/fd6_compute.h \
 	a6xx/fd6_context.c \
 	a6xx/fd6_context.h \
 	a6xx/fd6_draw.c \

@@ -125,11 +125,11 @@ nir_shader_add_variable(nir_shader *shader, nir_variable *var)
       assert(!"invalid mode");
       break;
 
-   case nir_var_local:
+   case nir_var_function_temp:
       assert(!"nir_shader_add_variable cannot be used for local variables");
       break;
 
-   case nir_var_global:
+   case nir_var_shader_temp:
       exec_list_push_tail(&shader->globals, &var->node);
       break;
 
@@ -142,13 +142,18 @@ nir_shader_add_variable(nir_shader *shader, nir_variable *var)
       break;
 
    case nir_var_uniform:
-   case nir_var_shader_storage:
+   case nir_var_mem_ubo:
+   case nir_var_mem_ssbo:
       exec_list_push_tail(&shader->uniforms, &var->node);
       break;
 
-   case nir_var_shared:
-      assert(shader->info.stage == MESA_SHADER_COMPUTE);
+   case nir_var_mem_shared:
+      assert(gl_shader_stage_is_compute(shader->info.stage));
       exec_list_push_tail(&shader->shared, &var->node);
+      break;
+
+   case nir_var_mem_global:
+      assert(!"nir_shader_add_variable cannot be used for global memory");
       break;
 
    case nir_var_system_value:
@@ -188,7 +193,7 @@ nir_local_variable_create(nir_function_impl *impl,
    nir_variable *var = rzalloc(impl->function->shader, nir_variable);
    var->name = ralloc_strdup(var, name);
    var->type = type;
-   var->data.mode = nir_var_local;
+   var->data.mode = nir_var_function_temp;
 
    nir_function_impl_add_variable(impl, var);
 
@@ -207,6 +212,7 @@ nir_function_create(nir_shader *shader, const char *name)
    func->num_params = 0;
    func->params = NULL;
    func->impl = NULL;
+   func->is_entrypoint = false;
 
    return func;
 }
@@ -328,8 +334,7 @@ nir_block_create(nir_shader *shader)
    cf_init(&block->cf_node, nir_cf_node_block);
 
    block->successors[0] = block->successors[1] = NULL;
-   block->predecessors = _mesa_set_create(block, _mesa_hash_pointer,
-                                          _mesa_key_pointer_equal);
+   block->predecessors = _mesa_pointer_set_create(block);
    block->imm_dom = NULL;
    /* XXX maybe it would be worth it to defer allocation?  This
     * way it doesn't get allocated for shader refs that never run
@@ -339,8 +344,7 @@ nir_block_create(nir_shader *shader)
     * which is later used to do state specific lowering and futher
     * opt.  Do any of the references not need dominance metadata?
     */
-   block->dom_frontier = _mesa_set_create(block, _mesa_hash_pointer,
-                                          _mesa_key_pointer_equal);
+   block->dom_frontier = _mesa_pointer_set_create(block);
 
    exec_list_make_empty(&block->instr_list);
 
@@ -459,7 +463,8 @@ nir_deref_instr_create(nir_shader *shader, nir_deref_type deref_type)
    if (deref_type != nir_deref_type_var)
       src_init(&instr->parent);
 
-   if (deref_type == nir_deref_type_array)
+   if (deref_type == nir_deref_type_array ||
+       deref_type == nir_deref_type_ptr_as_array)
       src_init(&instr->arr.index);
 
    dest_init(&instr->dest);
@@ -638,6 +643,7 @@ const_value_int(int64_t i, unsigned bit_size)
 {
    nir_const_value v;
    switch (bit_size) {
+   case 1:  v.b[0]   = i & 1;  break;
    case 8:  v.i8[0]  = i;  break;
    case 16: v.i16[0] = i;  break;
    case 32: v.i32[0] = i;  break;
@@ -1065,7 +1071,8 @@ visit_deref_instr_src(nir_deref_instr *instr,
          return false;
    }
 
-   if (instr->deref_type == nir_deref_type_array) {
+   if (instr->deref_type == nir_deref_type_array ||
+       instr->deref_type == nir_deref_type_ptr_as_array) {
       if (!visit_src(&instr->arr.index, cb, state))
          return false;
    }
@@ -1206,6 +1213,8 @@ nir_src_comp_as_int(nir_src src, unsigned comp)
 
    assert(comp < load->def.num_components);
    switch (load->def.bit_size) {
+   /* int1_t uses 0/-1 convention */
+   case 1:  return -(int)load->value.b[comp];
    case 8:  return load->value.i8[comp];
    case 16: return load->value.i16[comp];
    case 32: return load->value.i32[comp];
@@ -1223,6 +1232,7 @@ nir_src_comp_as_uint(nir_src src, unsigned comp)
 
    assert(comp < load->def.num_components);
    switch (load->def.bit_size) {
+   case 1:  return load->value.b[comp];
    case 8:  return load->value.u8[comp];
    case 16: return load->value.u16[comp];
    case 32: return load->value.u32[comp];
@@ -1235,15 +1245,12 @@ nir_src_comp_as_uint(nir_src src, unsigned comp)
 bool
 nir_src_comp_as_bool(nir_src src, unsigned comp)
 {
-   assert(nir_src_is_const(src));
-   nir_load_const_instr *load = nir_instr_as_load_const(src.ssa->parent_instr);
+   int64_t i = nir_src_comp_as_int(src, comp);
 
-   assert(comp < load->def.num_components);
-   assert(load->def.bit_size == 32);
-   assert(load->value.u32[comp] == NIR_TRUE ||
-          load->value.u32[comp] == NIR_FALSE);
+   /* Booleans of any size use 0/-1 convention */
+   assert(i == 0 || i == -1);
 
-   return load->value.u32[comp];
+   return i;
 }
 
 double
@@ -1504,7 +1511,8 @@ void
 nir_ssa_def_rewrite_uses_after(nir_ssa_def *def, nir_src new_src,
                                nir_instr *after_me)
 {
-   assert(!new_src.is_ssa || def != new_src.ssa);
+   if (new_src.is_ssa && def == new_src.ssa)
+      return;
 
    nir_foreach_use_safe(use_src, def) {
       assert(use_src->parent_instr != def->parent_instr);

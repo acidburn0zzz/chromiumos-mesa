@@ -35,6 +35,52 @@
 #include "isl_gen9.h"
 #include "isl_priv.h"
 
+void
+isl_memcpy_linear_to_tiled(uint32_t xt1, uint32_t xt2,
+                           uint32_t yt1, uint32_t yt2,
+                           char *dst, const char *src,
+                           uint32_t dst_pitch, int32_t src_pitch,
+                           bool has_swizzling,
+                           enum isl_tiling tiling,
+                           isl_memcpy_type copy_type)
+{
+#ifdef USE_SSE41
+   if (copy_type == ISL_MEMCPY_STREAMING_LOAD) {
+      _isl_memcpy_linear_to_tiled_sse41(
+         xt1, xt2, yt1, yt2, dst, src, dst_pitch, src_pitch, has_swizzling,
+         tiling, copy_type);
+      return;
+   }
+#endif
+
+   _isl_memcpy_linear_to_tiled(
+      xt1, xt2, yt1, yt2, dst, src, dst_pitch, src_pitch, has_swizzling,
+      tiling, copy_type);
+}
+
+void
+isl_memcpy_tiled_to_linear(uint32_t xt1, uint32_t xt2,
+                           uint32_t yt1, uint32_t yt2,
+                           char *dst, const char *src,
+                           int32_t dst_pitch, uint32_t src_pitch,
+                           bool has_swizzling,
+                           enum isl_tiling tiling,
+                           isl_memcpy_type copy_type)
+{
+#ifdef USE_SSE41
+   if (copy_type == ISL_MEMCPY_STREAMING_LOAD) {
+      _isl_memcpy_tiled_to_linear_sse41(
+         xt1, xt2, yt1, yt2, dst, src, dst_pitch, src_pitch, has_swizzling,
+         tiling, copy_type);
+      return;
+   }
+#endif
+
+   _isl_memcpy_tiled_to_linear(
+      xt1, xt2, yt1, yt2, dst, src, dst_pitch, src_pitch, has_swizzling,
+      tiling, copy_type);
+}
+
 void PRINTFLIKE(3, 4) UNUSED
 __isl_finishme(const char *file, int line, const char *fmt, ...)
 {
@@ -53,6 +99,9 @@ isl_device_init(struct isl_device *dev,
                 const struct gen_device_info *info,
                 bool has_bit6_swizzling)
 {
+   /* Gen8+ don't have bit6 swizzling, ensure callsite is not confused. */
+   assert(!(has_bit6_swizzling && info->gen >= 8));
+
    dev->info = info;
    dev->use_separate_stencil = ISL_DEV_GEN(dev) >= 6;
    dev->has_bit6_swizzling = has_bit6_swizzling;
@@ -1332,20 +1381,6 @@ isl_calc_row_pitch(const struct isl_device *dev,
    uint32_t alignment_B =
       isl_calc_row_pitch_alignment(surf_info, tile_info);
 
-   /* If pitch isn't given and it can be chosen freely, align it by cache line
-    * allowing one to use blit engine on the surface.
-    */
-   if (surf_info->row_pitch_B == 0 && tile_info->tiling == ISL_TILING_LINEAR) {
-      /* From the Broadwell PRM docs for XY_SRC_COPY_BLT::SourceBaseAddress:
-       *
-       *    "Base address of the destination surface: X=0, Y=0. Lower 32bits
-       *    of the 48bit addressing. When Src Tiling is enabled (Bit_15
-       *    enabled), this address must be 4KB-aligned. When Tiling is not
-       *    enabled, this address should be CL (64byte) aligned."
-       */
-      alignment_B = MAX2(alignment_B, 64);
-   }
-
    const uint32_t min_row_pitch_B =
       isl_calc_min_row_pitch(dev, surf_info, tile_info, phys_total_el,
                              alignment_B);
@@ -1484,6 +1519,14 @@ isl_surf_init_s(const struct isl_device *dev,
          }
       }
       base_alignment_B = isl_round_up_to_power_of_two(base_alignment_B);
+
+      /* From the Skylake PRM Vol 2c, PLANE_STRIDE::Stride:
+       *
+       *     "For Linear memory, this field specifies the stride in chunks of
+       *     64 bytes (1 cache line)."
+       */
+      if (isl_surf_usage_is_display(info->usage))
+         base_alignment_B = MAX(base_alignment_B, 64);
    } else {
       const uint32_t total_h_tl =
          isl_align_div(phys_total_el.h, tile_info.logical_extent_el.height);

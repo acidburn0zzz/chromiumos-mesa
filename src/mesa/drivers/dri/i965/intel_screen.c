@@ -23,7 +23,7 @@
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#include <drm_fourcc.h>
+#include "drm-uapi/drm_fourcc.h"
 #include <errno.h>
 #include <time.h>
 #include <unistd.h>
@@ -96,6 +96,7 @@ DRI_CONF_BEGIN
    DRI_CONF_SECTION_MISCELLANEOUS
       DRI_CONF_GLSL_ZERO_INIT("false")
       DRI_CONF_ALLOW_RGB10_CONFIGS("false")
+      DRI_CONF_ALLOW_RGB565_CONFIGS("true")
    DRI_CONF_SECTION_END
 DRI_CONF_END
 };
@@ -111,7 +112,7 @@ DRI_CONF_END
 
 #include "brw_context.h"
 
-#include "i915_drm.h"
+#include "drm-uapi/i915_drm.h"
 
 /**
  * For debugging purposes, this returns a time in seconds.
@@ -282,12 +283,27 @@ static const struct intel_image_format intel_image_formats[] = {
      { { 0, 0, 0, __DRI_IMAGE_FORMAT_R8, 1 },
        { 1, 1, 1, __DRI_IMAGE_FORMAT_GR88, 2 } } },
 
+   { __DRI_IMAGE_FOURCC_P010, __DRI_IMAGE_COMPONENTS_Y_UV, 2,
+     { { 0, 0, 0, __DRI_IMAGE_FORMAT_R16, 2 },
+       { 1, 1, 1, __DRI_IMAGE_FORMAT_GR1616, 4 } } , 65535.0f/1023.0f },
+
+   { __DRI_IMAGE_FOURCC_P012, __DRI_IMAGE_COMPONENTS_Y_UV, 2,
+     { { 0, 0, 0, __DRI_IMAGE_FORMAT_R16, 2 },
+       { 1, 1, 1, __DRI_IMAGE_FORMAT_GR1616, 4 } } , 65535.0f/4095.0f },
+
+   { __DRI_IMAGE_FOURCC_P016, __DRI_IMAGE_COMPONENTS_Y_UV, 2,
+     { { 0, 0, 0, __DRI_IMAGE_FORMAT_R16, 2 },
+       { 1, 1, 1, __DRI_IMAGE_FORMAT_GR1616, 4 } } },
+
    { __DRI_IMAGE_FOURCC_NV16, __DRI_IMAGE_COMPONENTS_Y_UV, 2,
      { { 0, 0, 0, __DRI_IMAGE_FORMAT_R8, 1 },
        { 1, 1, 0, __DRI_IMAGE_FORMAT_GR88, 2 } } },
 
    { __DRI_IMAGE_FOURCC_AYUV, __DRI_IMAGE_COMPONENTS_AYUV, 1,
      { { 0, 0, 0, __DRI_IMAGE_FORMAT_ABGR8888, 4 } } },
+
+   { __DRI_IMAGE_FOURCC_XYUV8888, __DRI_IMAGE_COMPONENTS_XYUV, 1,
+     { { 0, 0, 0, __DRI_IMAGE_FORMAT_XBGR8888, 4 } } },
 
    /* For YUYV and UYVY buffers, we set up two overlapping DRI images
     * and treat them as planar buffers in the compositors.
@@ -1893,6 +1909,20 @@ intel_init_bufmgr(struct intel_screen *screen)
 static bool
 intel_detect_swizzling(struct intel_screen *screen)
 {
+   /* Broadwell PRM says:
+    *
+    *   "Before Gen8, there was a historical configuration control field to
+    *    swizzle address bit[6] for in X/Y tiling modes. This was set in three
+    *    different places: TILECTL[1:0], ARB_MODE[5:4], and
+    *    DISP_ARB_CTL[14:13].
+    *
+    *    For Gen8 and subsequent generations, the swizzle fields are all
+    *    reserved, and the CPU's memory controller performs all address
+    *    swizzling modifications."
+    */
+   if (screen->devinfo.gen >= 8)
+      return false;
+
    uint32_t tiling = I915_TILING_X;
    uint32_t swizzle_mode = 0;
    struct brw_bo *buffer =
@@ -2176,6 +2206,9 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
    /* Shall we expose 10 bpc formats? */
    bool allow_rgb10_configs = driQueryOptionb(&screen->optionCache,
                                               "allow_rgb10_configs");
+   /* Shall we expose 565 formats? */
+   bool allow_rgb565_configs = driQueryOptionb(&screen->optionCache,
+                                               "allow_rgb565_configs");
 
    /* Generate singlesample configs, each without accumulation buffer
     * and with EGL_MUTABLE_RENDER_BUFFER_BIT_KHR.
@@ -2187,6 +2220,9 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
       if (!allow_rgb10_configs &&
           (formats[i] == MESA_FORMAT_B10G10R10A2_UNORM ||
            formats[i] == MESA_FORMAT_B10G10R10X2_UNORM))
+         continue;
+
+      if (!allow_rgb565_configs && formats[i] == MESA_FORMAT_B5G6R5_UNORM)
          continue;
 
       /* Starting with DRI2 protocol version 1.1 we can request a depth/stencil
@@ -2231,6 +2267,9 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
           formats[i] == MESA_FORMAT_B10G10R10X2_UNORM))
          continue;
 
+      if (!allow_rgb565_configs && formats[i] == MESA_FORMAT_B5G6R5_UNORM)
+         continue;
+
       if (formats[i] == MESA_FORMAT_B5G6R5_UNORM) {
          depth_bits[0] = 16;
          stencil_bits[0] = 0;
@@ -2267,6 +2306,9 @@ intel_screen_make_configs(__DRIscreen *dri_screen)
       if (!allow_rgb10_configs &&
           (formats[i] == MESA_FORMAT_B10G10R10A2_UNORM ||
           formats[i] == MESA_FORMAT_B10G10R10X2_UNORM))
+         continue;
+
+      if (!allow_rgb565_configs && formats[i] == MESA_FORMAT_B5G6R5_UNORM)
          continue;
 
       __DRIconfig **new_configs;

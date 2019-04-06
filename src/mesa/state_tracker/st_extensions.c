@@ -183,7 +183,8 @@ void st_init_limits(struct pipe_screen *screen,
             continue;
          supported_irs =
             screen->get_shader_param(screen, sh, PIPE_SHADER_CAP_SUPPORTED_IRS);
-         if (!(supported_irs & (1 << PIPE_SHADER_IR_TGSI)))
+         if (!(supported_irs & ((1 << PIPE_SHADER_IR_TGSI) |
+                                (1 << PIPE_SHADER_IR_NIR))))
             continue;
       }
 
@@ -222,8 +223,13 @@ void st_init_limits(struct pipe_screen *screen,
       pc->MaxUniformComponents = MIN2(pc->MaxUniformComponents,
                                       MAX_UNIFORMS * 4);
 
+      /* For ARB programs, prog_src_register::Index is a signed 13-bit number.
+       * This gives us a limit of 4096 values - but we may need to generate
+       * internal values in addition to what the source program uses.  So, we
+       * drop the limit one step lower, to 2048, to be safe.
+       */
       pc->MaxParameters =
-      pc->MaxNativeParameters = pc->MaxUniformComponents / 4;
+      pc->MaxNativeParameters = MIN2(pc->MaxUniformComponents / 4, 2048);
       pc->MaxInputComponents =
          screen->get_shader_param(screen, sh, PIPE_SHADER_CAP_MAX_INPUTS) * 4;
       pc->MaxOutputComponents =
@@ -320,7 +326,9 @@ void st_init_limits(struct pipe_screen *screen,
             screen->get_shader_param(screen, sh,
                                   PIPE_SHADER_CAP_MAX_UNROLL_ITERATIONS_HINT);
 
-      options->LowerCombinedClipCullDistance = true;
+      if (!screen->get_param(screen, PIPE_CAP_NIR_COMPACT_ARRAYS))
+         options->LowerCombinedClipCullDistance = true;
+
       options->LowerBufferInterfaceBlocks = true;
    }
 
@@ -333,7 +341,10 @@ void st_init_limits(struct pipe_screen *screen,
 
    c->GLSLOptimizeConservatively =
       screen->get_param(screen, PIPE_CAP_GLSL_OPTIMIZE_CONSERVATIVELY);
-   c->LowerTessLevel = true;
+   c->GLSLTessLevelsAsInputs =
+      screen->get_param(screen, PIPE_CAP_GLSL_TESS_LEVELS_AS_INPUTS);
+   c->LowerTessLevel =
+      !screen->get_param(screen, PIPE_CAP_NIR_COMPACT_ARRAYS);
    c->LowerCsDerivedVariables = true;
    c->PrimitiveRestartForPatches =
       screen->get_param(screen, PIPE_CAP_PRIMITIVE_RESTART_FOR_PATCHES);
@@ -359,10 +370,7 @@ void st_init_limits(struct pipe_screen *screen,
    c->Program[MESA_SHADER_VERTEX].MaxAttribs =
       MIN2(c->Program[MESA_SHADER_VERTEX].MaxAttribs, 16);
 
-   /* PIPE_SHADER_CAP_MAX_INPUTS for the FS specifies the maximum number
-    * of inputs. It's always 2 colors + N generic inputs. */
-   c->MaxVarying = screen->get_shader_param(screen, PIPE_SHADER_FRAGMENT,
-                                            PIPE_SHADER_CAP_MAX_INPUTS);
+   c->MaxVarying = screen->get_param(screen, PIPE_CAP_MAX_VARYINGS);
    c->MaxVarying = MIN2(c->MaxVarying, MAX_VARYING);
    c->MaxGeometryOutputVertices =
       screen->get_param(screen, PIPE_CAP_MAX_GEOMETRY_OUTPUT_VERTICES);
@@ -703,6 +711,7 @@ void st_init_extensions(struct pipe_screen *screen,
       { o(ARB_occlusion_query),              PIPE_CAP_OCCLUSION_QUERY                  },
       { o(ARB_occlusion_query2),             PIPE_CAP_OCCLUSION_QUERY                  },
       { o(ARB_pipeline_statistics_query),    PIPE_CAP_QUERY_PIPELINE_STATISTICS        },
+      { o(ARB_pipeline_statistics_query),    PIPE_CAP_QUERY_PIPELINE_STATISTICS_SINGLE },
       { o(ARB_point_sprite),                 PIPE_CAP_POINT_SPRITE                     },
       { o(ARB_polygon_offset_clamp),         PIPE_CAP_POLYGON_OFFSET_CLAMP             },
       { o(ARB_post_depth_coverage),          PIPE_CAP_POST_DEPTH_COVERAGE              },
@@ -740,6 +749,7 @@ void st_init_extensions(struct pipe_screen *screen,
       { o(EXT_draw_buffers2),                PIPE_CAP_INDEP_BLEND_ENABLE               },
       { o(EXT_memory_object),                PIPE_CAP_MEMOBJ                           },
       { o(EXT_memory_object_fd),             PIPE_CAP_MEMOBJ                           },
+      { o(EXT_multisampled_render_to_texture), PIPE_CAP_SURFACE_SAMPLE_COUNT           },
       { o(EXT_semaphore),                    PIPE_CAP_FENCE_SIGNAL                     },
       { o(EXT_semaphore_fd),                 PIPE_CAP_FENCE_SIGNAL                     },
       { o(EXT_texture_array),                PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS         },
@@ -759,6 +769,7 @@ void st_init_extensions(struct pipe_screen *screen,
       { o(NV_conditional_render),            PIPE_CAP_CONDITIONAL_RENDER               },
       { o(NV_fill_rectangle),                PIPE_CAP_POLYGON_MODE_FILL_RECTANGLE      },
       { o(NV_primitive_restart),             PIPE_CAP_PRIMITIVE_RESTART                },
+      { o(NV_shader_atomic_float),           PIPE_CAP_TGSI_ATOMFADD                    },
       { o(NV_texture_barrier),               PIPE_CAP_TEXTURE_BARRIER                  },
       { o(NVX_gpu_memory_info),              PIPE_CAP_QUERY_MEMORY_INFO                },
       /* GL_NV_point_sprite is not supported by gallium because we don't
@@ -767,14 +778,11 @@ void st_init_extensions(struct pipe_screen *screen,
       { o(OES_standard_derivatives),         PIPE_CAP_SM3                              },
       { o(OES_texture_float_linear),         PIPE_CAP_TEXTURE_FLOAT_LINEAR             },
       { o(OES_texture_half_float_linear),    PIPE_CAP_TEXTURE_HALF_FLOAT_LINEAR        },
+      { o(OES_texture_view),                 PIPE_CAP_SAMPLER_VIEW_TARGET              },
    };
 
    /* Required: render target and sampler support */
    static const struct st_extension_format_mapping rendertarget_mapping[] = {
-      { { o(ARB_texture_float) },
-        { PIPE_FORMAT_R32G32B32A32_FLOAT,
-          PIPE_FORMAT_R16G16B16A16_FLOAT } },
-
       { { o(OES_texture_float) },
         { PIPE_FORMAT_R32G32B32A32_FLOAT } },
 
@@ -786,7 +794,7 @@ void st_init_extensions(struct pipe_screen *screen,
           PIPE_FORMAT_B10G10R10A2_UINT },
          GL_TRUE }, /* at least one format must be supported */
 
-      { { o(EXT_framebuffer_sRGB) },
+      { { o(EXT_sRGB) },
         { PIPE_FORMAT_A8B8G8R8_SRGB,
           PIPE_FORMAT_B8G8R8A8_SRGB,
           PIPE_FORMAT_R8G8B8A8_SRGB },
@@ -802,6 +810,20 @@ void st_init_extensions(struct pipe_screen *screen,
       { { o(ARB_texture_rg) },
         { PIPE_FORMAT_R8_UNORM,
           PIPE_FORMAT_R8G8_UNORM } },
+
+      { { o(EXT_render_snorm) },
+        { PIPE_FORMAT_R8_SNORM,
+          PIPE_FORMAT_R8G8_SNORM,
+          PIPE_FORMAT_R8G8B8A8_SNORM,
+          PIPE_FORMAT_R16_SNORM,
+          PIPE_FORMAT_R16G16_SNORM,
+          PIPE_FORMAT_R16G16B16A16_SNORM } },
+   };
+
+   /* Required: render target, sampler, and blending */
+   static const struct st_extension_format_mapping rt_blendable[] = {
+      { { o(EXT_float_blend) },
+        { PIPE_FORMAT_R32G32B32A32_FLOAT } },
    };
 
    /* Required: depth stencil and sampler support */
@@ -831,6 +853,12 @@ void st_init_extensions(struct pipe_screen *screen,
           PIPE_FORMAT_DXT1_RGBA,
           PIPE_FORMAT_DXT3_RGBA,
           PIPE_FORMAT_DXT5_RGBA } },
+
+      { { o(EXT_texture_compression_s3tc_srgb) },
+        { PIPE_FORMAT_DXT1_SRGB,
+          PIPE_FORMAT_DXT1_SRGBA,
+          PIPE_FORMAT_DXT3_SRGBA,
+          PIPE_FORMAT_DXT5_SRGBA } },
 
       { { o(ARB_texture_compression_bptc) },
         { PIPE_FORMAT_BPTC_RGBA_UNORM,
@@ -1003,6 +1031,10 @@ void st_init_extensions(struct pipe_screen *screen,
    init_format_extensions(screen, extensions, rendertarget_mapping,
                           ARRAY_SIZE(rendertarget_mapping), PIPE_TEXTURE_2D,
                           PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW);
+   init_format_extensions(screen, extensions, rt_blendable,
+                          ARRAY_SIZE(rt_blendable), PIPE_TEXTURE_2D,
+                          PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW |
+                          PIPE_BIND_BLENDABLE);
    init_format_extensions(screen, extensions, depthstencil_mapping,
                           ARRAY_SIZE(depthstencil_mapping), PIPE_TEXTURE_2D,
                           PIPE_BIND_DEPTH_STENCIL | PIPE_BIND_SAMPLER_VIEW);
@@ -1316,6 +1348,10 @@ void st_init_extensions(struct pipe_screen *screen,
       extensions->ARB_texture_buffer_object_rgb32 &&
       extensions->ARB_shader_image_load_store;
 
+   extensions->EXT_framebuffer_sRGB =
+         screen->get_param(screen, PIPE_CAP_DEST_SURFACE_SRGB_CONTROL) &&
+         extensions->EXT_sRGB;
+
    /* Unpacking a varying in the fragment shader costs 1 texture indirection.
     * If the number of available texture indirections is very limited, then we
     * prefer to disable varying packing rather than run the risk of varying
@@ -1410,18 +1446,22 @@ void st_init_extensions(struct pipe_screen *screen,
       int compute_supported_irs =
          screen->get_shader_param(screen, PIPE_SHADER_COMPUTE,
                                   PIPE_SHADER_CAP_SUPPORTED_IRS);
-      if (compute_supported_irs & (1 << PIPE_SHADER_IR_TGSI)) {
+      if (compute_supported_irs & ((1 << PIPE_SHADER_IR_TGSI) |
+                                   (1 << PIPE_SHADER_IR_NIR))) {
+         enum pipe_shader_ir ir =
+            (compute_supported_irs & PIPE_SHADER_IR_NIR) ?
+            PIPE_SHADER_IR_NIR : PIPE_SHADER_IR_TGSI;
          uint64_t grid_size[3], block_size[3];
          uint64_t max_local_size, max_threads_per_block;
 
-         screen->get_compute_param(screen, PIPE_SHADER_IR_TGSI,
+         screen->get_compute_param(screen, ir,
                                    PIPE_COMPUTE_CAP_MAX_GRID_SIZE, grid_size);
-         screen->get_compute_param(screen, PIPE_SHADER_IR_TGSI,
+         screen->get_compute_param(screen, ir,
                                    PIPE_COMPUTE_CAP_MAX_BLOCK_SIZE, block_size);
-         screen->get_compute_param(screen, PIPE_SHADER_IR_TGSI,
+         screen->get_compute_param(screen, ir,
                                    PIPE_COMPUTE_CAP_MAX_THREADS_PER_BLOCK,
                                    &max_threads_per_block);
-         screen->get_compute_param(screen, PIPE_SHADER_IR_TGSI,
+         screen->get_compute_param(screen, ir,
                                    PIPE_COMPUTE_CAP_MAX_LOCAL_SIZE,
                                    &max_local_size);
 
@@ -1440,7 +1480,7 @@ void st_init_extensions(struct pipe_screen *screen,
          if (extensions->ARB_compute_shader) {
             uint64_t max_variable_threads_per_block = 0;
 
-            screen->get_compute_param(screen, PIPE_SHADER_IR_TGSI,
+            screen->get_compute_param(screen, ir,
                                       PIPE_COMPUTE_CAP_MAX_VARIABLE_THREADS_PER_BLOCK,
                                       &max_variable_threads_per_block);
 
@@ -1460,6 +1500,10 @@ void st_init_extensions(struct pipe_screen *screen,
          }
       }
    }
+
+   extensions->ARB_texture_float =
+      extensions->OES_texture_half_float &&
+      extensions->OES_texture_float;
 
    if (extensions->EXT_texture_filter_anisotropic &&
        screen->get_paramf(screen, PIPE_CAPF_MAX_TEXTURE_ANISOTROPY) >= 16.0)

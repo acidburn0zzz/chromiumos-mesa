@@ -1004,9 +1004,9 @@ _mesa_set_enable(struct gl_context *ctx, GLenum cap, GLboolean state)
          break;
 
       case GL_DEPTH_CLAMP:
-         if (!_mesa_is_desktop_gl(ctx))
+         if (!_mesa_has_ARB_depth_clamp(ctx) &&
+             !_mesa_has_EXT_depth_clamp(ctx))
             goto invalid_enum_error;
-         CHECK_EXTENSION(ARB_depth_clamp, cap);
          if (ctx->Transform.DepthClampNear == state &&
              ctx->Transform.DepthClampFar == state)
             return;
@@ -1125,8 +1125,6 @@ _mesa_set_enable(struct gl_context *ctx, GLenum cap, GLboolean state)
 
       /* GL3.0 - GL_framebuffer_sRGB */
       case GL_FRAMEBUFFER_SRGB_EXT:
-         if (!_mesa_is_desktop_gl(ctx))
-            goto invalid_enum_error;
          CHECK_EXTENSION(EXT_framebuffer_sRGB, cap);
          _mesa_set_framebuffer_srgb(ctx, state);
          return;
@@ -1706,9 +1704,9 @@ _mesa_IsEnabled( GLenum cap )
 
       /* GL_ARB_depth_clamp */
       case GL_DEPTH_CLAMP:
-         if (!_mesa_is_desktop_gl(ctx))
+         if (!_mesa_has_ARB_depth_clamp(ctx) &&
+             !_mesa_has_EXT_depth_clamp(ctx))
             goto invalid_enum_error;
-         CHECK_EXTENSION(ARB_depth_clamp);
          return ctx->Transform.DepthClampNear ||
                 ctx->Transform.DepthClampFar;
 
@@ -1764,8 +1762,6 @@ _mesa_IsEnabled( GLenum cap )
 
       /* GL3.0 - GL_framebuffer_sRGB */
       case GL_FRAMEBUFFER_SRGB_EXT:
-         if (!_mesa_is_desktop_gl(ctx))
-            goto invalid_enum_error;
          CHECK_EXTENSION(EXT_framebuffer_sRGB);
          return ctx->Color.sRGBEnabled;
 

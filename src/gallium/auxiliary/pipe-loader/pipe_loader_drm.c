@@ -72,6 +72,11 @@ static const struct drm_driver_descriptor driver_descriptors[] = {
         .configuration = pipe_default_configuration_query,
     },
     {
+        .driver_name = "iris",
+        .create_screen = pipe_iris_create_screen,
+        .configuration = pipe_default_configuration_query,
+    },
+    {
         .driver_name = "nouveau",
         .create_screen = pipe_nouveau_create_screen,
         .configuration = pipe_default_configuration_query,
@@ -107,11 +112,6 @@ static const struct drm_driver_descriptor driver_descriptors[] = {
         .configuration = pipe_default_configuration_query,
     },
     {
-       .driver_name = "pl111",
-        .create_screen = pipe_pl111_create_screen,
-        .configuration = pipe_default_configuration_query,
-    },
-    {
         .driver_name = "virtio_gpu",
         .create_screen = pipe_virgl_create_screen,
         .configuration = pipe_default_configuration_query,
@@ -127,13 +127,13 @@ static const struct drm_driver_descriptor driver_descriptors[] = {
         .configuration = pipe_default_configuration_query,
     },
     {
-        .driver_name = "etnaviv",
-        .create_screen = pipe_etna_create_screen,
+        .driver_name = "panfrost",
+        .create_screen = pipe_panfrost_create_screen,
         .configuration = pipe_default_configuration_query,
     },
     {
-        .driver_name = "imx-drm",
-        .create_screen = pipe_imx_drm_create_screen,
+        .driver_name = "etnaviv",
+        .create_screen = pipe_etna_create_screen,
         .configuration = pipe_default_configuration_query,
     },
     {
@@ -142,6 +142,13 @@ static const struct drm_driver_descriptor driver_descriptors[] = {
         .configuration = pipe_default_configuration_query,
     },
 };
+
+static const struct drm_driver_descriptor default_driver_descriptor = {
+        .driver_name = "kmsro",
+        .create_screen = pipe_kmsro_create_screen,
+        .configuration = pipe_default_configuration_query,
+};
+
 #endif
 
 static const struct drm_driver_descriptor *
@@ -152,6 +159,7 @@ get_driver_descriptor(const char *driver_name, struct util_dl_library **plib)
       if (strcmp(driver_descriptors[i].driver_name, driver_name) == 0)
          return &driver_descriptors[i];
    }
+   return &default_driver_descriptor;
 #else
    *plib = pipe_loader_find_module(driver_name, PIPE_SEARCH_DIR);
    if (!*plib)

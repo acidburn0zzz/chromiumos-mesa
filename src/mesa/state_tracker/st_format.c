@@ -2356,6 +2356,8 @@ st_ChooseTextureFormat(struct gl_context *ctx, GLenum target,
       bindings |= PIPE_BIND_DEPTH_STENCIL;
    else if (is_renderbuffer || internalFormat == 3 || internalFormat == 4 ||
             internalFormat == GL_RGB || internalFormat == GL_RGBA ||
+            internalFormat == GL_RGBA2 ||
+            internalFormat == GL_RGB4 || internalFormat == GL_RGBA4 ||
             internalFormat == GL_RGB8 || internalFormat == GL_RGBA8 ||
             internalFormat == GL_BGRA ||
             internalFormat == GL_RGB16F ||
@@ -2457,7 +2459,7 @@ st_QuerySamplesForFormat(struct gl_context *ctx, GLenum target,
    /* If an sRGB framebuffer is unsupported, sRGB formats behave like linear
     * formats.
     */
-   if (!ctx->Extensions.EXT_framebuffer_sRGB) {
+   if (!ctx->Extensions.EXT_sRGB) {
       internalFormat = _mesa_get_linear_internalformat(internalFormat);
    }
 

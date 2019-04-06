@@ -33,35 +33,42 @@ extern "C" {
 #endif
 
 struct spirv_supported_capabilities {
-   bool float64;
-   bool image_ms_array;
-   bool tessellation;
+   bool address;
+   bool atomic_storage;
+   bool descriptor_array_dynamic_indexing;
    bool device_group;
    bool draw_parameters;
+   bool float64;
+   bool geometry_streams;
+   bool gcn_shader;
+   bool image_ms_array;
    bool image_read_without_format;
    bool image_write_without_format;
-   bool int64;
-   bool multiview;
-   bool variable_pointers;
-   bool storage_16bit;
+   bool int8;
    bool int16;
+   bool int64;
+   bool int64_atomics;
+   bool kernel;
+   bool min_lod;
+   bool multiview;
+   bool physical_storage_buffer_address;
+   bool post_depth_coverage;
+   bool runtime_descriptor_array;
    bool shader_viewport_index_layer;
+   bool stencil_export;
+   bool storage_8bit;
+   bool storage_16bit;
+   bool storage_image_ms;
    bool subgroup_arithmetic;
    bool subgroup_ballot;
    bool subgroup_basic;
    bool subgroup_quad;
    bool subgroup_shuffle;
    bool subgroup_vote;
-   bool gcn_shader;
-   bool trinary_minmax;
-   bool descriptor_array_dynamic_indexing;
-   bool runtime_descriptor_array;
-   bool stencil_export;
-   bool atomic_storage;
-   bool storage_8bit;
-   bool post_depth_coverage;
+   bool tessellation;
    bool transform_feedback;
-   bool geometry_streams;
+   bool trinary_minmax;
+   bool variable_pointers;
 };
 
 typedef struct shader_info {
@@ -108,6 +115,9 @@ typedef struct shader_info {
    /* Whether or not this shader ever uses textureGather() */
    bool uses_texture_gather;
 
+   /** Bitfield of which textures are used */
+   uint32_t textures_used;
+
    /** Bitfield of which textures are used by texelFetch() */
    uint32_t textures_used_by_txf;
 
@@ -117,6 +127,11 @@ typedef struct shader_info {
     * Note that this does not include the "fine" and "coarse" variants.
     */
    bool uses_fddx_fddy;
+
+   /**
+    * True if this shader uses 64-bit ALU operations
+    */
+   bool uses_64bit;
 
    /* The size of the gl_ClipDistance[] array, if declared. */
    unsigned clip_distance_array_size;
@@ -180,12 +195,37 @@ typedef struct shader_info {
 
          bool post_depth_coverage;
 
+         /**
+          * \name ARB_fragment_coord_conventions
+          * @{
+          */
          bool pixel_center_integer;
+         bool origin_upper_left;
+         /*@}*/
 
          bool pixel_interlock_ordered;
          bool pixel_interlock_unordered;
          bool sample_interlock_ordered;
          bool sample_interlock_unordered;
+
+         /**
+          * Flags whether NIR's base types on the FS color outputs should be
+          * ignored.
+          *
+          * GLSL requires that fragment shader output base types match the
+          * render target's base types for the behavior to be defined.  From
+          * the GL 4.6 spec:
+          *
+          *     "If the values written by the fragment shader do not match the
+          *      format(s) of the corresponding color buffer(s), the result is
+          *      undefined."
+          *
+          * However, for NIR shaders translated from TGSI, we don't have the
+          * output types any more, so the driver will need to do whatever
+          * fixups are necessary to handle effectively untyped data being
+          * output from the FS.
+          */
+         bool untyped_color_outputs;
 
          /** gl_FragDepth layout for ARB_conservative_depth. */
          enum gl_frag_depth_layout depth_layout;

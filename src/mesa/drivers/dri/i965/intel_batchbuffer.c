@@ -37,7 +37,7 @@
 #include "util/hash_table.h"
 
 #include <xf86drm.h>
-#include <i915_drm.h>
+#include "drm-uapi/i915_drm.h"
 
 #define FILE_DEBUG_FLAG DEBUG_BUFMGR
 
@@ -188,6 +188,8 @@ intel_batchbuffer_init(struct brw_context *brw)
 static unsigned
 add_exec_bo(struct intel_batchbuffer *batch, struct brw_bo *bo)
 {
+   assert(bo->bufmgr == batch->batch.bo->bufmgr);
+
    unsigned index = READ_ONCE(bo->index);
 
    if (index < batch->exec_count && batch->exec_bos[index] == bo)
@@ -1218,7 +1220,7 @@ brw_load_register_imm64(struct brw_context *brw, uint32_t reg, uint64_t imm)
  * Copies a 32-bit register.
  */
 void
-brw_load_register_reg(struct brw_context *brw, uint32_t src, uint32_t dest)
+brw_load_register_reg(struct brw_context *brw, uint32_t dest, uint32_t src)
 {
    assert(brw->screen->devinfo.gen >= 8 || brw->screen->devinfo.is_haswell);
 
@@ -1233,7 +1235,7 @@ brw_load_register_reg(struct brw_context *brw, uint32_t src, uint32_t dest)
  * Copies a 64-bit register.
  */
 void
-brw_load_register_reg64(struct brw_context *brw, uint32_t src, uint32_t dest)
+brw_load_register_reg64(struct brw_context *brw, uint32_t dest, uint32_t src)
 {
    assert(brw->screen->devinfo.gen >= 8 || brw->screen->devinfo.is_haswell);
 

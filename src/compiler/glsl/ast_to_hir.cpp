@@ -2721,7 +2721,7 @@ is_allowed_invariant(ir_variable *var, struct _mesa_glsl_parse_state *state)
     * "Only variables output from a vertex shader can be candidates
     * for invariance".
     */
-   if (!state->is_version(130, 0))
+   if (!state->is_version(130, 100))
       return false;
 
    /*
@@ -3670,8 +3670,6 @@ apply_layout_qualifier_to_variable(const struct ast_type_qualifier *qual,
          state->fs_redeclares_gl_fragcoord_with_no_layout_qualifiers;
    }
 
-   var->data.pixel_center_integer = qual->flags.q.pixel_center_integer;
-   var->data.origin_upper_left = qual->flags.q.origin_upper_left;
    if ((qual->flags.q.origin_upper_left || qual->flags.q.pixel_center_integer)
        && (strcmp(var->name, "gl_FragCoord") != 0)) {
       const char *const qual_string = (qual->flags.q.origin_upper_left)
@@ -4290,10 +4288,13 @@ get_variable_being_redeclared(ir_variable **var_ptr, YYLTYPE loc,
               && strcmp(var->name, "gl_FragCoord") == 0) {
       /* Allow redeclaration of gl_FragCoord for ARB_fcc layout
        * qualifiers.
+       *
+       * We don't really need to do anything here, just allow the
+       * redeclaration. Any error on the gl_FragCoord is handled on the ast
+       * level at apply_layout_qualifier_to_variable using the
+       * ast_type_qualifier and _mesa_glsl_parse_state, or later at
+       * linker.cpp.
        */
-      earlier->data.origin_upper_left = var->data.origin_upper_left;
-      earlier->data.pixel_center_integer = var->data.pixel_center_integer;
-
       /* According to section 4.3.7 of the GLSL 1.30 spec,
        * the following built-in varaibles can be redeclared with an
        * interpolation qualifier:
@@ -4940,7 +4941,8 @@ ast_declarator_list::hir(exec_list *instructions,
              && process_qualifier_constant(state, &loc, "offset",
                                         type->qualifier.offset,
                                         &qual_offset)) {
-            state->atomic_counter_offsets[qual_binding] = qual_offset;
+            if (qual_binding < ARRAY_SIZE(state->atomic_counter_offsets))
+               state->atomic_counter_offsets[qual_binding] = qual_offset;
          }
       }
 
@@ -6247,7 +6249,8 @@ ast_jump_statement::hir(exec_list *instructions,
 
             if (state->has_420pack()) {
                if (!apply_implicit_conversion(state->current_function->return_type,
-                                              ret, state)) {
+                                              ret, state)
+                   || (ret->type != state->current_function->return_type)) {
                   _mesa_glsl_error(& loc, state,
                                    "could not implicitly convert return value "
                                    "to %s, in function `%s'",
@@ -7396,7 +7399,7 @@ ast_process_struct_or_iface_block_members(exec_list *instructions,
                                       "alignment of %s", field_type->name);
                   }
                   fields[i].offset = qual_offset;
-                  next_offset = glsl_align(qual_offset + size, align);
+                  next_offset = qual_offset + size;
                } else {
                   _mesa_glsl_error(&loc, state, "offset can only be used "
                                    "with std430 and std140 layouts");
@@ -7417,19 +7420,19 @@ ast_process_struct_or_iface_block_members(exec_list *instructions,
                   if (member_align == 0 ||
                       member_align & (member_align - 1)) {
                      _mesa_glsl_error(&loc, state, "align layout qualifier "
-                                      "in not a power of 2");
+                                      "is not a power of 2");
                   } else {
                      fields[i].offset = glsl_align(offset, member_align);
-                     next_offset = glsl_align(fields[i].offset + size, align);
+                     next_offset = fields[i].offset + size;
                   }
                }
             } else {
                fields[i].offset = glsl_align(offset, expl_align);
-               next_offset = glsl_align(fields[i].offset + size, align);
+               next_offset = fields[i].offset + size;
             }
          } else if (!qual->flags.q.explicit_offset) {
             if (align != 0 && size != 0)
-               next_offset = glsl_align(next_offset + size, align);
+               next_offset = glsl_align(next_offset, align) + size;
          }
 
          /* From the ARB_enhanced_layouts spec:

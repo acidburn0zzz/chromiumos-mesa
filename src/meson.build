@@ -51,6 +51,7 @@ subdir('util')
 subdir('mapi')
 # TODO: opengl
 subdir('compiler')
+subdir('imgui')
 if with_platform_wayland
   subdir('egl/wayland/wayland-drm')
 endif
@@ -66,7 +67,7 @@ endif
 if with_gallium_freedreno
   subdir('freedreno')
 endif
-if with_dri_i965 or with_intel_vk
+if with_dri_i965 or with_intel_vk or with_gallium_iris
   subdir('intel')
 endif
 subdir('mesa')
@@ -74,7 +75,7 @@ subdir('loader')
 if with_platform_haiku
   subdir('hgl')
 endif
-if with_glx != 'disabled'
+if with_glx == 'dri'
   subdir('glx')
 endif
 if with_gbm

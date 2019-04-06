@@ -196,6 +196,10 @@ struct brw_sampler_prog_key_data {
    uint32_t yx_xuxv_image_mask;
    uint32_t xy_uxvx_image_mask;
    uint32_t ayuv_image_mask;
+   uint32_t xyuv_image_mask;
+
+   /* Scale factor for each texture. */
+   float scale_factors[32];
 };
 
 /**
@@ -564,6 +568,8 @@ enum brw_param_builtin {
    BRW_PARAM_BUILTIN_TESS_LEVEL_INNER_X,
    BRW_PARAM_BUILTIN_TESS_LEVEL_INNER_Y,
 
+   BRW_PARAM_BUILTIN_PATCH_VERTICES_IN,
+
    BRW_PARAM_BUILTIN_BASE_WORK_GROUP_ID_X,
    BRW_PARAM_BUILTIN_BASE_WORK_GROUP_ID_Y,
    BRW_PARAM_BUILTIN_BASE_WORK_GROUP_ID_Z,
@@ -641,19 +647,6 @@ brw_stage_prog_data_add_params(struct brw_stage_prog_data *prog_data,
                                prog_data->param, uint32_t,
                                prog_data->nr_params);
    return prog_data->param + old_nr_params;
-}
-
-static inline void
-brw_mark_surface_used(struct brw_stage_prog_data *prog_data,
-                      unsigned surf_index)
-{
-   /* A binding table index is 8 bits and the top 3 values are reserved for
-    * special things (stateless and SLM).
-    */
-   assert(surf_index <= 252);
-
-   prog_data->binding_table.size_bytes =
-      MAX2(prog_data->binding_table.size_bytes, (surf_index + 1) * 4);
 }
 
 enum brw_barycentric_mode {

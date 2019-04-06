@@ -244,8 +244,8 @@ OUT_RINGP(struct fd_ringbuffer *ring, uint32_t data,
  */
 
 static inline void
-OUT_RELOC(struct fd_ringbuffer *ring, struct fd_bo *bo,
-		uint32_t offset, uint64_t or, int32_t shift)
+__out_reloc(struct fd_ringbuffer *ring, struct fd_bo *bo,
+		uint32_t offset, uint64_t or, int32_t shift, uint32_t flags)
 {
 	if (LOG_DWORDS) {
 		DBG("ring[%p]: OUT_RELOC   %04x:  %p+%u << %d", ring,
@@ -254,7 +254,7 @@ OUT_RELOC(struct fd_ringbuffer *ring, struct fd_bo *bo,
 	debug_assert(offset < fd_bo_size(bo));
 	fd_ringbuffer_reloc(ring, &(struct fd_reloc){
 		.bo = bo,
-		.flags = FD_RELOC_READ,
+		.flags = flags,
 		.offset = offset,
 		.or = or,
 		.shift = shift,
@@ -263,22 +263,24 @@ OUT_RELOC(struct fd_ringbuffer *ring, struct fd_bo *bo,
 }
 
 static inline void
+OUT_RELOC(struct fd_ringbuffer *ring, struct fd_bo *bo,
+		uint32_t offset, uint64_t or, int32_t shift)
+{
+	__out_reloc(ring, bo, offset, or, shift, FD_RELOC_READ);
+}
+
+static inline void
 OUT_RELOCW(struct fd_ringbuffer *ring, struct fd_bo *bo,
 		uint32_t offset, uint64_t or, int32_t shift)
 {
-	if (LOG_DWORDS) {
-		DBG("ring[%p]: OUT_RELOCW  %04x:  %p+%u << %d", ring,
-				(uint32_t)(ring->cur - ring->start), bo, offset, shift);
-	}
-	debug_assert(offset < fd_bo_size(bo));
-	fd_ringbuffer_reloc(ring, &(struct fd_reloc){
-		.bo = bo,
-		.flags = FD_RELOC_READ | FD_RELOC_WRITE,
-		.offset = offset,
-		.or = or,
-		.shift = shift,
-		.orhi = or >> 32,
-	});
+	__out_reloc(ring, bo, offset, or, shift, FD_RELOC_READ | FD_RELOC_WRITE);
+}
+
+static inline void
+OUT_RELOCD(struct fd_ringbuffer *ring, struct fd_bo *bo,
+		uint32_t offset, uint64_t or, int32_t shift)
+{
+	__out_reloc(ring, bo, offset, or, shift, FD_RELOC_READ | FD_RELOC_DUMP);
 }
 
 static inline void
@@ -457,9 +459,11 @@ fd_msaa_samples(unsigned samples)
 	switch (samples) {
 	default:
 		debug_assert(0);
+	case 0:
 	case 1: return MSAA_ONE;
 	case 2: return MSAA_TWO;
 	case 4: return MSAA_FOUR;
+	case 8: return MSAA_EIGHT;
 	}
 }
 
@@ -476,6 +480,7 @@ fd4_stage2shadersb(gl_shader_stage type)
 	case MESA_SHADER_FRAGMENT:
 		return SB4_FS_SHADER;
 	case MESA_SHADER_COMPUTE:
+	case MESA_SHADER_KERNEL:
 		return SB4_CS_SHADER;
 	default:
 		unreachable("bad shader type");

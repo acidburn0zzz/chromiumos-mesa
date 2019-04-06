@@ -36,8 +36,8 @@ VULKAN_COMMON_INCLUDES := \
 	$(MESA_TOP)/src/vulkan/wsi \
 	$(MESA_TOP)/src/vulkan/util \
 	$(MESA_TOP)/src/intel \
-	$(MESA_TOP)/include/drm-uapi \
 	$(MESA_TOP)/src/intel/vulkan \
+	$(MESA_TOP)/src/compiler \
 	frameworks/native/vulkan/include
 
 # libmesa_anv_entrypoints with header and dummy.c

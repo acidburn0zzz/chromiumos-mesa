@@ -55,8 +55,8 @@ libintel_compiler_files = files(
   'brw_fs.h',
   'brw_fs_live_variables.cpp',
   'brw_fs_live_variables.h',
-  'brw_fs_lower_conversions.cpp',
   'brw_fs_lower_pack.cpp',
+  'brw_fs_lower_regioning.cpp',
   'brw_fs_nir.cpp',
   'brw_fs_reg_allocate.cpp',
   'brw_fs_register_coalesce.cpp',
@@ -146,7 +146,8 @@ if with_tests
   foreach t : ['fs_cmod_propagation', 'fs_copy_propagation',
                'fs_saturate_propagation', 'vf_float_conversions',
                'vec4_register_coalesce', 'vec4_copy_propagation',
-               'vec4_cmod_propagation', 'eu_compact', 'eu_validate']
+               'vec4_cmod_propagation', 'vec4_dead_code_eliminate',
+               'eu_compact', 'eu_validate']
     test(
       t,
       executable(

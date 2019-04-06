@@ -144,7 +144,7 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_VERTEX_COLOR_CLAMPED:
       return vscreen->caps.caps.v1.bset.color_clamping;
    case PIPE_CAP_MIXED_COLORBUFFER_FORMATS:
-      return 1;
+      return vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_FBO_MIXED_COLOR_FORMATS;
    case PIPE_CAP_GLSL_FEATURE_LEVEL:
       return vscreen->caps.caps.v1.glsl_level;
    case PIPE_CAP_GLSL_FEATURE_LEVEL_COMPATIBILITY:
@@ -172,7 +172,7 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_QUERY_TIMESTAMP:
       return 1;
    case PIPE_CAP_QUERY_TIME_ELAPSED:
-      return 0;
+      return 1;
    case PIPE_CAP_TGSI_TEXCOORD:
       return 0;
    case PIPE_CAP_MIN_MAP_BUFFER_ALIGNMENT:
@@ -255,6 +255,15 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
       return vscreen->caps.caps.v2.max_combined_atomic_counters;
    case PIPE_CAP_MAX_COMBINED_HW_ATOMIC_COUNTER_BUFFERS:
       return vscreen->caps.caps.v2.max_combined_atomic_counter_buffers;
+   case PIPE_CAP_TEXTURE_FLOAT_LINEAR:
+   case PIPE_CAP_TEXTURE_HALF_FLOAT_LINEAR:
+      return 1; /* TODO: need to introduce a hw-cap for this */
+   case PIPE_CAP_QUERY_BUFFER_OBJECT:
+      return vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_QBO;
+   case PIPE_CAP_MAX_VARYINGS:
+      if (vscreen->caps.caps.v1.glsl_level < 150)
+         return vscreen->caps.caps.v2.max_vertex_attribs;
+      return 32;
    case PIPE_CAP_TEXTURE_GATHER_SM5:
    case PIPE_CAP_BUFFER_MAP_PERSISTENT_COHERENT:
    case PIPE_CAP_FAKE_SW_MSAA:
@@ -267,8 +276,6 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_MULTISAMPLE_Z_RESOLVE:
    case PIPE_CAP_RESOURCE_FROM_USER_MEMORY:
    case PIPE_CAP_DEVICE_RESET_STATUS_QUERY:
-   case PIPE_CAP_TEXTURE_FLOAT_LINEAR:
-   case PIPE_CAP_TEXTURE_HALF_FLOAT_LINEAR:
    case PIPE_CAP_DEPTH_BOUNDS_TEST:
    case PIPE_CAP_SHAREABLE_SHADERS:
    case PIPE_CAP_CLEAR_TEXTURE:
@@ -279,7 +286,6 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
    case PIPE_CAP_INVALIDATE_BUFFER:
    case PIPE_CAP_GENERATE_MIPMAP:
    case PIPE_CAP_SURFACE_REINTERPRET_BLOCKS:
-   case PIPE_CAP_QUERY_BUFFER_OBJECT:
    case PIPE_CAP_STRING_MARKER:
    case PIPE_CAP_QUERY_MEMORY_INFO:
    case PIPE_CAP_PCI_GROUP:
@@ -341,6 +347,8 @@ virgl_get_param(struct pipe_screen *screen, enum pipe_cap param)
       return 0;
    case PIPE_CAP_NATIVE_FENCE_FD:
       return vscreen->vws->supports_fences;
+   case PIPE_CAP_DEST_SURFACE_SRGB_CONTROL:
+      return vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_SRGB_WRITE_CONTROL;
    default:
       return u_pipe_screen_get_param_defaults(screen, param);
    }
@@ -742,7 +750,7 @@ virgl_destroy_screen(struct pipe_screen *screen)
    struct virgl_screen *vscreen = virgl_screen(screen);
    struct virgl_winsys *vws = vscreen->vws;
 
-   slab_destroy_parent(&vscreen->texture_transfer_pool);
+   slab_destroy_parent(&vscreen->transfer_pool);
 
    if (vws)
       vws->destroy(vws);
@@ -782,7 +790,7 @@ virgl_create_screen(struct virgl_winsys *vws)
 
    screen->refcnt = 1;
 
-   slab_create_parent(&screen->texture_transfer_pool, sizeof(struct virgl_transfer), 16);
+   slab_create_parent(&screen->transfer_pool, sizeof(struct virgl_transfer), 16);
 
    return &screen->base;
 }

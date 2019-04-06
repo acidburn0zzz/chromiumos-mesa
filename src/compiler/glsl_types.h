@@ -210,6 +210,13 @@ public:
    const char *name;
 
    /**
+    * Explicit array, matrix, or vector stride.  This is used to communicate
+    * explicit array layouts from SPIR-V.  Should be 0 if the type has no
+    * explicit stride.
+    */
+   unsigned explicit_stride;
+
+   /**
     * Subtype of composite data types.
     */
    union {
@@ -272,10 +279,17 @@ public:
    const glsl_type *get_scalar_type() const;
 
    /**
+    * Gets the "bare" type without any decorations or layout information.
+    */
+   const glsl_type *get_bare_type() const;
+
+   /**
     * Get the instance of a built-in scalar, vector, or matrix type
     */
    static const glsl_type *get_instance(unsigned base_type, unsigned rows,
-					unsigned columns);
+                                        unsigned columns,
+                                        unsigned explicit_stride = 0,
+                                        bool row_major = false);
 
    /**
     * Get the instance of a sampler type
@@ -292,7 +306,8 @@ public:
     * Get the instance of an array type
     */
    static const glsl_type *get_array_instance(const glsl_type *base,
-					      unsigned elements);
+                                              unsigned elements,
+                                              unsigned explicit_stride = 0);
 
    /**
     * Get the instance of a record type
@@ -378,8 +393,11 @@ public:
     *
     * For vertex shader attributes - doubles only take one slot.
     * For inter-shader varyings - dvec3/dvec4 take two slots.
+    *
+    * Vulkan doesn’t make this distinction so the argument should always be
+    * false.
     */
-   unsigned count_attribute_slots(bool is_vertex_input) const;
+   unsigned count_attribute_slots(bool is_gl_vertex_input) const;
 
    /**
     * Alignment in bytes of the start of this type in a std140 uniform
@@ -527,6 +545,12 @@ public:
    bool contains_double() const;
 
    /**
+    * Query whether or not type is a 64-bit type, or for struct, interface and
+    * array types, contains a double type.
+    */
+   bool contains_64bit() const;
+
+   /**
     * Query whether or not a type is a float type
     */
    bool is_float() const
@@ -564,6 +588,16 @@ public:
    bool is_16bit() const
    {
       return glsl_base_type_is_16bit(base_type);
+   }
+
+   /**
+    * Query whether or not a type is 32-bit
+    */
+   bool is_32bit() const
+   {
+      return base_type == GLSL_TYPE_UINT ||
+             base_type == GLSL_TYPE_INT ||
+             base_type == GLSL_TYPE_FLOAT;
    }
 
    /**
@@ -752,9 +786,13 @@ public:
     */
    const glsl_type *row_type() const
    {
-      return is_matrix()
-	 ? get_instance(base_type, matrix_columns, 1)
-	 : error_type;
+      if (!is_matrix())
+         return error_type;
+
+      if (explicit_stride && !interface_row_major)
+         return get_instance(base_type, matrix_columns, 1, explicit_stride);
+      else
+         return get_instance(base_type, matrix_columns, 1);
    }
 
    /**
@@ -766,9 +804,13 @@ public:
     */
    const glsl_type *column_type() const
    {
-      return is_matrix()
-	 ? get_instance(base_type, vector_elements, 1)
-	 : error_type;
+      if (!is_matrix())
+         return error_type;
+
+      if (explicit_stride && interface_row_major)
+         return get_instance(base_type, vector_elements, 1, explicit_stride);
+      else
+         return get_instance(base_type, vector_elements, 1);
    }
 
    /**
@@ -878,8 +920,9 @@ private:
 
    /** Constructor for vector and matrix types */
    glsl_type(GLenum gl_type,
-	     glsl_base_type base_type, unsigned vector_elements,
-	     unsigned matrix_columns, const char *name);
+             glsl_base_type base_type, unsigned vector_elements,
+             unsigned matrix_columns, const char *name,
+             unsigned explicit_stride = 0, bool row_major = false);
 
    /** Constructor for sampler or image types */
    glsl_type(GLenum gl_type, glsl_base_type base_type,
@@ -899,11 +942,14 @@ private:
    glsl_type(const glsl_type *return_type,
              const glsl_function_param *params, unsigned num_params);
 
-   /** Constructor for array types */
-   glsl_type(const glsl_type *array, unsigned length);
+   /** Constructors for array types */
+   glsl_type(const glsl_type *array, unsigned length, unsigned explicit_stride);
 
    /** Constructor for subroutine types */
    glsl_type(const char *name);
+
+   /** Hash table containing the known explicit matrix and vector types. */
+   static struct hash_table *explicit_matrix_types;
 
    /** Hash table containing the known array types. */
    static struct hash_table *array_types;
@@ -1043,7 +1089,7 @@ struct glsl_struct_field {
    unsigned implicit_sized_array:1;
 #ifdef __cplusplus
    glsl_struct_field(const struct glsl_type *_type, const char *_name)
-      : type(_type), name(_name), location(-1), offset(0), xfb_buffer(0),
+      : type(_type), name(_name), location(-1), offset(-1), xfb_buffer(0),
         xfb_stride(0), interpolation(0), centroid(0),
         sample(0), matrix_layout(GLSL_MATRIX_LAYOUT_INHERITED), patch(0),
         precision(GLSL_PRECISION_NONE), memory_read_only(0),
@@ -1055,7 +1101,7 @@ struct glsl_struct_field {
    }
 
    glsl_struct_field()
-      : type(NULL), name(NULL), location(0), offset(0), xfb_buffer(0),
+      : type(NULL), name(NULL), location(-1), offset(-1), xfb_buffer(0),
         xfb_stride(0), interpolation(0), centroid(0),
         sample(0), matrix_layout(0), patch(0),
         precision(0), memory_read_only(0),

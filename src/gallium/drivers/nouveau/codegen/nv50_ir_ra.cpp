@@ -803,7 +803,21 @@ private:
    Function *func;
    Program *prog;
 
-   static uint8_t relDegree[17][17];
+   struct RelDegree {
+      uint8_t data[17][17];
+
+      RelDegree() {
+         for (int i = 1; i <= 16; ++i)
+            for (int j = 1; j <= 16; ++j)
+               data[i][j] = j * ((i + j - 1) / j);
+      }
+
+      const uint8_t* operator[](std::size_t i) const {
+         return data[i];
+      }
+   };
+
+   static const RelDegree relDegree;
 
    RegisterSet regs;
 
@@ -815,7 +829,7 @@ private:
    std::list<ValuePair> mustSpill;
 };
 
-uint8_t GCRA::relDegree[17][17];
+const GCRA::RelDegree GCRA::relDegree;
 
 GCRA::RIG_Node::RIG_Node() : Node(NULL), next(this), prev(this)
 {
@@ -1155,11 +1169,6 @@ GCRA::GCRA(Function *fn, SpillCodeInserter& spill) :
    spill(spill)
 {
    prog = func->getProgram();
-
-   // initialize relative degrees array - i takes away from j
-   for (int i = 1; i <= 16; ++i)
-      for (int j = 1; j <= 16; ++j)
-         relDegree[i][j] = j * ((i + j - 1) / j);
 }
 
 GCRA::~GCRA()
@@ -2133,7 +2142,8 @@ bool
 RegAlloc::InsertConstraintsPass::isScalarTexGM107(TexInstruction *tex)
 {
    if (tex->tex.sIndirectSrc >= 0 ||
-       tex->tex.rIndirectSrc >= 0)
+       tex->tex.rIndirectSrc >= 0 ||
+       tex->tex.derivAll)
       return false;
 
    if (tex->tex.mask == 5 || tex->tex.mask == 6)
@@ -2331,9 +2341,19 @@ RegAlloc::InsertConstraintsPass::texConstraintGM107(TexInstruction *tex)
             if (!tex->tex.target.isArray() && tex->tex.useOffsets)
                s++;
          }
-         n = tex->srcCount(0xff) - s;
+         n = tex->srcCount(0xff, true) - s;
+         // TODO: Is this necessary? Perhaps just has to be aligned to the
+         // level that the first arg is, not necessarily to 4. This
+         // requirement has not been rigorously verified, as it has been on
+         // Kepler.
+         if (n > 0 && n < 3) {
+            if (tex->srcExists(n + s)) // move potential predicate out of the way
+               tex->moveSources(n + s, 3 - n);
+            while (n < 3)
+               tex->setSrc(s + n++, new_LValue(func, FILE_GPR));
+         }
       } else {
-         s = tex->srcCount(0xff);
+         s = tex->srcCount(0xff, true);
          n = 0;
       }
 
@@ -2356,14 +2376,18 @@ RegAlloc::InsertConstraintsPass::texConstraintNVE0(TexInstruction *tex)
    } else
    if (isTextureOp(tex->op)) {
       int n = tex->srcCount(0xff, true);
-      if (n > 4) {
-         condenseSrcs(tex, 0, 3);
-         if (n > 5) // NOTE: first call modified positions already
-            condenseSrcs(tex, 4 - (4 - 1), n - 1 - (4 - 1));
-      } else
-      if (n > 1) {
-         condenseSrcs(tex, 0, n - 1);
+      int s = n > 4 ? 4 : n;
+      if (n > 4 && n < 7) {
+         if (tex->srcExists(n)) // move potential predicate out of the way
+            tex->moveSources(n, 7 - n);
+
+         while (n < 7)
+            tex->setSrc(n++, new_LValue(func, FILE_GPR));
       }
+      if (s > 1)
+         condenseSrcs(tex, 0, s - 1);
+      if (n > 4)
+         condenseSrcs(tex, 1, n - s);
    }
 }
 
@@ -2500,6 +2524,7 @@ RegAlloc::InsertConstraintsPass::insertConstraintMove(Instruction *cst, int s)
    assert(cst->getSrc(s)->defs.size() == 1); // still SSA
 
    Instruction *defi = cst->getSrc(s)->defs.front()->getInsn();
+
    bool imm = defi->op == OP_MOV &&
       defi->src(0).getFile() == FILE_IMMEDIATE;
    bool load = defi->op == OP_LOAD &&

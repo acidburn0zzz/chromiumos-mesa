@@ -38,7 +38,7 @@
 /* Using the GNU statement expression extension */
 #define SET_FIELD(value, field)                                         \
    ({                                                                   \
-      uint32_t fieldval = (value) << field ## _SHIFT;                   \
+      uint32_t fieldval = (uint32_t)(value) << field ## _SHIFT;         \
       assert((fieldval & ~ field ## _MASK) == 0);                       \
       fieldval & field ## _MASK;                                        \
    })
@@ -1682,5 +1682,10 @@ enum brw_pixel_shader_coverage_mask_mode {
 #define GEN11_SAMPLER_MODE                                  0xE18C
 # define HEADERLESS_MESSAGE_FOR_PREEMPTABLE_CONTEXTS        (1 << 5)
 # define HEADERLESS_MESSAGE_FOR_PREEMPTABLE_CONTEXTS_MASK   REG_MASK(1 << 5)
+
+#define CS_CHICKEN1                        0x2580 /* Gen9+ */
+# define GEN9_REPLAY_MODE_MIDBUFFER             (0 << 0)
+# define GEN9_REPLAY_MODE_MIDOBJECT             (1 << 0)
+# define GEN9_REPLAY_MODE_MASK                  REG_MASK(1 << 0)
 
 #endif

@@ -849,54 +849,60 @@ build_pipeline(struct radv_device *device,
 		.subpass = 0,
 	};
 
-	switch(aspect) {
-	case VK_IMAGE_ASPECT_COLOR_BIT:
-		vk_pipeline_info.pColorBlendState = &(VkPipelineColorBlendStateCreateInfo) {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-			.attachmentCount = 1,
-			.pAttachments = (VkPipelineColorBlendAttachmentState []) {
-				{ .colorWriteMask =
-				VK_COLOR_COMPONENT_A_BIT |
-				VK_COLOR_COMPONENT_R_BIT |
-				VK_COLOR_COMPONENT_G_BIT |
-				VK_COLOR_COMPONENT_B_BIT },
+	VkPipelineColorBlendStateCreateInfo color_blend_info = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+		.attachmentCount = 1,
+		.pAttachments = (VkPipelineColorBlendAttachmentState []) {
+			{
+				.colorWriteMask = VK_COLOR_COMPONENT_A_BIT |
+						  VK_COLOR_COMPONENT_R_BIT |
+						  VK_COLOR_COMPONENT_G_BIT |
+						  VK_COLOR_COMPONENT_B_BIT },
 			}
 		};
+
+	VkPipelineDepthStencilStateCreateInfo depth_info = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		.depthTestEnable = true,
+		.depthWriteEnable = true,
+		.depthCompareOp = VK_COMPARE_OP_ALWAYS,
+	};
+
+	VkPipelineDepthStencilStateCreateInfo stencil_info = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+		.depthTestEnable = false,
+		.depthWriteEnable = false,
+		.stencilTestEnable = true,
+		.front = {
+			.failOp = VK_STENCIL_OP_REPLACE,
+			.passOp = VK_STENCIL_OP_REPLACE,
+			.depthFailOp = VK_STENCIL_OP_REPLACE,
+			.compareOp = VK_COMPARE_OP_ALWAYS,
+			.compareMask = 0xff,
+			.writeMask = 0xff,
+			.reference = 0
+		},
+		.back = {
+			.failOp = VK_STENCIL_OP_REPLACE,
+			.passOp = VK_STENCIL_OP_REPLACE,
+			.depthFailOp = VK_STENCIL_OP_REPLACE,
+			.compareOp = VK_COMPARE_OP_ALWAYS,
+			.compareMask = 0xff,
+			.writeMask = 0xff,
+			.reference = 0
+		},
+		.depthCompareOp = VK_COMPARE_OP_ALWAYS,
+	};
+
+	switch(aspect) {
+	case VK_IMAGE_ASPECT_COLOR_BIT:
+		vk_pipeline_info.pColorBlendState = &color_blend_info;
 		break;
 	case VK_IMAGE_ASPECT_DEPTH_BIT:
-		vk_pipeline_info.pDepthStencilState = &(VkPipelineDepthStencilStateCreateInfo) {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-			.depthTestEnable = true,
-			.depthWriteEnable = true,
-			.depthCompareOp = VK_COMPARE_OP_ALWAYS,
-		};
+		vk_pipeline_info.pDepthStencilState = &depth_info;
 		break;
 	case VK_IMAGE_ASPECT_STENCIL_BIT:
-		vk_pipeline_info.pDepthStencilState = &(VkPipelineDepthStencilStateCreateInfo) {
-			.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-			.depthTestEnable = false,
-			.depthWriteEnable = false,
-			.stencilTestEnable = true,
-			.front = {
-				.failOp = VK_STENCIL_OP_REPLACE,
-				.passOp = VK_STENCIL_OP_REPLACE,
-				.depthFailOp = VK_STENCIL_OP_REPLACE,
-				.compareOp = VK_COMPARE_OP_ALWAYS,
-				.compareMask = 0xff,
-				.writeMask = 0xff,
-				.reference = 0
-			},
-			.back = {
-				.failOp = VK_STENCIL_OP_REPLACE,
-				.passOp = VK_STENCIL_OP_REPLACE,
-				.depthFailOp = VK_STENCIL_OP_REPLACE,
-				.compareOp = VK_COMPARE_OP_ALWAYS,
-				.compareMask = 0xff,
-				.writeMask = 0xff,
-				.reference = 0
-			},
-			.depthCompareOp = VK_COMPARE_OP_ALWAYS,
-		};
+		vk_pipeline_info.pDepthStencilState = &stencil_info;
 		break;
 	default:
 		unreachable("Unhandled aspect");
@@ -950,8 +956,8 @@ radv_device_init_meta_blit_color(struct radv_device *device, bool on_demand)
 									.attachment = VK_ATTACHMENT_UNUSED,
 									.layout = VK_IMAGE_LAYOUT_GENERAL,
 								},
-								.preserveAttachmentCount = 1,
-								.pPreserveAttachments = (uint32_t[]) { 0 },
+								.preserveAttachmentCount = 0,
+								.pPreserveAttachments = NULL,
 							},
 							.dependencyCount = 0,
 						}, &device->meta_state.alloc, &device->meta_state.blit.render_pass[key][j]);
@@ -1010,8 +1016,8 @@ radv_device_init_meta_blit_depth(struct radv_device *device, bool on_demand)
 								       .attachment = 0,
 								       .layout = layout,
 								},
-							       .preserveAttachmentCount = 1,
-							       .pPreserveAttachments = (uint32_t[]) { 0 },
+							       .preserveAttachmentCount = 0,
+							       .pPreserveAttachments = NULL,
 							},
 						        .dependencyCount = 0,
 						}, &device->meta_state.alloc, &device->meta_state.blit.depth_only_rp[ds_layout]);
@@ -1067,8 +1073,8 @@ radv_device_init_meta_blit_stencil(struct radv_device *device, bool on_demand)
 								       .attachment = 0,
 								       .layout = layout,
 							       },
-							       .preserveAttachmentCount = 1,
-							       .pPreserveAttachments = (uint32_t[]) { 0 },
+							       .preserveAttachmentCount = 0,
+							       .pPreserveAttachments = NULL,
 						       },
 						       .dependencyCount = 0,
 					 }, &device->meta_state.alloc, &device->meta_state.blit.stencil_only_rp[ds_layout]);

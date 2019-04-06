@@ -28,6 +28,8 @@
 #include "util/bitscan.h"
 #include "util/u_dynarray.h"
 
+static const bool debug = false;
+
 /**
  * Variable-based copy propagation
  *
@@ -61,10 +63,26 @@ struct vars_written {
 struct value {
    bool is_ssa;
    union {
-      nir_ssa_def *ssa[4];
+      struct {
+         nir_ssa_def *def[4];
+         uint8_t component[4];
+      } ssa;
       nir_deref_instr *deref;
    };
 };
+
+static void
+value_set_ssa_components(struct value *value, nir_ssa_def *def,
+                         unsigned num_components)
+{
+   if (!value->is_ssa)
+      memset(&value->ssa, 0, sizeof(value->ssa));
+   value->is_ssa = true;
+   for (unsigned i = 0; i < num_components; i++) {
+      value->ssa.def[i] = def;
+      value->ssa.component[i] = i;
+   }
+}
 
 struct copy_entry {
    struct value src;
@@ -94,7 +112,8 @@ value_equals_store_src(struct value *value, nir_intrinsic_instr *intrin)
 
    for (unsigned i = 0; i < intrin->num_components; i++) {
       if ((write_mask & (1 << i)) &&
-          value->ssa[i] != intrin->src[1].ssa)
+          (value->ssa.def[i] != intrin->src[1].ssa ||
+           value->ssa.component[i] != i))
          return false;
    }
 
@@ -106,8 +125,7 @@ create_vars_written(struct copy_prop_var_state *state)
 {
    struct vars_written *written =
       linear_zalloc_child(state->lin_ctx, sizeof(struct vars_written));
-   written->derefs = _mesa_hash_table_create(state->mem_ctx, _mesa_hash_pointer,
-                                             _mesa_key_pointer_equal);
+   written->derefs = _mesa_pointer_hash_table_create(state->mem_ctx);
    return written;
 }
 
@@ -134,10 +152,10 @@ gather_vars_written(struct copy_prop_var_state *state,
       nir_foreach_instr(instr, block) {
          if (instr->type == nir_instr_type_call) {
             written->modes |= nir_var_shader_out |
-                              nir_var_global |
-                              nir_var_local |
-                              nir_var_shader_storage |
-                              nir_var_shared;
+                              nir_var_shader_temp |
+                              nir_var_function_temp |
+                              nir_var_mem_ssbo |
+                              nir_var_mem_shared;
             continue;
          }
 
@@ -149,8 +167,8 @@ gather_vars_written(struct copy_prop_var_state *state,
          case nir_intrinsic_barrier:
          case nir_intrinsic_memory_barrier:
             written->modes |= nir_var_shader_out |
-                              nir_var_shader_storage |
-                              nir_var_shared;
+                              nir_var_mem_ssbo |
+                              nir_var_mem_shared;
             break;
 
          case nir_intrinsic_emit_vertex:
@@ -158,9 +176,19 @@ gather_vars_written(struct copy_prop_var_state *state,
             written->modes = nir_var_shader_out;
             break;
 
+         case nir_intrinsic_deref_atomic_add:
+         case nir_intrinsic_deref_atomic_imin:
+         case nir_intrinsic_deref_atomic_umin:
+         case nir_intrinsic_deref_atomic_imax:
+         case nir_intrinsic_deref_atomic_umax:
+         case nir_intrinsic_deref_atomic_and:
+         case nir_intrinsic_deref_atomic_or:
+         case nir_intrinsic_deref_atomic_xor:
+         case nir_intrinsic_deref_atomic_exchange:
+         case nir_intrinsic_deref_atomic_comp_swap:
          case nir_intrinsic_store_deref:
          case nir_intrinsic_copy_deref: {
-            /* Destination in _both_ store_deref and copy_deref is src[0]. */
+            /* Destination in all of store_deref, copy_deref and the atomics is src[0]. */
             nir_deref_instr *dst = nir_src_as_deref(intrin->src[0]);
 
             uintptr_t mask = intrin->intrinsic == nir_intrinsic_store_deref ?
@@ -280,7 +308,7 @@ lookup_entry_and_kill_aliases(struct util_dynarray *copies,
 {
    /* TODO: Take into account the write_mask. */
 
-   struct copy_entry *entry = NULL;
+   nir_deref_instr *dst_match = NULL;
    util_dynarray_foreach_reverse(copies, struct copy_entry, iter) {
       if (!iter->src.is_ssa) {
          /* If this write aliases the source of some entry, get rid of it */
@@ -293,13 +321,26 @@ lookup_entry_and_kill_aliases(struct util_dynarray *copies,
       nir_deref_compare_result comp = nir_compare_derefs(iter->dst, deref);
 
       if (comp & nir_derefs_equal_bit) {
-         assert(entry == NULL);
-         entry = iter;
+         /* Removing entries invalidate previous iter pointers, so we'll
+          * collect the matching entry later.  Just make sure it is unique.
+          */
+         assert(!dst_match);
+         dst_match = iter->dst;
       } else if (comp & nir_derefs_may_alias_bit) {
          copy_entry_remove(copies, iter);
       }
    }
 
+   struct copy_entry *entry = NULL;
+   if (dst_match) {
+      util_dynarray_foreach(copies, struct copy_entry, iter) {
+         if (iter->dst == dst_match) {
+            entry = iter;
+            break;
+         }
+      }
+      assert(entry);
+   }
    return entry;
 }
 
@@ -337,12 +378,8 @@ apply_barrier_for_modes(struct util_dynarray *copies,
                         nir_variable_mode modes)
 {
    util_dynarray_foreach_reverse(copies, struct copy_entry, iter) {
-      nir_variable *dst_var = nir_deref_instr_get_variable(iter->dst);
-      nir_variable *src_var = iter->src.is_ssa ? NULL :
-         nir_deref_instr_get_variable(iter->src.deref);
-
-      if ((dst_var->data.mode & modes) ||
-          (src_var && (src_var->data.mode & modes)))
+      if ((iter->dst->mode & modes) ||
+          (!iter->src.is_ssa && (iter->src.deref->mode & modes)))
          copy_entry_remove(copies, iter);
    }
 }
@@ -352,11 +389,16 @@ store_to_entry(struct copy_prop_var_state *state, struct copy_entry *entry,
                const struct value *value, unsigned write_mask)
 {
    if (value->is_ssa) {
+      /* Clear src if it was being used as non-SSA. */
+      if (!entry->src.is_ssa)
+         memset(&entry->src.ssa, 0, sizeof(entry->src.ssa));
       entry->src.is_ssa = true;
       /* Only overwrite the written components */
       for (unsigned i = 0; i < 4; i++) {
-         if (write_mask & (1 << i))
-            entry->src.ssa[i] = value->ssa[i];
+         if (write_mask & (1 << i)) {
+            entry->src.ssa.def[i] = value->ssa.def[i];
+            entry->src.ssa.component[i] = value->ssa.component[i];
+         }
       }
    } else {
       /* Non-ssa stores always write everything */
@@ -388,10 +430,13 @@ load_from_ssa_entry_value(struct copy_prop_var_state *state,
    nir_component_mask_t available = 0;
    bool all_same = true;
    for (unsigned i = 0; i < num_components; i++) {
-      if (value->ssa[i])
+      if (value->ssa.def[i])
          available |= (1 << i);
 
-      if (value->ssa[i] != value->ssa[0])
+      if (value->ssa.def[i] != value->ssa.def[0])
+         all_same = false;
+
+      if (value->ssa.component[i] != i)
          all_same = false;
    }
 
@@ -420,8 +465,8 @@ load_from_ssa_entry_value(struct copy_prop_var_state *state,
    bool keep_intrin = false;
    nir_ssa_def *comps[NIR_MAX_VEC_COMPONENTS];
    for (unsigned i = 0; i < num_components; i++) {
-      if (value->ssa[i]) {
-         comps[i] = nir_channel(b, value->ssa[i], i);
+      if (value->ssa.def[i]) {
+         comps[i] = nir_channel(b, value->ssa.def[i], value->ssa.component[i]);
       } else {
          /* We don't have anything for this component in our
           * list.  Just re-use a channel from the load.
@@ -437,8 +482,7 @@ load_from_ssa_entry_value(struct copy_prop_var_state *state,
    }
 
    nir_ssa_def *vec = nir_vec(b, comps, num_components);
-   for (unsigned i = 0; i < num_components; i++)
-      value->ssa[i] = vec;
+   value_set_ssa_components(value, vec, num_components);
 
    if (!keep_intrin) {
       /* Removing this instruction should not touch the cursor because we
@@ -595,18 +639,94 @@ invalidate_copies_for_cf_node(struct copy_prop_var_state *state,
    }
 }
 
+static bool
+is_array_deref_of_vector(nir_deref_instr *deref)
+{
+   if (deref->deref_type != nir_deref_type_array)
+      return false;
+   nir_deref_instr *parent = nir_deref_instr_parent(deref);
+   return glsl_type_is_vector(parent->type);
+}
+
+static void
+print_value(struct value *value, unsigned num_components)
+{
+   if (!value->is_ssa) {
+      printf(" %s ", glsl_get_type_name(value->deref->type));
+      nir_print_deref(value->deref, stdout);
+      return;
+   }
+
+   bool same_ssa = true;
+   for (unsigned i = 0; i < num_components; i++) {
+      if (value->ssa.component[i] != i ||
+          (i > 0 && value->ssa.def[i - 1] != value->ssa.def[i])) {
+         same_ssa = false;
+         break;
+      }
+   }
+   if (same_ssa) {
+      printf(" ssa_%d", value->ssa.def[0]->index);
+   } else {
+      for (int i = 0; i < num_components; i++) {
+         if (value->ssa.def[i])
+            printf(" ssa_%d[%u]", value->ssa.def[i]->index, value->ssa.component[i]);
+         else
+            printf(" _");
+      }
+   }
+}
+
+static void
+print_copy_entry(struct copy_entry *entry)
+{
+   printf("    %s ", glsl_get_type_name(entry->dst->type));
+   nir_print_deref(entry->dst, stdout);
+   printf(":\t");
+
+   unsigned num_components = glsl_get_vector_elements(entry->dst->type);
+   print_value(&entry->src, num_components);
+   printf("\n");
+}
+
+static void
+dump_instr(nir_instr *instr)
+{
+   printf("  ");
+   nir_print_instr(instr, stdout);
+   printf("\n");
+}
+
+static void
+dump_copy_entries(struct util_dynarray *copies)
+{
+   util_dynarray_foreach(copies, struct copy_entry, iter)
+      print_copy_entry(iter);
+   printf("\n");
+}
+
 static void
 copy_prop_vars_block(struct copy_prop_var_state *state,
                      nir_builder *b, nir_block *block,
                      struct util_dynarray *copies)
 {
+   if (debug) {
+      printf("# block%d\n", block->index);
+      dump_copy_entries(copies);
+   }
+
    nir_foreach_instr_safe(instr, block) {
+      if (debug && instr->type == nir_instr_type_deref)
+         dump_instr(instr);
+
       if (instr->type == nir_instr_type_call) {
+         if (debug) dump_instr(instr);
          apply_barrier_for_modes(copies, nir_var_shader_out |
-                                         nir_var_global |
-                                         nir_var_local |
-                                         nir_var_shader_storage |
-                                         nir_var_shared);
+                                         nir_var_shader_temp |
+                                         nir_var_function_temp |
+                                         nir_var_mem_ssbo |
+                                         nir_var_mem_shared);
+         if (debug) dump_copy_entries(copies);
          continue;
       }
 
@@ -617,22 +737,33 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
       switch (intrin->intrinsic) {
       case nir_intrinsic_barrier:
       case nir_intrinsic_memory_barrier:
+         if (debug) dump_instr(instr);
+
          apply_barrier_for_modes(copies, nir_var_shader_out |
-                                         nir_var_shader_storage |
-                                         nir_var_shared);
+                                         nir_var_mem_ssbo |
+                                         nir_var_mem_shared);
          break;
 
       case nir_intrinsic_emit_vertex:
       case nir_intrinsic_emit_vertex_with_counter:
+         if (debug) dump_instr(instr);
+
          apply_barrier_for_modes(copies, nir_var_shader_out);
          break;
 
       case nir_intrinsic_load_deref: {
+         if (debug) dump_instr(instr);
+
          nir_deref_instr *src = nir_src_as_deref(intrin->src[0]);
+
+         if (is_array_deref_of_vector(src)) {
+            /* Not handled yet. This load won't invalidate existing copies. */
+            break;
+         }
 
          struct copy_entry *src_entry =
             lookup_entry_for_deref(copies, src, nir_derefs_a_contains_b_bit);
-         struct value value;
+         struct value value = {0};
          if (try_load_from_entry(state, src_entry, b, intrin, src, &value)) {
             if (value.is_ssa) {
                /* lookup_load has already ensured that we get a single SSA
@@ -646,11 +777,11 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
                    * rewrite the vecN itself.
                    */
                   nir_ssa_def_rewrite_uses_after(&intrin->dest.ssa,
-                                                 nir_src_for_ssa(value.ssa[0]),
-                                                 value.ssa[0]->parent_instr);
+                                                 nir_src_for_ssa(value.ssa.def[0]),
+                                                 value.ssa.def[0]->parent_instr);
                } else {
                   nir_ssa_def_rewrite_uses(&intrin->dest.ssa,
-                                           nir_src_for_ssa(value.ssa[0]));
+                                           nir_src_for_ssa(value.ssa.def[0]));
                }
             } else {
                /* We're turning it into a load of a different variable */
@@ -658,16 +789,13 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
 
                /* Put it back in again. */
                nir_builder_instr_insert(b, instr);
-
-               value.is_ssa = true;
-               for (unsigned i = 0; i < intrin->num_components; i++)
-                  value.ssa[i] = &intrin->dest.ssa;
+               value_set_ssa_components(&value, &intrin->dest.ssa,
+                                        intrin->num_components);
             }
             state->progress = true;
          } else {
-            value.is_ssa = true;
-            for (unsigned i = 0; i < intrin->num_components; i++)
-               value.ssa[i] = &intrin->dest.ssa;
+            value_set_ssa_components(&value, &intrin->dest.ssa,
+                                     intrin->num_components);
          }
 
          /* Now that we have a value, we're going to store it back so that we
@@ -691,6 +819,8 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
       }
 
       case nir_intrinsic_store_deref: {
+         if (debug) dump_instr(instr);
+
          nir_deref_instr *dst = nir_src_as_deref(intrin->src[0]);
          struct copy_entry *entry =
             lookup_entry_for_deref(copies, dst, nir_derefs_equal_bit);
@@ -699,14 +829,15 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
              * store is redundant so remove it.
              */
             nir_instr_remove(instr);
+         } else if (is_array_deref_of_vector(dst)) {
+            /* Not handled yet.  Writing into an element of 'dst' invalidates
+             * any related entries in copies.
+             */
+            kill_aliases(copies, nir_deref_instr_parent(dst), 0xf);
          } else {
-            struct value value = {
-               .is_ssa = true
-            };
-
-            for (unsigned i = 0; i < intrin->num_components; i++)
-               value.ssa[i] = intrin->src[1].ssa;
-
+            struct value value = {0};
+            value_set_ssa_components(&value, intrin->src[1].ssa,
+                                     intrin->num_components);
             unsigned wrmask = nir_intrinsic_write_mask(intrin);
             struct copy_entry *entry =
                get_entry_and_kill_aliases(copies, dst, wrmask);
@@ -717,6 +848,8 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
       }
 
       case nir_intrinsic_copy_deref: {
+         if (debug) dump_instr(instr);
+
          nir_deref_instr *dst = nir_src_as_deref(intrin->src[0]);
          nir_deref_instr *src = nir_src_as_deref(intrin->src[1]);
 
@@ -726,13 +859,22 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
             continue;
          }
 
+         if (is_array_deref_of_vector(src) || is_array_deref_of_vector(dst)) {
+            /* Cases not handled yet.  Writing into an element of 'dst'
+             * invalidates any related entries in copies.  Reading from 'src'
+             * doesn't invalidate anything, so no action needed for it.
+             */
+            kill_aliases(copies, dst, 0xf);
+            break;
+         }
+
          struct copy_entry *src_entry =
             lookup_entry_for_deref(copies, src, nir_derefs_a_contains_b_bit);
          struct value value;
          if (try_load_from_entry(state, src_entry, b, intrin, src, &value)) {
+            /* If load works, intrin (the copy_deref) is removed. */
             if (value.is_ssa) {
-               nir_store_deref(b, dst, value.ssa[0], 0xf);
-               intrin = nir_instr_as_intrinsic(nir_builder_last_instr(b));
+               nir_store_deref(b, dst, value.ssa.def[0], 0xf);
             } else {
                /* If this would be a no-op self-copy, don't bother. */
                if (nir_compare_derefs(value.deref, dst) & nir_derefs_equal_bit)
@@ -759,9 +901,25 @@ copy_prop_vars_block(struct copy_prop_var_state *state,
          break;
       }
 
-      default:
+      case nir_intrinsic_deref_atomic_add:
+      case nir_intrinsic_deref_atomic_imin:
+      case nir_intrinsic_deref_atomic_umin:
+      case nir_intrinsic_deref_atomic_imax:
+      case nir_intrinsic_deref_atomic_umax:
+      case nir_intrinsic_deref_atomic_and:
+      case nir_intrinsic_deref_atomic_or:
+      case nir_intrinsic_deref_atomic_xor:
+      case nir_intrinsic_deref_atomic_exchange:
+      case nir_intrinsic_deref_atomic_comp_swap:
+         if (debug) dump_instr(instr);
+         kill_aliases(copies, nir_src_as_deref(intrin->src[0]), 0xf);
          break;
+
+      default:
+         continue; /* To skip the debug below. */
       }
+
+      if (debug) dump_copy_entries(copies);
    }
 }
 
@@ -848,13 +1006,17 @@ nir_copy_prop_vars_impl(nir_function_impl *impl)
 {
    void *mem_ctx = ralloc_context(NULL);
 
+   if (debug) {
+      nir_metadata_require(impl, nir_metadata_block_index);
+      printf("## nir_copy_prop_vars_impl for %s\n", impl->function->name);
+   }
+
    struct copy_prop_var_state state = {
       .impl = impl,
       .mem_ctx = mem_ctx,
       .lin_ctx = linear_zalloc_parent(mem_ctx, 0),
 
-      .vars_written_map = _mesa_hash_table_create(mem_ctx, _mesa_hash_pointer,
-                                                  _mesa_key_pointer_equal),
+      .vars_written_map = _mesa_pointer_hash_table_create(mem_ctx),
    };
 
    gather_vars_written(&state, NULL, &impl->cf_node);
@@ -864,6 +1026,10 @@ nir_copy_prop_vars_impl(nir_function_impl *impl)
    if (state.progress) {
       nir_metadata_preserve(impl, nir_metadata_block_index |
                                   nir_metadata_dominance);
+   } else {
+#ifndef NDEBUG
+      impl->valid_metadata &= ~nir_metadata_not_properly_reset;
+#endif
    }
 
    ralloc_free(mem_ctx);

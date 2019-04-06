@@ -221,13 +221,13 @@ update_mem_for_exec(struct aub_mem *mem, struct aub_file *file, int exec_idx)
 
 #include <epoxy/gl.h>
 
-#include "imgui.h"
+#include "imgui/imgui.h"
+#include "imgui/imgui_memory_editor.h"
 #include "imgui_impl_gtk3.h"
 #include "imgui_impl_opengl3.h"
 
 #include "aubinator_viewer.h"
 #include "aubinator_viewer_urb.h"
-#include "imgui_memory_editor.h"
 
 struct window {
    struct list_head link; /* link in the global list of windows */
@@ -323,6 +323,8 @@ static struct Context {
    struct window registers_window;
 } context;
 
+thread_local ImGuiContext* __MesaImGui;
+
 static int
 map_key(int k)
 {
@@ -387,16 +389,14 @@ new_shader_window(struct aub_mem *mem, uint64_t address, const char *desc)
    window->base.display = display_shader_window;
    window->base.destroy = destroy_shader_window;
 
-   struct gen_batch_decode_bo shader_bo;
-   if (mem->pml4)
-      shader_bo = aub_mem_get_ppgtt_bo(mem, address);
-   else
-      shader_bo = aub_mem_get_ggtt_bo(mem, address);
-
+   struct gen_batch_decode_bo shader_bo =
+      aub_mem_get_ppgtt_bo(mem, address);
    if (shader_bo.map) {
       FILE *f = open_memstream(&window->shader, &window->shader_size);
       if (f) {
-         gen_disasm_disassemble(context.file->disasm, shader_bo.map, 0, f);
+         gen_disasm_disassemble(context.file->disasm,
+                                (const uint8_t *) shader_bo.map +
+                                (address - shader_bo.addr), 0, f);
          fclose(f);
       }
    }
@@ -995,6 +995,7 @@ display_aubfile_window(struct window *win)
    ImGui::ColorEdit3("error", (float *)&cfg->error_color, cflags); ImGui::SameLine();
    ImGui::ColorEdit3("highlight", (float *)&cfg->highlight_color, cflags); ImGui::SameLine();
    ImGui::ColorEdit3("dwords", (float *)&cfg->dwords_color, cflags); ImGui::SameLine();
+   ImGui::ColorEdit3("booleans", (float *)&cfg->boolean_color, cflags); ImGui::SameLine();
 
    if (ImGui::Button("Commands list") || has_ctrl_key('c')) { show_commands_window(); } ImGui::SameLine();
    if (ImGui::Button("Registers list") || has_ctrl_key('r')) { show_register_window(); } ImGui::SameLine();
@@ -1007,7 +1008,7 @@ display_aubfile_window(struct window *win)
    ImGui::Text("Execbufs          %u", context.file->n_execs);
    ImGui::Text("PCI ID:           0x%x", context.file->pci_id);
    ImGui::Text("Application name: %s", context.file->app_name);
-   ImGui::Text(gen_get_device_name(context.file->pci_id));
+   ImGui::Text("%s", gen_get_device_name(context.file->pci_id));
 
    ImGui::SetNextWindowContentWidth(500);
    if (ImGui::BeginPopupModal("Help", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -1029,7 +1030,7 @@ display_aubfile_window(struct window *win)
       align += ImGui::GetStyle().WindowPadding.x + 10;
 
       for (uint32_t i = 0; i < ARRAY_SIZE(texts); i += 2) {
-         ImGui::Text(texts[i]); ImGui::SameLine(align); ImGui::Text(texts[i + 1]);
+         ImGui::Text("%s", texts[i]); ImGui::SameLine(align); ImGui::Text("%s", texts[i + 1]);
       }
 
       if (ImGui::Button("Done") || ImGui::IsKeyPressed(ImGuiKey_Escape))

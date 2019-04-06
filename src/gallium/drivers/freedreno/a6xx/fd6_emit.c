@@ -56,6 +56,7 @@ shader_t_to_opcode(gl_shader_stage type)
 		return CP_LOAD_STATE6_GEOM;
 	case MESA_SHADER_FRAGMENT:
 	case MESA_SHADER_COMPUTE:
+	case MESA_SHADER_KERNEL:
 		return CP_LOAD_STATE6_FRAG;
 	default:
 		unreachable("bad shader type");
@@ -328,7 +329,10 @@ emit_border_color(struct fd_context *ctx, struct fd_ringbuffer *ring)
 bool
 fd6_emit_textures(struct fd_pipe *pipe, struct fd_ringbuffer *ring,
 		enum a6xx_state_block sb, struct fd_texture_stateobj *tex,
-		unsigned bcolor_offset)
+		unsigned bcolor_offset,
+		/* can be NULL if no image/SSBO state to merge in: */
+		const struct ir3_shader_variant *v, struct fd_shaderbuf_stateobj *buf,
+		struct fd_shaderimg_stateobj *img)
 {
 	bool needs_border = false;
 	unsigned opcode, tex_samp_reg, tex_const_reg, tex_count_reg;
@@ -350,12 +354,11 @@ fd6_emit_textures(struct fd_pipe *pipe, struct fd_ringbuffer *ring,
 		opcode = CP_LOAD_STATE6_FRAG;
 		tex_samp_reg = REG_A6XX_SP_CS_TEX_SAMP_LO;
 		tex_const_reg = REG_A6XX_SP_CS_TEX_CONST_LO;
-		tex_count_reg = 0; //REG_A6XX_SP_CS_TEX_COUNT;
+		tex_count_reg = REG_A6XX_SP_CS_TEX_COUNT;
 		break;
 	default:
 		unreachable("bad state block");
 	}
-
 
 	if (tex->num_samplers > 0) {
 		struct fd_ringbuffer *state =
@@ -367,7 +370,7 @@ fd6_emit_textures(struct fd_pipe *pipe, struct fd_ringbuffer *ring,
 			OUT_RING(state, sampler->texsamp0);
 			OUT_RING(state, sampler->texsamp1);
 			OUT_RING(state, sampler->texsamp2 |
-				A6XX_TEX_SAMP_2_BCOLOR_OFFSET(bcolor_offset));
+				A6XX_TEX_SAMP_2_BCOLOR_OFFSET((i + bcolor_offset) * sizeof(struct bcolor_entry)));
 			OUT_RING(state, sampler->texsamp3);
 			needs_border |= sampler->needs_border;
 		}
@@ -387,20 +390,29 @@ fd6_emit_textures(struct fd_pipe *pipe, struct fd_ringbuffer *ring,
 		fd_ringbuffer_del(state);
 	}
 
-	if (tex->num_textures > 0) {
+	unsigned num_merged_textures = tex->num_textures;
+	unsigned num_textures = tex->num_textures;
+	if (v) {
+		num_merged_textures += v->image_mapping.num_tex;
+
+		/* There could be more bound textures than what the shader uses.
+		 * Which isn't known at shader compile time.  So in the case we
+		 * are merging tex state, only emit the textures that the shader
+		 * uses (since the image/SSBO related tex state comes immediately
+		 * after)
+		 */
+		num_textures = v->image_mapping.tex_base;
+	}
+
+	if (num_merged_textures > 0) {
 		struct fd_ringbuffer *state =
-			fd_ringbuffer_new_object(pipe, tex->num_textures * 16 * 4);
-		for (unsigned i = 0; i < tex->num_textures; i++) {
+			fd_ringbuffer_new_object(pipe, num_merged_textures * 16 * 4);
+		for (unsigned i = 0; i < num_textures; i++) {
 			static const struct fd6_pipe_sampler_view dummy_view = {};
 			const struct fd6_pipe_sampler_view *view = tex->textures[i] ?
 				fd6_pipe_sampler_view(tex->textures[i]) : &dummy_view;
-			enum a6xx_tile_mode tile_mode = TILE6_LINEAR;
 
-			if (view->base.texture)
-				tile_mode = fd_resource(view->base.texture)->tile_mode;
-
-			OUT_RING(state, view->texconst0 |
-				A6XX_TEX_CONST_0_TILE_MODE(tile_mode));
+			OUT_RING(state, view->texconst0);
 			OUT_RING(state, view->texconst1);
 			OUT_RING(state, view->texconst2);
 			OUT_RING(state, view->texconst3);
@@ -428,13 +440,26 @@ fd6_emit_textures(struct fd_pipe *pipe, struct fd_ringbuffer *ring,
 			OUT_RING(state, 0);
 		}
 
+		if (v) {
+			const struct ir3_ibo_mapping *mapping = &v->image_mapping;
+
+			for (unsigned i = 0; i < mapping->num_tex; i++) {
+				unsigned idx = mapping->tex_to_image[i];
+				if (idx & IBO_SSBO) {
+					fd6_emit_ssbo_tex(state, &buf->sb[idx & ~IBO_SSBO]);
+				} else {
+					fd6_emit_image_tex(state, &img->si[idx]);
+				}
+			}
+		}
+
 		/* emit texture state: */
 		OUT_PKT7(ring, opcode, 3);
 		OUT_RING(ring, CP_LOAD_STATE6_0_DST_OFF(0) |
 			CP_LOAD_STATE6_0_STATE_TYPE(ST6_CONSTANTS) |
 			CP_LOAD_STATE6_0_STATE_SRC(SS6_INDIRECT) |
 			CP_LOAD_STATE6_0_STATE_BLOCK(sb) |
-			CP_LOAD_STATE6_0_NUM_UNIT(tex->num_textures));
+			CP_LOAD_STATE6_0_NUM_UNIT(num_merged_textures));
 		OUT_RB(ring, state); /* SRC_ADDR_LO/HI */
 
 		OUT_PKT4(ring, tex_const_reg, 2);
@@ -443,87 +468,81 @@ fd6_emit_textures(struct fd_pipe *pipe, struct fd_ringbuffer *ring,
 		fd_ringbuffer_del(state);
 	}
 
-	if (tex_count_reg) {
-		OUT_PKT4(ring, tex_count_reg, 1);
-		OUT_RING(ring, tex->num_textures);
-	}
+	OUT_PKT4(ring, tex_count_reg, 1);
+	OUT_RING(ring, num_merged_textures);
 
 	return needs_border;
 }
 
-static void
-emit_ssbos(struct fd_context *ctx, struct fd_ringbuffer *ring,
-		enum a6xx_state_block sb, struct fd_shaderbuf_stateobj *so)
+/* Emits combined texture state, which also includes any Image/SSBO
+ * related texture state merged in (because we must have all texture
+ * state for a given stage in a single buffer).  In the fast-path, if
+ * we don't need to merge in any image/ssbo related texture state, we
+ * just use cached texture stateobj.  Otherwise we generate a single-
+ * use stateobj.
+ *
+ * TODO Is there some sane way we can still use cached texture stateobj
+ * with image/ssbo in use?
+ *
+ * returns whether border_color is required:
+ */
+static bool
+fd6_emit_combined_textures(struct fd_ringbuffer *ring, struct fd6_emit *emit,
+		enum pipe_shader_type type, const struct ir3_shader_variant *v)
 {
-	unsigned count = util_last_bit(so->enabled_mask);
-	unsigned opcode;
+	struct fd_context *ctx = emit->ctx;
+	bool needs_border = false;
 
-	if (count == 0)
-		return;
+	static const struct {
+		enum a6xx_state_block sb;
+		enum fd6_state_id state_id;
+	} s[PIPE_SHADER_TYPES] = {
+		[PIPE_SHADER_VERTEX]    = { SB6_VS_TEX, FD6_GROUP_VS_TEX },
+		[PIPE_SHADER_FRAGMENT]  = { SB6_FS_TEX, FD6_GROUP_FS_TEX },
+	};
 
-	switch (sb) {
-	case SB6_SSBO:
-	case SB6_CS_SSBO:
-		opcode = CP_LOAD_STATE6_GEOM;
-		break;
-	default:
-		unreachable("bad state block");
-	}
+	debug_assert(s[type].state_id);
 
-	OUT_PKT7(ring, opcode, 3 + (4 * count));
-	OUT_RING(ring, CP_LOAD_STATE6_0_DST_OFF(0) |
-			CP_LOAD_STATE6_0_STATE_TYPE(0) |
-			CP_LOAD_STATE6_0_STATE_SRC(SS6_DIRECT) |
-			CP_LOAD_STATE6_0_STATE_BLOCK(sb) |
-			CP_LOAD_STATE6_0_NUM_UNIT(count));
-	OUT_RING(ring, CP_LOAD_STATE6_1_EXT_SRC_ADDR(0));
-	OUT_RING(ring, CP_LOAD_STATE6_2_EXT_SRC_ADDR_HI(0));
-	for (unsigned i = 0; i < count; i++) {
-		OUT_RING(ring, 0x00000000);
-		OUT_RING(ring, 0x00000000);
-		OUT_RING(ring, 0x00000000);
-		OUT_RING(ring, 0x00000000);
-	}
+	if (!v->image_mapping.num_tex) {
+		/* in the fast-path, when we don't have to mix in any image/SSBO
+		 * related texture state, we can just lookup the stateobj and
+		 * re-emit that:
+		 */
+		if ((ctx->dirty_shader[type] & FD_DIRTY_SHADER_TEX) &&
+				ctx->tex[type].num_textures > 0) {
+			struct fd6_texture_state *tex = fd6_texture_state(ctx,
+					s[type].sb, &ctx->tex[type]);
 
-#if 0
-	OUT_PKT7(ring, opcode, 3 + (2 * count));
-	OUT_RING(ring, CP_LOAD_STATE6_0_DST_OFF(0) |
-			CP_LOAD_STATE6_0_STATE_TYPE(1) |
-			CP_LOAD_STATE6_0_STATE_SRC(SS6_DIRECT) |
-			CP_LOAD_STATE6_0_STATE_BLOCK(sb) |
-			CP_LOAD_STATE6_0_NUM_UNIT(count));
-	OUT_RING(ring, CP_LOAD_STATE6_1_EXT_SRC_ADDR(0));
-	OUT_RING(ring, CP_LOAD_STATE6_2_EXT_SRC_ADDR_HI(0));
-	for (unsigned i = 0; i < count; i++) {
-		struct pipe_shader_buffer *buf = &so->sb[i];
-		unsigned sz = buf->buffer_size;
+			needs_border |= tex->needs_border;
 
-		/* width is in dwords, overflows into height: */
-		sz /= 4;
+			fd6_emit_add_group(emit, tex->stateobj, s[type].state_id, 0x7);
+		}
+	} else {
+		/* In the slow-path, create a one-shot texture state object
+		 * if either TEX|PROG|SSBO|IMAGE state is dirty:
+		 */
+		if (ctx->dirty_shader[type] &
+				(FD_DIRTY_SHADER_TEX | FD_DIRTY_SHADER_PROG |
+				 FD_DIRTY_SHADER_IMAGE | FD_DIRTY_SHADER_SSBO)) {
+			struct fd_texture_stateobj *tex = &ctx->tex[type];
+			struct fd_shaderbuf_stateobj *buf = &ctx->shaderbuf[type];
+			struct fd_shaderimg_stateobj *img = &ctx->shaderimg[type];
+			struct fd_ringbuffer *stateobj =
+				fd_submit_new_ringbuffer(ctx->batch->submit,
+					0x1000, FD_RINGBUFFER_STREAMING);
+			unsigned bcolor_offset =
+				fd6_border_color_offset(ctx, s[type].sb, tex);
 
-		OUT_RING(ring, A6XX_SSBO_1_0_WIDTH(sz));
-		OUT_RING(ring, A6XX_SSBO_1_1_HEIGHT(sz >> 16));
-	}
-#endif
+			needs_border |= fd6_emit_textures(ctx->pipe, stateobj, s[type].sb, tex,
+					bcolor_offset, v, buf, img);
 
-	OUT_PKT7(ring, opcode, 3 + (2 * count));
-	OUT_RING(ring, CP_LOAD_STATE6_0_DST_OFF(0) |
-			CP_LOAD_STATE6_0_STATE_TYPE(2) |
-			CP_LOAD_STATE6_0_STATE_SRC(SS6_DIRECT) |
-			CP_LOAD_STATE6_0_STATE_BLOCK(sb) |
-			CP_LOAD_STATE6_0_NUM_UNIT(count));
-	OUT_RING(ring, CP_LOAD_STATE6_1_EXT_SRC_ADDR(0));
-	OUT_RING(ring, CP_LOAD_STATE6_2_EXT_SRC_ADDR_HI(0));
-	for (unsigned i = 0; i < count; i++) {
-		struct pipe_shader_buffer *buf = &so->sb[i];
-		if (buf->buffer) {
-			struct fd_resource *rsc = fd_resource(buf->buffer);
-			OUT_RELOCW(ring, rsc->bo, buf->buffer_offset, 0, 0);
-		} else {
-			OUT_RING(ring, 0x00000000);
-			OUT_RING(ring, 0x00000000);
+			fd6_emit_add_group(emit, stateobj, s[type].state_id, 0x7);
+
+			fd_ringbuffer_del(stateobj);
 		}
 	}
+
+	return needs_border;
 }
 
 static struct fd_ringbuffer *
@@ -611,6 +630,76 @@ build_lrz(struct fd6_emit *emit, bool binning_pass)
 	OUT_RING(ring, rb_lrz_cntl);
 
 	return ring;
+}
+
+static void
+fd6_emit_streamout(struct fd_ringbuffer *ring, struct fd6_emit *emit, struct ir3_stream_output_info *info)
+{
+	struct fd_context *ctx = emit->ctx;
+	const struct fd6_program_state *prog = fd6_emit_get_prog(emit);
+	struct fd_streamout_stateobj *so = &ctx->streamout;
+
+	emit->streamout_mask = 0;
+
+	for (unsigned i = 0; i < so->num_targets; i++) {
+		struct pipe_stream_output_target *target = so->targets[i];
+
+		if (!target)
+			continue;
+
+		unsigned offset = (so->offsets[i] * info->stride[i] * 4) +
+				target->buffer_offset;
+
+		OUT_PKT4(ring, REG_A6XX_VPC_SO_BUFFER_BASE_LO(i), 3);
+		/* VPC_SO[i].BUFFER_BASE_LO: */
+		OUT_RELOCW(ring, fd_resource(target->buffer)->bo, 0, 0, 0);
+		OUT_RING(ring, target->buffer_size + offset);
+
+		OUT_PKT4(ring, REG_A6XX_VPC_SO_BUFFER_OFFSET(i), 3);
+		OUT_RING(ring, offset);
+		/* VPC_SO[i].FLUSH_BASE_LO/HI: */
+		// TODO just give hw a dummy addr for now.. we should
+		// be using this an then CP_MEM_TO_REG to set the
+		// VPC_SO[i].BUFFER_OFFSET for the next draw..
+		OUT_RELOCW(ring, fd6_context(ctx)->blit_mem, 0x100, 0, 0);
+
+		emit->streamout_mask |= (1 << i);
+	}
+
+	if (emit->streamout_mask) {
+		const struct fd6_streamout_state *tf = &prog->tf;
+
+		OUT_PKT7(ring, CP_CONTEXT_REG_BUNCH, 12 + (2 * tf->prog_count));
+		OUT_RING(ring, REG_A6XX_VPC_SO_BUF_CNTL);
+		OUT_RING(ring, tf->vpc_so_buf_cntl);
+		OUT_RING(ring, REG_A6XX_VPC_SO_NCOMP(0));
+		OUT_RING(ring, tf->ncomp[0]);
+		OUT_RING(ring, REG_A6XX_VPC_SO_NCOMP(1));
+		OUT_RING(ring, tf->ncomp[1]);
+		OUT_RING(ring, REG_A6XX_VPC_SO_NCOMP(2));
+		OUT_RING(ring, tf->ncomp[2]);
+		OUT_RING(ring, REG_A6XX_VPC_SO_NCOMP(3));
+		OUT_RING(ring, tf->ncomp[3]);
+		OUT_RING(ring, REG_A6XX_VPC_SO_CNTL);
+		OUT_RING(ring, A6XX_VPC_SO_CNTL_ENABLE);
+		for (unsigned i = 0; i < tf->prog_count; i++) {
+			OUT_RING(ring, REG_A6XX_VPC_SO_PROG);
+			OUT_RING(ring, tf->prog[i]);
+		}
+
+		OUT_PKT4(ring, REG_A6XX_VPC_SO_OVERRIDE, 1);
+		OUT_RING(ring, 0x0);
+	} else {
+		OUT_PKT7(ring, CP_CONTEXT_REG_BUNCH, 4);
+		OUT_RING(ring, REG_A6XX_VPC_SO_CNTL);
+		OUT_RING(ring, 0);
+		OUT_RING(ring, REG_A6XX_VPC_SO_BUF_CNTL);
+		OUT_RING(ring, 0);
+
+		OUT_PKT4(ring, REG_A6XX_VPC_SO_OVERRIDE, 1);
+		OUT_RING(ring, A6XX_VPC_SO_OVERRIDE_SO_DISABLE);
+	}
+
 }
 
 void
@@ -741,7 +830,6 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 		OUT_PKT4(ring, REG_A6XX_VFD_UNKNOWN_A008, 1);
 		OUT_RING(ring, 0);
 
-
 		OUT_PKT4(ring, REG_A6XX_PC_PRIMITIVE_CNTL_0, 1);
 		OUT_RING(ring, rasterizer->pc_primitive_cntl |
 				 COND(emit->info->primitive_restart && emit->info->index_size,
@@ -769,6 +857,7 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 		struct fd_ringbuffer *vsconstobj = fd_submit_new_ringbuffer(
 				ctx->batch->submit, 0x1000, FD_RINGBUFFER_STREAMING);
 
+		OUT_WFI5(vsconstobj);
 		ir3_emit_vs_consts(vp, vsconstobj, ctx, emit->info);
 		fd6_emit_add_group(emit, vsconstobj, FD6_GROUP_VS_CONST, 0x7);
 		fd_ringbuffer_del(vsconstobj);
@@ -778,76 +867,15 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 		struct fd_ringbuffer *fsconstobj = fd_submit_new_ringbuffer(
 				ctx->batch->submit, 0x1000, FD_RINGBUFFER_STREAMING);
 
+		OUT_WFI5(fsconstobj);
 		ir3_emit_fs_consts(fp, fsconstobj, ctx);
 		fd6_emit_add_group(emit, fsconstobj, FD6_GROUP_FS_CONST, 0x6);
 		fd_ringbuffer_del(fsconstobj);
 	}
 
 	struct ir3_stream_output_info *info = &vp->shader->stream_output;
-	if (info->num_outputs) {
-		struct fd_streamout_stateobj *so = &ctx->streamout;
-
-		emit->streamout_mask = 0;
-
-		for (unsigned i = 0; i < so->num_targets; i++) {
-			struct pipe_stream_output_target *target = so->targets[i];
-
-			if (!target)
-				continue;
-
-			unsigned offset = (so->offsets[i] * info->stride[i] * 4) +
-					target->buffer_offset;
-
-			OUT_PKT4(ring, REG_A6XX_VPC_SO_BUFFER_BASE_LO(i), 3);
-			/* VPC_SO[i].BUFFER_BASE_LO: */
-			OUT_RELOCW(ring, fd_resource(target->buffer)->bo, 0, 0, 0);
-			OUT_RING(ring, target->buffer_size + offset);
-
-			OUT_PKT4(ring, REG_A6XX_VPC_SO_BUFFER_OFFSET(i), 3);
-			OUT_RING(ring, offset);
-			/* VPC_SO[i].FLUSH_BASE_LO/HI: */
-			// TODO just give hw a dummy addr for now.. we should
-			// be using this an then CP_MEM_TO_REG to set the
-			// VPC_SO[i].BUFFER_OFFSET for the next draw..
-			OUT_RELOCW(ring, fd6_context(ctx)->blit_mem, 0x100, 0, 0);
-
-			emit->streamout_mask |= (1 << i);
-		}
-
-		if (emit->streamout_mask) {
-			const struct fd6_streamout_state *tf = &prog->tf;
-
-			OUT_PKT7(ring, CP_CONTEXT_REG_BUNCH, 12 + (2 * tf->prog_count));
-			OUT_RING(ring, REG_A6XX_VPC_SO_BUF_CNTL);
-			OUT_RING(ring, tf->vpc_so_buf_cntl);
-			OUT_RING(ring, REG_A6XX_VPC_SO_NCOMP(0));
-			OUT_RING(ring, tf->ncomp[0]);
-			OUT_RING(ring, REG_A6XX_VPC_SO_NCOMP(1));
-			OUT_RING(ring, tf->ncomp[1]);
-			OUT_RING(ring, REG_A6XX_VPC_SO_NCOMP(2));
-			OUT_RING(ring, tf->ncomp[2]);
-			OUT_RING(ring, REG_A6XX_VPC_SO_NCOMP(3));
-			OUT_RING(ring, tf->ncomp[3]);
-			OUT_RING(ring, REG_A6XX_VPC_SO_CNTL);
-			OUT_RING(ring, A6XX_VPC_SO_CNTL_ENABLE);
-			for (unsigned i = 0; i < tf->prog_count; i++) {
-				OUT_RING(ring, REG_A6XX_VPC_SO_PROG);
-				OUT_RING(ring, tf->prog[i]);
-			}
-
-			OUT_PKT4(ring, REG_A6XX_VPC_SO_OVERRIDE, 1);
-			OUT_RING(ring, 0x0);
-		} else {
-			OUT_PKT7(ring, CP_CONTEXT_REG_BUNCH, 4);
-			OUT_RING(ring, REG_A6XX_VPC_SO_CNTL);
-			OUT_RING(ring, 0);
-			OUT_RING(ring, REG_A6XX_VPC_SO_BUF_CNTL);
-			OUT_RING(ring, 0);
-
-			OUT_PKT4(ring, REG_A6XX_VPC_SO_OVERRIDE, 1);
-			OUT_RING(ring, A6XX_VPC_SO_OVERRIDE_SO_DISABLE);
-		}
-	}
+	if (info->num_outputs)
+		fd6_emit_streamout(ring, emit, info);
 
 	if (dirty & FD_DIRTY_BLEND) {
 		struct fd6_blend_stateobj *blend = fd6_blend_stateobj(ctx->blend);
@@ -879,12 +907,16 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 			OUT_RING(ring, blend_control);
 		}
 
-		OUT_PKT4(ring, REG_A6XX_RB_BLEND_CNTL, 1);
-		OUT_RING(ring, blend->rb_blend_cntl |
-				A6XX_RB_BLEND_CNTL_SAMPLE_MASK(0xffff));
-
 		OUT_PKT4(ring, REG_A6XX_SP_BLEND_CNTL, 1);
 		OUT_RING(ring, blend->sp_blend_cntl);
+	}
+
+	if (dirty & (FD_DIRTY_BLEND | FD_DIRTY_SAMPLE_MASK)) {
+		struct fd6_blend_stateobj *blend = fd6_blend_stateobj(ctx->blend);
+
+		OUT_PKT4(ring, REG_A6XX_RB_BLEND_CNTL, 1);
+		OUT_RING(ring, blend->rb_blend_cntl |
+				A6XX_RB_BLEND_CNTL_SAMPLE_MASK(ctx->sample_mask));
 	}
 
 	if (dirty & FD_DIRTY_BLEND_COLOR) {
@@ -897,34 +929,38 @@ fd6_emit_state(struct fd_ringbuffer *ring, struct fd6_emit *emit)
 		OUT_RING(ring, A6XX_RB_BLEND_ALPHA_F32(bcolor->color[3]));
 	}
 
-	if ((ctx->dirty_shader[PIPE_SHADER_VERTEX] & FD_DIRTY_SHADER_TEX) &&
-			ctx->tex[PIPE_SHADER_VERTEX].num_textures > 0) {
-		struct fd6_texture_state *tex = fd6_texture_state(ctx,
-				SB6_VS_TEX, &ctx->tex[PIPE_SHADER_VERTEX]);
-
-		needs_border |= tex->needs_border;
-
-		fd6_emit_add_group(emit, tex->stateobj, FD6_GROUP_VS_TEX, 0x7);
-	}
-
-	if ((ctx->dirty_shader[PIPE_SHADER_FRAGMENT] & FD_DIRTY_SHADER_TEX) &&
-			ctx->tex[PIPE_SHADER_FRAGMENT].num_textures > 0) {
-		struct fd6_texture_state *tex = fd6_texture_state(ctx,
-				SB6_FS_TEX, &ctx->tex[PIPE_SHADER_FRAGMENT]);
-
-		needs_border |= tex->needs_border;
-
-		fd6_emit_add_group(emit, tex->stateobj, FD6_GROUP_FS_TEX, 0x7);
-	}
+	needs_border |= fd6_emit_combined_textures(ring, emit, PIPE_SHADER_VERTEX, vp);
+	needs_border |= fd6_emit_combined_textures(ring, emit, PIPE_SHADER_FRAGMENT, fp);
 
 	if (needs_border)
 		emit_border_color(ctx, ring);
 
-	if (ctx->dirty_shader[PIPE_SHADER_FRAGMENT] & FD_DIRTY_SHADER_SSBO)
-		emit_ssbos(ctx, ring, SB6_SSBO, &ctx->shaderbuf[PIPE_SHADER_FRAGMENT]);
+	if (ctx->dirty_shader[PIPE_SHADER_FRAGMENT] &
+			(FD_DIRTY_SHADER_SSBO | FD_DIRTY_SHADER_IMAGE)) {
+		struct fd_ringbuffer *state =
+			fd6_build_ibo_state(ctx, fp, PIPE_SHADER_FRAGMENT);
+		struct fd_ringbuffer *obj = fd_submit_new_ringbuffer(
+			ctx->batch->submit, 9 * 4, FD_RINGBUFFER_STREAMING);
+		const struct ir3_ibo_mapping *mapping = &fp->image_mapping;
 
-	if (ctx->dirty_shader[PIPE_SHADER_FRAGMENT] & FD_DIRTY_SHADER_IMAGE)
-		fd6_emit_images(ctx, ring, PIPE_SHADER_FRAGMENT);
+		OUT_PKT7(obj, CP_LOAD_STATE6, 3);
+		OUT_RING(obj, CP_LOAD_STATE6_0_DST_OFF(0) |
+			CP_LOAD_STATE6_0_STATE_TYPE(ST6_SHADER) |
+			CP_LOAD_STATE6_0_STATE_SRC(SS6_INDIRECT) |
+			CP_LOAD_STATE6_0_STATE_BLOCK(SB6_IBO) |
+			CP_LOAD_STATE6_0_NUM_UNIT(mapping->num_ibo));
+		OUT_RB(obj, state);
+
+		OUT_PKT4(obj, REG_A6XX_SP_IBO_LO, 2);
+		OUT_RB(obj, state);
+
+		OUT_PKT4(obj, REG_A6XX_SP_IBO_COUNT, 1);
+		OUT_RING(obj, mapping->num_ibo);
+
+		fd6_emit_add_group(emit, obj, FD6_GROUP_IBO, 0x7);
+		fd_ringbuffer_del(obj);
+		fd_ringbuffer_del(state);
+	}
 
 	if (emit->num_groups > 0) {
 		OUT_PKT7(ring, CP_SET_DRAW_STATE, 3 * emit->num_groups);
@@ -958,43 +994,56 @@ fd6_emit_cs_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
 {
 	enum fd_dirty_shader_state dirty = ctx->dirty_shader[PIPE_SHADER_COMPUTE];
 
-	if (dirty & FD_DIRTY_SHADER_TEX) {
-		bool needs_border = false;
-		needs_border |= fd6_emit_textures(ctx->pipe, ring, SB6_CS_TEX,
-				&ctx->tex[PIPE_SHADER_COMPUTE], 0);
+	if (dirty & (FD_DIRTY_SHADER_TEX | FD_DIRTY_SHADER_PROG |
+			 FD_DIRTY_SHADER_IMAGE | FD_DIRTY_SHADER_SSBO)) {
+		struct fd_texture_stateobj *tex = &ctx->tex[PIPE_SHADER_COMPUTE];
+		struct fd_shaderbuf_stateobj *buf = &ctx->shaderbuf[PIPE_SHADER_COMPUTE];
+		struct fd_shaderimg_stateobj *img = &ctx->shaderimg[PIPE_SHADER_COMPUTE];
+		unsigned bcolor_offset = fd6_border_color_offset(ctx, SB6_CS_TEX, tex);
+
+		bool needs_border = fd6_emit_textures(ctx->pipe, ring, SB6_CS_TEX, tex,
+				bcolor_offset, cp, buf, img);
 
 		if (needs_border)
 			emit_border_color(ctx, ring);
 
-#if 0
-		OUT_PKT4(ring, REG_A6XX_TPL1_VS_TEX_COUNT, 1);
+		OUT_PKT4(ring, REG_A6XX_SP_VS_TEX_COUNT, 1);
 		OUT_RING(ring, 0);
 
-		OUT_PKT4(ring, REG_A6XX_TPL1_HS_TEX_COUNT, 1);
+		OUT_PKT4(ring, REG_A6XX_SP_HS_TEX_COUNT, 1);
 		OUT_RING(ring, 0);
 
-		OUT_PKT4(ring, REG_A6XX_TPL1_DS_TEX_COUNT, 1);
+		OUT_PKT4(ring, REG_A6XX_SP_DS_TEX_COUNT, 1);
 		OUT_RING(ring, 0);
 
-		OUT_PKT4(ring, REG_A6XX_TPL1_GS_TEX_COUNT, 1);
+		OUT_PKT4(ring, REG_A6XX_SP_GS_TEX_COUNT, 1);
 		OUT_RING(ring, 0);
 
-		OUT_PKT4(ring, REG_A6XX_TPL1_FS_TEX_COUNT, 1);
+		OUT_PKT4(ring, REG_A6XX_SP_FS_TEX_COUNT, 1);
 		OUT_RING(ring, 0);
-#endif
 	}
 
-#if 0
-	OUT_PKT4(ring, REG_A6XX_TPL1_CS_TEX_COUNT, 1);
-	OUT_RING(ring, ctx->shaderimg[PIPE_SHADER_COMPUTE].enabled_mask ?
-			~0 : ctx->tex[PIPE_SHADER_COMPUTE].num_textures);
-#endif
+	if (dirty & (FD_DIRTY_SHADER_SSBO | FD_DIRTY_SHADER_IMAGE)) {
+		struct fd_ringbuffer *state =
+			fd6_build_ibo_state(ctx, cp, PIPE_SHADER_COMPUTE);
+		const struct ir3_ibo_mapping *mapping = &cp->image_mapping;
 
-	if (dirty & FD_DIRTY_SHADER_SSBO)
-		emit_ssbos(ctx, ring, SB6_CS_SSBO, &ctx->shaderbuf[PIPE_SHADER_COMPUTE]);
+		OUT_PKT7(ring, CP_LOAD_STATE6_FRAG, 3);
+		OUT_RING(ring, CP_LOAD_STATE6_0_DST_OFF(0) |
+			CP_LOAD_STATE6_0_STATE_TYPE(ST6_IBO) |
+			CP_LOAD_STATE6_0_STATE_SRC(SS6_INDIRECT) |
+			CP_LOAD_STATE6_0_STATE_BLOCK(SB6_CS_SHADER) |
+			CP_LOAD_STATE6_0_NUM_UNIT(mapping->num_ibo));
+		OUT_RB(ring, state);
 
-	if (dirty & FD_DIRTY_SHADER_IMAGE)
-		fd6_emit_images(ctx, ring, PIPE_SHADER_COMPUTE);
+		OUT_PKT4(ring, REG_A6XX_SP_CS_IBO_LO, 2);
+		OUT_RB(ring, state);
+
+		OUT_PKT4(ring, REG_A6XX_SP_CS_IBO_COUNT, 1);
+		OUT_RING(ring, mapping->num_ibo);
+
+		fd_ringbuffer_del(state);
+	}
 }
 
 
@@ -1006,7 +1055,7 @@ fd6_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
 {
 	//struct fd_context *ctx = batch->ctx;
 
-	fd6_cache_flush(batch, ring);
+	fd6_cache_inv(batch, ring);
 
 	OUT_PKT4(ring, REG_A6XX_HLSQ_UPDATE_CNTL, 1);
 	OUT_RING(ring, 0xfffff);
@@ -1035,7 +1084,7 @@ t7              opcode: CP_WAIT_FOR_IDLE (26) (1 dwords)
 	WRITE(REG_A6XX_GRAS_UNKNOWN_8600, 0x880);
 	WRITE(REG_A6XX_HLSQ_UNKNOWN_BE04, 0);
 	WRITE(REG_A6XX_SP_UNKNOWN_AE03, 0x00000410);
-	WRITE(REG_A6XX_SP_UNKNOWN_AB20, 0);
+	WRITE(REG_A6XX_SP_IBO_COUNT, 0);
 	WRITE(REG_A6XX_SP_UNKNOWN_B182, 0);
 	WRITE(REG_A6XX_HLSQ_UNKNOWN_BB11, 0);
 	WRITE(REG_A6XX_UCHE_UNKNOWN_0E12, 0x3200000);
@@ -1069,7 +1118,8 @@ t7              opcode: CP_WAIT_FOR_IDLE (26) (1 dwords)
 	WRITE(REG_A6XX_VPC_UNKNOWN_9101, 0xffff00);
 	WRITE(REG_A6XX_VPC_UNKNOWN_9107, 0);
 
-	WRITE(REG_A6XX_VPC_UNKNOWN_9236, 1);
+	WRITE(REG_A6XX_VPC_UNKNOWN_9236,
+		  A6XX_VPC_UNKNOWN_9236_POINT_COORD_INVERT(0));
 	WRITE(REG_A6XX_VPC_UNKNOWN_9300, 0);
 
 	WRITE(REG_A6XX_VPC_SO_OVERRIDE, A6XX_VPC_SO_OVERRIDE_SO_DISABLE);

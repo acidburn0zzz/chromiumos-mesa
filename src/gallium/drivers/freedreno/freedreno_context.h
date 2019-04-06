@@ -56,14 +56,6 @@ struct fd_texture_stateobj {
 
 struct fd_program_stateobj {
 	void *vp, *fp;
-
-	/* rest only used by fd2.. split out: */
-	uint8_t num_exports;
-	/* Indexed by semantic name or TGSI_SEMANTIC_COUNT + semantic index
-	 * for TGSI_SEMANTIC_GENERIC.  Special vs exports (position and point-
-	 * size) are not included in this
-	 */
-	uint8_t export_linkage[63];
 };
 
 struct fd_constbuf_stateobj {
@@ -343,7 +335,7 @@ struct fd_context {
 	void (*query_set_stage)(struct fd_batch *batch, enum fd_render_stage stage);
 
 	/* blitter: */
-	void (*blit)(struct fd_context *ctx, const struct pipe_blit_info *info);
+	bool (*blit)(struct fd_context *ctx, const struct pipe_blit_info *info);
 
 	/* simple gpu "memcpy": */
 	void (*mem_to_mem)(struct fd_ringbuffer *ring, struct pipe_resource *dst,

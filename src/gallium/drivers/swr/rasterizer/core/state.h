@@ -221,7 +221,18 @@ struct SIMDVERTEX_T
 /////////////////////////////////////////////////////////////////////////
 struct SWR_SHADER_STATS
 {
-    uint32_t numInstExecuted; // This is roughly the API instructions executed and not x86.
+    uint32_t numInstExecuted;      // This is roughly the API instructions executed and not x86.
+    uint32_t numSampleExecuted;
+    uint32_t numSampleLExecuted;
+    uint32_t numSampleBExecuted;
+    uint32_t numSampleCExecuted;
+    uint32_t numSampleCLZExecuted;
+    uint32_t numSampleCDExecuted;
+    uint32_t numGather4Executed;
+    uint32_t numGather4CExecuted;
+    uint32_t numGather4CPOExecuted;
+    uint32_t numGather4CPOCExecuted;
+    uint32_t numLodExecuted;
 };
 
 //////////////////////////////////////////////////////////////////////////
@@ -410,7 +421,7 @@ struct SWR_CS_CONTEXT
     uint8_t* pSpillFillBuffer;    // Spill/fill buffer for barrier support
     uint8_t* pScratchSpace;       // Pointer to scratch space buffer used by the shader, shader is
                                   // responsible for subdividing scratch space per instance/simd
-    uint32_t scratchSpacePerSimd; // Scratch space per work item x SIMD_WIDTH
+    uint32_t scratchSpacePerWarp; // Scratch space per work item x SIMD_WIDTH
 
     SWR_SHADER_STATS stats; // OUT: shader statistics used for archrast.
 };
@@ -667,10 +678,10 @@ OSALIGNLINE(struct) SWR_STATS_FE
 struct SWR_STREAMOUT_BUFFER
 {
     // Pointers to streamout buffers.
-    uint32_t* pBuffer;
+    gfxptr_t pBuffer;
 
     // Offset to the SO write offset. If not null then we update offset here.
-    uint32_t* pWriteOffset;
+    gfxptr_t pWriteOffset;
 
     bool enable;
     bool soWriteEnable;
@@ -925,7 +936,7 @@ typedef void(__cdecl *PFN_HS_FUNC)(HANDLE hPrivateData, HANDLE hWorkerPrivateDat
 typedef void(__cdecl *PFN_DS_FUNC)(HANDLE hPrivateData, HANDLE hWorkerPrivateData, SWR_DS_CONTEXT* pDsContext);
 typedef void(__cdecl *PFN_GS_FUNC)(HANDLE hPrivateData, HANDLE hWorkerPrivateData, SWR_GS_CONTEXT* pGsContext);
 typedef void(__cdecl *PFN_CS_FUNC)(HANDLE hPrivateData, HANDLE hWorkerPrivateData, SWR_CS_CONTEXT* pCsContext);
-typedef void(__cdecl *PFN_SO_FUNC)(SWR_STREAMOUT_CONTEXT& soContext);
+typedef void(__cdecl *PFN_SO_FUNC)(HANDLE hPrivateData, SWR_STREAMOUT_CONTEXT& soContext);
 typedef void(__cdecl *PFN_PIXEL_KERNEL)(HANDLE hPrivateData, HANDLE hWorkerPrivateData, SWR_PS_CONTEXT* pContext);
 typedef void(__cdecl *PFN_CPIXEL_KERNEL)(HANDLE hPrivateData, HANDLE hWorkerPrivateData, SWR_PS_CONTEXT* pContext);
 typedef void(__cdecl *PFN_BLEND_JIT_FUNC)(SWR_BLEND_CONTEXT*);

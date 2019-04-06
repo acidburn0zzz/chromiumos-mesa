@@ -29,6 +29,7 @@
 #include "util/u_format.h"
 
 #include "fd6_format.h"
+#include "freedreno_resource.h"
 
 
 /* Specifies the table of all the formats and their features. Also supplies
@@ -419,8 +420,8 @@ fd6_pipe2depth(enum pipe_format format)
 	}
 }
 
-static inline enum a6xx_tex_swiz
-tex_swiz(unsigned swiz)
+enum a6xx_tex_swiz
+fd6_pipe2swiz(unsigned swiz)
 {
 	switch (swiz) {
 	default:
@@ -434,19 +435,46 @@ tex_swiz(unsigned swiz)
 }
 
 uint32_t
-fd6_tex_swiz(enum pipe_format format, unsigned swizzle_r, unsigned swizzle_g,
-		unsigned swizzle_b, unsigned swizzle_a)
+fd6_tex_swiz(struct pipe_resource *prsc, enum pipe_format format,
+			 unsigned swizzle_r, unsigned swizzle_g,
+			 unsigned swizzle_b, unsigned swizzle_a)
 {
 	const struct util_format_description *desc =
 			util_format_description(format);
-	unsigned char swiz[4] = {
-			swizzle_r, swizzle_g, swizzle_b, swizzle_a,
-	}, rswiz[4];
 
-	util_format_compose_swizzles(desc->swizzle, swiz, rswiz);
+	uint32_t swap = fd6_pipe2swap(format);
+	unsigned char swiz[4];
+	const unsigned char uswiz[4] = {
+		swizzle_r, swizzle_g, swizzle_b, swizzle_a
+	};
 
-	return A6XX_TEX_CONST_0_SWIZ_X(tex_swiz(rswiz[0])) |
-			A6XX_TEX_CONST_0_SWIZ_Y(tex_swiz(rswiz[1])) |
-			A6XX_TEX_CONST_0_SWIZ_Z(tex_swiz(rswiz[2])) |
-			A6XX_TEX_CONST_0_SWIZ_W(tex_swiz(rswiz[3]));
+	/* Gallium expects stencil sampler to return (s,s,s,s), so massage
+	 * the swizzle to do so.
+	 */
+	if ((format == PIPE_FORMAT_X24S8_UINT)) {
+		const unsigned char stencil_swiz[4] = {
+			PIPE_SWIZZLE_X, PIPE_SWIZZLE_X, PIPE_SWIZZLE_X, PIPE_SWIZZLE_X
+		};
+		util_format_compose_swizzles(stencil_swiz, uswiz, swiz);
+	} else if (swap != WZYX) {
+		/* Formats with a non-pass-through swap are permutations of RGBA
+		 * formats. We program the permutation using the swap and don't
+		 * need to compose the format swizzle with the user swizzle.
+		 */
+		memcpy(swiz, uswiz, sizeof(swiz));
+	} else {
+		/* Otherwise, it's an unswapped RGBA format or a format like L8 where
+		 * we need the XXX1 swizzle from the gallium format description.
+		 */
+		util_format_compose_swizzles(desc->swizzle, uswiz, swiz);
+	}
+
+	swap = fd_resource(prsc)->tile_mode ? WZYX : fd6_pipe2swap(format);
+
+	return
+		A6XX_TEX_CONST_0_SWAP(swap) |
+		A6XX_TEX_CONST_0_SWIZ_X(fd6_pipe2swiz(swiz[0])) |
+		A6XX_TEX_CONST_0_SWIZ_Y(fd6_pipe2swiz(swiz[1])) |
+		A6XX_TEX_CONST_0_SWIZ_Z(fd6_pipe2swiz(swiz[2])) |
+		A6XX_TEX_CONST_0_SWIZ_W(fd6_pipe2swiz(swiz[3]));
 }

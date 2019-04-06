@@ -126,8 +126,8 @@ radv_optimize_nir(struct nir_shader *shader, bool optimize_conservatively,
         do {
                 progress = false;
 
-		NIR_PASS(progress, shader, nir_split_array_vars, nir_var_local);
-		NIR_PASS(progress, shader, nir_shrink_vec_array_vars, nir_var_local);
+		NIR_PASS(progress, shader, nir_split_array_vars, nir_var_function_temp);
+		NIR_PASS(progress, shader, nir_shrink_vec_array_vars, nir_var_function_temp);
 
                 NIR_PASS_V(shader, nir_lower_vars_to_ssa);
 		NIR_PASS_V(shader, nir_lower_pack);
@@ -159,7 +159,7 @@ radv_optimize_nir(struct nir_shader *shader, bool optimize_conservatively,
                 NIR_PASS(progress, shader, nir_opt_if);
                 NIR_PASS(progress, shader, nir_opt_dead_cf);
                 NIR_PASS(progress, shader, nir_opt_cse);
-                NIR_PASS(progress, shader, nir_opt_peephole_select, 8);
+                NIR_PASS(progress, shader, nir_opt_peephole_select, 8, true, true);
                 NIR_PASS(progress, shader, nir_opt_algebraic);
                 NIR_PASS(progress, shader, nir_opt_constant_folding);
                 NIR_PASS(progress, shader, nir_opt_undef);
@@ -219,33 +219,41 @@ radv_shader_compile_to_nir(struct radv_device *device,
 			}
 		}
 		const struct spirv_to_nir_options spirv_options = {
+			.lower_ubo_ssbo_access_to_offsets = true,
 			.caps = {
+				.descriptor_array_dynamic_indexing = true,
 				.device_group = true,
 				.draw_parameters = true,
 				.float64 = true,
+				.gcn_shader = true,
+				.geometry_streams = true,
 				.image_read_without_format = true,
 				.image_write_without_format = true,
-				.tessellation = true,
-				.int64 = true,
 				.int16 = true,
+				.int64 = true,
 				.multiview = true,
+				.physical_storage_buffer_address = true,
+				.runtime_descriptor_array = true,
+				.shader_viewport_index_layer = true,
+				.stencil_export = true,
+				.storage_16bit = true,
+				.storage_image_ms = true,
 				.subgroup_arithmetic = true,
 				.subgroup_ballot = true,
 				.subgroup_basic = true,
 				.subgroup_quad = true,
 				.subgroup_shuffle = true,
 				.subgroup_vote = true,
-				.variable_pointers = true,
-				.gcn_shader = true,
-				.trinary_minmax = true,
-				.shader_viewport_index_layer = true,
-				.descriptor_array_dynamic_indexing = true,
-				.runtime_descriptor_array = true,
-				.stencil_export = true,
-				.storage_16bit = true,
-				.geometry_streams = true,
+				.tessellation = true,
 				.transform_feedback = true,
+				.trinary_minmax = true,
+				.variable_pointers = true,
 			},
+			.ubo_ptr_type = glsl_vector_type(GLSL_TYPE_UINT, 2),
+			.ssbo_ptr_type = glsl_vector_type(GLSL_TYPE_UINT, 2),
+			.phys_ssbo_ptr_type = glsl_vector_type(GLSL_TYPE_UINT64, 1),
+			.push_const_ptr_type = glsl_uint_type(),
+			.shared_ptr_type = glsl_uint_type(),
 		};
 		entry_point = spirv_to_nir(spirv, module->size / 4,
 					   spec_entries, num_spec_entries,
@@ -261,10 +269,10 @@ radv_shader_compile_to_nir(struct radv_device *device,
 		 * inline functions.  That way they get properly initialized at the top
 		 * of the function and not at the top of its caller.
 		 */
-		NIR_PASS_V(nir, nir_lower_constant_initializers, nir_var_local);
+		NIR_PASS_V(nir, nir_lower_constant_initializers, nir_var_function_temp);
 		NIR_PASS_V(nir, nir_lower_returns);
 		NIR_PASS_V(nir, nir_inline_functions);
-		NIR_PASS_V(nir, nir_copy_prop);
+		NIR_PASS_V(nir, nir_opt_deref);
 
 		/* Pick off the single entrypoint that we want */
 		foreach_list_typed_safe(nir_function, func, node, &nir->functions) {
@@ -323,7 +331,7 @@ radv_shader_compile_to_nir(struct radv_device *device,
 	nir_split_var_copies(nir);
 
 	nir_lower_global_vars_to_local(nir);
-	nir_remove_dead_variables(nir, nir_var_local);
+	nir_remove_dead_variables(nir, nir_var_function_temp);
 	nir_lower_subgroups(nir, &(struct nir_lower_subgroups_options) {
 			.subgroup_size = 64,
 			.ballot_bit_size = 64,
@@ -389,7 +397,8 @@ radv_alloc_shader_memory(struct radv_device *device,
 	                                     RADEON_DOMAIN_VRAM,
 					     RADEON_FLAG_NO_INTERPROCESS_SHARING |
 					     (device->physical_device->cpdma_prefetch_writes_memory ?
-					             0 : RADEON_FLAG_READ_ONLY));
+					             0 : RADEON_FLAG_READ_ONLY),
+					     RADV_BO_PRIORITY_SHADER);
 	slab->ptr = (char*)device->ws->buffer_map(slab->bo);
 	list_inithead(&slab->shaders);
 
@@ -548,9 +557,15 @@ static void radv_init_llvm_target()
 	 *
 	 * "mesa" is the prefix for error messages.
 	 */
-	const char *argv[3] = { "mesa", "-simplifycfg-sink-common=false",
-				"-amdgpu-skip-threshold=1" };
-	LLVMParseCommandLineOptions(3, argv, NULL);
+	if (HAVE_LLVM >= 0x0800) {
+		const char *argv[2] = { "mesa", "-simplifycfg-sink-common=false" };
+		LLVMParseCommandLineOptions(2, argv, NULL);
+
+	} else {
+		const char *argv[3] = { "mesa", "-simplifycfg-sink-common=false",
+					"-amdgpu-skip-threshold=1" };
+		LLVMParseCommandLineOptions(3, argv, NULL);
+	}
 }
 
 static once_flag radv_init_llvm_target_once_flag = ONCE_FLAG_INIT;
@@ -600,7 +615,7 @@ shader_variant_create(struct radv_device *device,
 
 	thread_compiler = !(device->instance->debug_flags & RADV_DEBUG_NOTHREADLLVM);
 	radv_init_llvm_once();
-	radv_init_llvm_compiler(&ac_llvm, false,
+	radv_init_llvm_compiler(&ac_llvm,
 				thread_compiler,
 				chip_family, tm_options);
 	if (gs_copy_shader) {
@@ -720,7 +735,8 @@ generate_shader_stats(struct radv_device *device,
 		      gl_shader_stage stage,
 		      struct _mesa_string_buffer *buf)
 {
-	unsigned lds_increment = device->physical_device->rad_info.chip_class >= CIK ? 512 : 256;
+	enum chip_class chip_class = device->physical_device->rad_info.chip_class;
+	unsigned lds_increment = chip_class >= CIK ? 512 : 256;
 	struct ac_shader_config *conf;
 	unsigned max_simd_waves;
 	unsigned lds_per_wave = 0;
@@ -733,12 +749,17 @@ generate_shader_stats(struct radv_device *device,
 		lds_per_wave = conf->lds_size * lds_increment +
 			       align(variant->info.fs.num_interp * 48,
 				     lds_increment);
+	} else if (stage == MESA_SHADER_COMPUTE) {
+		unsigned max_workgroup_size =
+				radv_nir_get_max_workgroup_size(chip_class, variant->nir);
+		lds_per_wave = (conf->lds_size * lds_increment) /
+			       DIV_ROUND_UP(max_workgroup_size, 64);
 	}
 
 	if (conf->num_sgprs)
 		max_simd_waves =
 			MIN2(max_simd_waves,
-			     radv_get_num_physical_sgprs(device->physical_device) / conf->num_sgprs);
+			     ac_get_num_physical_sgprs(chip_class) / conf->num_sgprs);
 
 	if (conf->num_vgprs)
 		max_simd_waves =
@@ -823,7 +844,7 @@ radv_GetShaderInfoAMD(VkDevice _device,
 			VkShaderStatisticsInfoAMD statistics = {};
 			statistics.shaderStageMask = shaderStage;
 			statistics.numPhysicalVgprs = RADV_NUM_PHYSICAL_VGPRS;
-			statistics.numPhysicalSgprs = radv_get_num_physical_sgprs(device->physical_device);
+			statistics.numPhysicalSgprs = ac_get_num_physical_sgprs(device->physical_device->rad_info.chip_class);
 			statistics.numAvailableSgprs = statistics.numPhysicalSgprs;
 
 			if (stage == MESA_SHADER_COMPUTE) {

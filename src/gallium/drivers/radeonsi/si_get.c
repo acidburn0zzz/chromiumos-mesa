@@ -254,6 +254,9 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 	case PIPE_CAP_MAX_SHADER_PATCH_VARYINGS:
 		return 30;
 
+	case PIPE_CAP_MAX_VARYINGS:
+		return 32;
+
 	case PIPE_CAP_TEXTURE_BORDER_COLOR_QUIRK:
 		return sscreen->info.chip_class <= VI ?
 			PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_R600 : 0;
@@ -455,15 +458,6 @@ static int si_get_shader_param(struct pipe_screen* pscreen,
 		    !sscreen->llvm_has_working_vgpr_indexing)
 			return 0;
 
-		/* Doing indirect indexing on GFX9 with LLVM 6.0 hangs.
-		 * This means we don't support INTERP instructions with
-		 * indirect indexing on inputs.
-		 */
-		if (shader == PIPE_SHADER_FRAGMENT &&
-		    !sscreen->llvm_has_working_vgpr_indexing &&
-		    HAVE_LLVM < 0x0700)
-			return 0;
-
 		/* TCS and TES load inputs directly from LDS or offchip
 		 * memory, so indirect indexing is always supported.
 		 * PS has to support indirect indexing, because we can't
@@ -492,7 +486,6 @@ static const struct nir_shader_compiler_options nir_options = {
 	.lower_scmp = true,
 	.lower_flrp32 = true,
 	.lower_flrp64 = true,
-	.lower_fpow = true,
 	.lower_fsat = true,
 	.lower_fdiv = true,
 	.lower_sub = true,

@@ -399,7 +399,8 @@ cik_create_gfx_config(struct radv_device *device)
 						     RADEON_DOMAIN_GTT,
 						     RADEON_FLAG_CPU_ACCESS|
 						     RADEON_FLAG_NO_INTERPROCESS_SHARING |
-						     RADEON_FLAG_READ_ONLY);
+						     RADEON_FLAG_READ_ONLY,
+						     RADV_BO_PRIORITY_CS);
 	if (!device->gfx_init)
 		goto fail;
 
@@ -660,7 +661,6 @@ void si_cs_emit_write_event_eop(struct radeon_cmdbuf *cs,
 				unsigned event, unsigned event_flags,
 				unsigned data_sel,
 				uint64_t va,
-				uint32_t old_fence,
 				uint32_t new_fence,
 				uint64_t gfx9_eop_bug_va)
 {
@@ -707,7 +707,7 @@ void si_cs_emit_write_event_eop(struct radeon_cmdbuf *cs,
 			radeon_emit(cs, op);
 			radeon_emit(cs, va);
 			radeon_emit(cs, ((va >> 32) & 0xffff) | sel);
-			radeon_emit(cs, old_fence); /* immediate data */
+			radeon_emit(cs, 0); /* immediate data */
 			radeon_emit(cs, 0); /* unused */
 		}
 
@@ -801,7 +801,7 @@ si_cs_emit_cache_flush(struct radeon_cmdbuf *cs,
 							   V_028A90_FLUSH_AND_INV_CB_DATA_TS,
 							   0,
 							   EOP_DATA_SEL_DISCARD,
-							   0, 0, 0,
+							   0, 0,
 							   gfx9_eop_bug_va);
 			}
 		}
@@ -868,11 +868,11 @@ si_cs_emit_cache_flush(struct radeon_cmdbuf *cs,
 					 RADV_CMD_FLAG_INV_VMEM_L1);
 		}
 		assert(flush_cnt);
-		uint32_t old_fence = (*flush_cnt)++;
+		(*flush_cnt)++;
 
 		si_cs_emit_write_event_eop(cs, chip_class, false, cb_db_event, tc_flags,
 					   EOP_DATA_SEL_VALUE_32BIT,
-					   flush_va, old_fence, *flush_cnt,
+					   flush_va, *flush_cnt,
 					   gfx9_eop_bug_va);
 		radv_cp_wait_mem(cs, WAIT_REG_MEM_EQUAL, flush_va,
 				 *flush_cnt, 0xffffffff);
@@ -971,18 +971,12 @@ si_emit_cache_flush(struct radv_cmd_buffer *cmd_buffer)
 	if (!cmd_buffer->state.flush_bits)
 		return;
 
-	enum chip_class chip_class = cmd_buffer->device->physical_device->rad_info.chip_class;
 	radeon_check_space(cmd_buffer->device->ws, cmd_buffer->cs, 128);
 
-	uint32_t *ptr = NULL;
-	uint64_t va = 0;
-	if (chip_class == GFX9) {
-		va = radv_buffer_get_va(cmd_buffer->gfx9_fence_bo) + cmd_buffer->gfx9_fence_offset;
-		ptr = &cmd_buffer->gfx9_fence_idx;
-	}
 	si_cs_emit_cache_flush(cmd_buffer->cs,
 	                       cmd_buffer->device->physical_device->rad_info.chip_class,
-			       ptr, va,
+			       &cmd_buffer->gfx9_fence_idx,
+			       cmd_buffer->gfx9_fence_va,
 	                       radv_cmd_buffer_uses_mec(cmd_buffer),
 	                       cmd_buffer->state.flush_bits,
 			       cmd_buffer->gfx9_eop_bug_va);
@@ -992,6 +986,11 @@ si_emit_cache_flush(struct radv_cmd_buffer *cmd_buffer)
 		radv_cmd_buffer_trace_emit(cmd_buffer);
 
 	cmd_buffer->state.flush_bits = 0;
+
+	/* If the driver used a compute shader for resetting a query pool, it
+	 * should be finished at this point.
+	 */
+	cmd_buffer->pending_reset_query = false;
 }
 
 /* sets the CP predication state using a boolean stored at va */

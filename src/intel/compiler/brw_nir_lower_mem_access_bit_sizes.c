@@ -222,7 +222,7 @@ lower_mem_store_bit_size(nir_builder *b, nir_intrinsic_instr *intrin)
       const unsigned store_src_comps = store_bytes / (bit_size / 8);
       assert(store_first_src_comp + store_src_comps <= num_components);
 
-      unsigned src_swiz[4];
+      unsigned src_swiz[4] = { 0, };
       for (unsigned i = 0; i < store_src_comps; i++)
          src_swiz[i] = store_first_src_comp + i;
       nir_ssa_def *store_value =
@@ -257,12 +257,14 @@ lower_mem_access_bit_sizes_impl(nir_function_impl *impl)
 
          nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
          switch (intrin->intrinsic) {
+         case nir_intrinsic_load_global:
          case nir_intrinsic_load_ssbo:
          case nir_intrinsic_load_shared:
             if (lower_mem_load_bit_size(&b, intrin))
                progress = true;
             break;
 
+         case nir_intrinsic_store_global:
          case nir_intrinsic_store_ssbo:
          case nir_intrinsic_store_shared:
             if (lower_mem_store_bit_size(&b, intrin))

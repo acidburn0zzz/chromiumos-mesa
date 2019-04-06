@@ -58,9 +58,9 @@ option(
   type : 'array',
   value : ['auto'],
   choices : [
-    '', 'auto', 'pl111', 'radeonsi', 'r300', 'r600', 'nouveau', 'freedreno',
-    'swrast', 'v3d', 'vc4', 'etnaviv', 'imx', 'tegra', 'i915', 'svga', 'virgl',
-    'swr',
+    '', 'auto', 'kmsro', 'radeonsi', 'r300', 'r600', 'nouveau', 'freedreno',
+    'swrast', 'v3d', 'vc4', 'etnaviv', 'tegra', 'i915', 'svga', 'virgl',
+    'swr', 'panfrost', 'iris'
   ],
   description : 'List of gallium drivers to build. If this is set to auto all drivers applicable to the target OS/architecture will be built'
 )
@@ -166,6 +166,12 @@ option(
   type : 'string',
   value : '',
   description : 'Location relative to prefix to put vulkan icds on install. Default: $datadir/vulkan/icd.d'
+)
+option(
+  'vulkan-overlay-layer',
+  type : 'boolean',
+  value : false,
+  description : 'Whether to build the vulkan overlay layer'
 )
 option(
   'shared-glapi',
@@ -301,7 +307,7 @@ option(
   'tools',
   type : 'array',
   value : [],
-  choices : ['freedreno', 'glsl', 'intel', 'intel-ui', 'nir', 'nouveau', 'xvmc', 'all'],
+  choices : ['etnaviv', 'freedreno', 'glsl', 'intel', 'intel-ui', 'nir', 'nouveau', 'xvmc', 'all'],
   description : 'List of tools to build. (Note: `intel-ui` selects `intel`)',
 )
 option(
@@ -317,4 +323,10 @@ option(
   value : 'auto',
   choices : ['auto', 'true', 'false'],
   description : 'Enable VK_EXT_acquire_xlib_display.'
+)
+option(
+  'glx-direct',
+  type : 'boolean',
+  value : true,
+  description : 'Enable direct rendering in GLX and EGL for DRI',
 )

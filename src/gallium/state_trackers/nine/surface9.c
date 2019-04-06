@@ -272,7 +272,7 @@ NineSurface9_CreatePipeSurfaces( struct NineSurface9 *This )
     assert(This->surface[1]);
 }
 
-#ifdef DEBUG
+#if defined(DEBUG) || !defined(NDEBUG)
 void
 NineSurface9_Dump( struct NineSurface9 *This )
 {
@@ -300,7 +300,7 @@ NineSurface9_Dump( struct NineSurface9 *This )
         NineUnknown_Release(NineUnknown(tex));
     }
 }
-#endif /* DEBUG */
+#endif /* DEBUG || !NDEBUG */
 
 HRESULT NINE_WINAPI
 NineSurface9_GetContainer( struct NineSurface9 *This,
@@ -660,7 +660,7 @@ NineSurface9_CopyMemToDefault( struct NineSurface9 *This,
 
     nine_context_box_upload(This->base.base.device,
                             &From->pending_uploads_counter,
-                            (struct NineUnknown *)This,
+                            (struct NineUnknown *)From,
                             r_dst,
                             This->level,
                             &dst_box,
@@ -668,6 +668,19 @@ NineSurface9_CopyMemToDefault( struct NineSurface9 *This,
                             From->data, From->stride,
                             0, /* depth = 1 */
                             &src_box);
+    if (From->texture == D3DRTYPE_TEXTURE) {
+        struct NineTexture9 *tex =
+            NineTexture9(From->base.base.container);
+        /* D3DPOOL_SYSTEMMEM with buffer content passed
+         * from the user: execute the upload right now.
+         * It is possible it is enough to delay upload
+         * until the surface refcount is 0, but the
+         * bind refcount may not be 0, and thus the dtor
+         * is not executed (and doesn't trigger the
+         * pending_uploads_counter check). */
+        if (!tex->managed_buffer)
+            nine_csmt_process(This->base.base.device);
+    }
 
     if (This->data_conversion)
         (void) util_format_translate(This->format_conversion,

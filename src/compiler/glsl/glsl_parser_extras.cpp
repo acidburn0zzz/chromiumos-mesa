@@ -706,6 +706,7 @@ static const _mesa_glsl_extension _mesa_glsl_supported_extensions[] = {
    EXT(AMD_gpu_shader_int64),
    EXT(AMD_shader_stencil_export),
    EXT(AMD_shader_trinary_minmax),
+   EXT(AMD_texture_texture4),
    EXT(AMD_vertex_shader_layer),
    EXT(AMD_vertex_shader_viewport_index),
    EXT(ANDROID_extension_pack_es31a),
@@ -730,7 +731,6 @@ static const _mesa_glsl_extension _mesa_glsl_supported_extensions[] = {
    EXT_AEP(EXT_texture_buffer),
    EXT_AEP(EXT_texture_cube_map_array),
    EXT(INTEL_conservative_rasterization),
-   EXT(INTEL_fragment_shader_ordering),
    EXT(INTEL_shader_atomic_float_minmax),
    EXT(MESA_shader_integer_functions),
    EXT(NV_fragment_shader_interlock),
@@ -2090,14 +2090,6 @@ _mesa_glsl_compile_shader(struct gl_context *ctx, struct gl_shader *shader,
        */
       if (shader->CompileStatus == COMPILE_SUCCESS)
          return;
-
-      if (shader->CompileStatus == COMPILED_NO_OPTS) {
-         opt_shader_and_create_symbol_table(ctx,
-                                            NULL, /* source_symbols */
-                                            shader);
-         shader->CompileStatus = COMPILE_SUCCESS;
-         return;
-      }
    }
 
    struct _mesa_glsl_parse_state *state =
@@ -2153,13 +2145,7 @@ _mesa_glsl_compile_shader(struct gl_context *ctx, struct gl_shader *shader,
    if (!state->error && !shader->ir->is_empty()) {
       assign_subroutine_indexes(state);
       lower_subroutine(shader->ir, state);
-
-      if (!ctx->Cache || force_recompile)
-         opt_shader_and_create_symbol_table(ctx, state->symbols, shader);
-      else {
-         reparent_ir(shader->ir, shader->ir);
-         shader->CompileStatus = COMPILED_NO_OPTS;
-      }
+      opt_shader_and_create_symbol_table(ctx, state->symbols, shader);
    }
 
    if (!force_recompile) {
@@ -2169,6 +2155,15 @@ _mesa_glsl_compile_shader(struct gl_context *ctx, struct gl_shader *shader,
 
    delete state->symbols;
    ralloc_free(state);
+
+   if (ctx->Cache && shader->CompileStatus == COMPILE_SUCCESS) {
+      char sha1_buf[41];
+      disk_cache_put_key(ctx->Cache, shader->sha1);
+      if (ctx->_Shader->Flags & GLSL_CACHE_INFO) {
+         _mesa_sha1_format(sha1_buf, shader->sha1);
+         fprintf(stderr, "marking shader: %s\n", sha1_buf);
+      }
+   }
 }
 
 } /* extern "C" */

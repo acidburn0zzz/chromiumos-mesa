@@ -72,10 +72,8 @@ foreach x : [['gen_ar_event.hpp', '--gen_event_hpp'],
     command : [
       prog_python,
       '@INPUT0@',
-      '--proto', '@INPUT1@',
-      '--proto_private', '@INPUT2@',
-      '--output', '@OUTPUT@',
-      x[1],
+      '--proto', '@INPUT1@', '@INPUT2@',
+      '--output-dir', meson.current_build_dir(),
     ],
     depend_files : files(
       join_paths('templates', x[0]),
