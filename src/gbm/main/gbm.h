@@ -238,6 +238,16 @@ enum gbm_bo_flags {
    GBM_BO_USE_CAMERA_WRITE = 0,
    GBM_BO_USE_CAMERA_READ = 0,
    GBM_BO_USE_HW_VIDEO_DECODER = 0,
+
+   /* These are also minigbm flags that aren't implemented in mesagbm. In at
+    * least one place
+    * (platform/tast-tests/helpers/local/graphics.GBM.gbmtest.cc) they are
+    * used in a switch statement, so they can't all be zero. Instead, set them
+    * to the minigbm values. [OVER-9416] */
+   GBM_BO_USE_SW_READ_OFTEN = (1 << 9),
+   GBM_BO_USE_SW_READ_RARELY = (1 << 10),
+   GBM_BO_USE_SW_WRITE_OFTEN = (1 << 11),
+   GBM_BO_USE_SW_WRITE_RARELY = (1 << 12),
 };
 
 int
