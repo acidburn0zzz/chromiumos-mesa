@@ -517,6 +517,10 @@ static struct pipe_resource *virgl_resource_from_handle(struct pipe_screen *scre
    pipe_reference_init(&res->u.b.reference, 1);
    virgl_resource_layout(&res->u.b, &res->metadata);
 
+   /* Neverware: update the metadata so that gbm_bo_map returns the correct
+    * stride value. */
+   virgl_resource_layout(&res->u.b, &res->metadata);
+
    res->hw_res = vs->vws->resource_create_from_handle(vs->vws, whandle);
    if (!res->hw_res) {
       FREE(res);
