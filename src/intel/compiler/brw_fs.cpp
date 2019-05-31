@@ -221,16 +221,6 @@ fs_inst::is_send_from_grf() const
    case FS_OPCODE_INTERPOLATE_AT_SAMPLE:
    case FS_OPCODE_INTERPOLATE_AT_SHARED_OFFSET:
    case FS_OPCODE_INTERPOLATE_AT_PER_SLOT_OFFSET:
-   case SHADER_OPCODE_UNTYPED_ATOMIC:
-   case SHADER_OPCODE_UNTYPED_ATOMIC_FLOAT:
-   case SHADER_OPCODE_UNTYPED_SURFACE_READ:
-   case SHADER_OPCODE_UNTYPED_SURFACE_WRITE:
-   case SHADER_OPCODE_BYTE_SCATTERED_WRITE:
-   case SHADER_OPCODE_BYTE_SCATTERED_READ:
-   case SHADER_OPCODE_TYPED_ATOMIC:
-   case SHADER_OPCODE_TYPED_SURFACE_READ:
-   case SHADER_OPCODE_TYPED_SURFACE_WRITE:
-   case SHADER_OPCODE_IMAGE_SIZE:
    case SHADER_OPCODE_URB_WRITE_SIMD8:
    case SHADER_OPCODE_URB_WRITE_SIMD8_PER_SLOT:
    case SHADER_OPCODE_URB_WRITE_SIMD8_MASKED:
@@ -266,7 +256,6 @@ fs_inst::is_control_source(unsigned arg) const
    case FS_OPCODE_INTERPOLATE_AT_SAMPLE:
    case FS_OPCODE_INTERPOLATE_AT_SHARED_OFFSET:
    case FS_OPCODE_INTERPOLATE_AT_PER_SLOT_OFFSET:
-   case SHADER_OPCODE_IMAGE_SIZE:
    case SHADER_OPCODE_GET_BUFFER_SIZE:
       return arg == 1;
 
@@ -288,15 +277,6 @@ fs_inst::is_control_source(unsigned arg) const
    case SHADER_OPCODE_TG4:
    case SHADER_OPCODE_TG4_OFFSET:
    case SHADER_OPCODE_SAMPLEINFO:
-   case SHADER_OPCODE_UNTYPED_ATOMIC:
-   case SHADER_OPCODE_UNTYPED_ATOMIC_FLOAT:
-   case SHADER_OPCODE_UNTYPED_SURFACE_READ:
-   case SHADER_OPCODE_UNTYPED_SURFACE_WRITE:
-   case SHADER_OPCODE_BYTE_SCATTERED_READ:
-   case SHADER_OPCODE_BYTE_SCATTERED_WRITE:
-   case SHADER_OPCODE_TYPED_ATOMIC:
-   case SHADER_OPCODE_TYPED_SURFACE_READ:
-   case SHADER_OPCODE_TYPED_SURFACE_WRITE:
       return arg == 1 || arg == 2;
 
    case SHADER_OPCODE_SEND:
@@ -822,26 +802,26 @@ fs_inst::components_read(unsigned i) const
 
    case SHADER_OPCODE_UNTYPED_SURFACE_READ_LOGICAL:
    case SHADER_OPCODE_TYPED_SURFACE_READ_LOGICAL:
-      assert(src[3].file == IMM);
+      assert(src[SURFACE_LOGICAL_SRC_IMM_DIMS].file == IMM);
       /* Surface coordinates. */
-      if (i == 0)
-         return src[3].ud;
+      if (i == SURFACE_LOGICAL_SRC_ADDRESS)
+         return src[SURFACE_LOGICAL_SRC_IMM_DIMS].ud;
       /* Surface operation source (ignored for reads). */
-      else if (i == 1)
+      else if (i == SURFACE_LOGICAL_SRC_DATA)
          return 0;
       else
          return 1;
 
    case SHADER_OPCODE_UNTYPED_SURFACE_WRITE_LOGICAL:
    case SHADER_OPCODE_TYPED_SURFACE_WRITE_LOGICAL:
-      assert(src[3].file == IMM &&
-             src[4].file == IMM);
+      assert(src[SURFACE_LOGICAL_SRC_IMM_DIMS].file == IMM &&
+             src[SURFACE_LOGICAL_SRC_IMM_ARG].file == IMM);
       /* Surface coordinates. */
-      if (i == 0)
-         return src[3].ud;
+      if (i == SURFACE_LOGICAL_SRC_ADDRESS)
+         return src[SURFACE_LOGICAL_SRC_IMM_DIMS].ud;
       /* Surface operation source. */
-      else if (i == 1)
-         return src[4].ud;
+      else if (i == SURFACE_LOGICAL_SRC_DATA)
+         return src[SURFACE_LOGICAL_SRC_IMM_ARG].ud;
       else
          return 1;
 
@@ -890,28 +870,28 @@ fs_inst::components_read(unsigned i) const
        * src[3] IMM with always 1 dimension.
        * src[4] IMM with arg bitsize for scattered read/write 8, 16, 32
        */
-      assert(src[3].file == IMM &&
-             src[4].file == IMM);
-      return i == 1 ? 0 : 1;
+      assert(src[SURFACE_LOGICAL_SRC_IMM_DIMS].file == IMM &&
+             src[SURFACE_LOGICAL_SRC_IMM_ARG].file == IMM);
+      return i == SURFACE_LOGICAL_SRC_DATA ? 0 : 1;
 
    case SHADER_OPCODE_BYTE_SCATTERED_WRITE_LOGICAL:
-      assert(src[3].file == IMM &&
-             src[4].file == IMM);
+      assert(src[SURFACE_LOGICAL_SRC_IMM_DIMS].file == IMM &&
+             src[SURFACE_LOGICAL_SRC_IMM_ARG].file == IMM);
       return 1;
 
    case SHADER_OPCODE_UNTYPED_ATOMIC_LOGICAL:
    case SHADER_OPCODE_TYPED_ATOMIC_LOGICAL: {
-      assert(src[3].file == IMM &&
-             src[4].file == IMM);
-      const unsigned op = src[4].ud;
+      assert(src[SURFACE_LOGICAL_SRC_IMM_DIMS].file == IMM &&
+             src[SURFACE_LOGICAL_SRC_IMM_ARG].file == IMM);
+      const unsigned op = src[SURFACE_LOGICAL_SRC_IMM_ARG].ud;
       /* Surface coordinates. */
-      if (i == 0)
-         return src[3].ud;
+      if (i == SURFACE_LOGICAL_SRC_ADDRESS)
+         return src[SURFACE_LOGICAL_SRC_IMM_DIMS].ud;
       /* Surface operation source. */
-      else if (i == 1 && op == BRW_AOP_CMPWR)
+      else if (i == SURFACE_LOGICAL_SRC_DATA && op == BRW_AOP_CMPWR)
          return 2;
-      else if (i == 1 && (op == BRW_AOP_INC || op == BRW_AOP_DEC ||
-                          op == BRW_AOP_PREDEC))
+      else if (i == SURFACE_LOGICAL_SRC_DATA &&
+               (op == BRW_AOP_INC || op == BRW_AOP_DEC || op == BRW_AOP_PREDEC))
          return 0;
       else
          return 1;
@@ -920,14 +900,14 @@ fs_inst::components_read(unsigned i) const
       return (i == 0 ? 2 : 1);
 
    case SHADER_OPCODE_UNTYPED_ATOMIC_FLOAT_LOGICAL: {
-      assert(src[3].file == IMM &&
-             src[4].file == IMM);
-      const unsigned op = src[4].ud;
+      assert(src[SURFACE_LOGICAL_SRC_IMM_DIMS].file == IMM &&
+             src[SURFACE_LOGICAL_SRC_IMM_ARG].file == IMM);
+      const unsigned op = src[SURFACE_LOGICAL_SRC_IMM_ARG].ud;
       /* Surface coordinates. */
-      if (i == 0)
-         return src[3].ud;
+      if (i == SURFACE_LOGICAL_SRC_ADDRESS)
+         return src[SURFACE_LOGICAL_SRC_IMM_DIMS].ud;
       /* Surface operation source. */
-      else if (i == 1 && op == BRW_AOP_FCMPWR)
+      else if (i == SURFACE_LOGICAL_SRC_DATA && op == BRW_AOP_FCMPWR)
          return 2;
       else
          return 1;
@@ -967,18 +947,8 @@ fs_inst::size_read(int arg) const
    case SHADER_OPCODE_URB_WRITE_SIMD8_MASKED_PER_SLOT:
    case SHADER_OPCODE_URB_READ_SIMD8:
    case SHADER_OPCODE_URB_READ_SIMD8_PER_SLOT:
-   case SHADER_OPCODE_UNTYPED_ATOMIC:
-   case SHADER_OPCODE_UNTYPED_ATOMIC_FLOAT:
-   case SHADER_OPCODE_UNTYPED_SURFACE_READ:
-   case SHADER_OPCODE_UNTYPED_SURFACE_WRITE:
-   case SHADER_OPCODE_TYPED_ATOMIC:
-   case SHADER_OPCODE_TYPED_SURFACE_READ:
-   case SHADER_OPCODE_TYPED_SURFACE_WRITE:
-   case SHADER_OPCODE_IMAGE_SIZE:
    case FS_OPCODE_INTERPOLATE_AT_SAMPLE:
    case FS_OPCODE_INTERPOLATE_AT_SHARED_OFFSET:
-   case SHADER_OPCODE_BYTE_SCATTERED_WRITE:
-   case SHADER_OPCODE_BYTE_SCATTERED_READ:
       if (arg == 0)
          return mlen * REG_SIZE;
       break;
@@ -2626,7 +2596,16 @@ fs_visitor::opt_algebraic()
       case BRW_OPCODE_OR:
          if (inst->src[0].equals(inst->src[1]) ||
              inst->src[1].is_zero()) {
-            inst->opcode = BRW_OPCODE_MOV;
+            /* On Gen8+, the OR instruction can have a source modifier that
+             * performs logical not on the operand.  Cases of 'OR r0, ~r1, 0'
+             * or 'OR r0, ~r1, ~r1' should become a NOT instead of a MOV.
+             */
+            if (inst->src[0].negate) {
+               inst->opcode = BRW_OPCODE_NOT;
+               inst->src[0].negate = false;
+            } else {
+               inst->opcode = BRW_OPCODE_MOV;
+            }
             inst->src[1] = reg_undef;
             progress = true;
             break;
@@ -4670,7 +4649,7 @@ sampler_msg_type(const gen_device_info *devinfo,
       return shadow_compare ? GEN9_SAMPLER_MESSAGE_SAMPLE_C_LZ :
                               GEN9_SAMPLER_MESSAGE_SAMPLE_LZ;
    case SHADER_OPCODE_TXS:
-   case SHADER_OPCODE_IMAGE_SIZE:
+   case SHADER_OPCODE_IMAGE_SIZE_LOGICAL:
       return GEN5_SAMPLER_MESSAGE_SAMPLE_RESINFO;
    case SHADER_OPCODE_TXD:
       assert(!shadow_compare || devinfo->gen >= 8 || devinfo->is_haswell);
@@ -4837,7 +4816,7 @@ lower_sampler_logical_send_gen7(const fs_builder &bld, fs_inst *inst, opcode op,
       bld.MOV(retype(sources[length], BRW_REGISTER_TYPE_UD), lod);
       length++;
       break;
-   case SHADER_OPCODE_IMAGE_SIZE:
+   case SHADER_OPCODE_IMAGE_SIZE_LOGICAL:
       /* We need an LOD; just use 0 */
       bld.MOV(retype(sources[length], BRW_REGISTER_TYPE_UD), brw_imm_ud(0));
       length++;
@@ -4969,7 +4948,7 @@ lower_sampler_logical_send_gen7(const fs_builder &bld, fs_inst *inst, opcode op,
    case SHADER_OPCODE_TG4_OFFSET:
       base_binding_table_index = prog_data->binding_table.gather_texture_start;
       break;
-   case SHADER_OPCODE_IMAGE_SIZE:
+   case SHADER_OPCODE_IMAGE_SIZE_LOGICAL:
       base_binding_table_index = prog_data->binding_table.image_start;
       break;
    default:
@@ -5090,16 +5069,16 @@ lower_surface_logical_send(const fs_builder &bld, fs_inst *inst)
    const gen_device_info *devinfo = bld.shader->devinfo;
 
    /* Get the logical send arguments. */
-   const fs_reg &addr = inst->src[0];
-   const fs_reg &src = inst->src[1];
-   const fs_reg &surface = inst->src[2];
-   const UNUSED fs_reg &dims = inst->src[3];
-   const fs_reg &arg = inst->src[4];
+   const fs_reg &addr = inst->src[SURFACE_LOGICAL_SRC_ADDRESS];
+   const fs_reg &src = inst->src[SURFACE_LOGICAL_SRC_DATA];
+   const fs_reg &surface = inst->src[SURFACE_LOGICAL_SRC_SURFACE];
+   const UNUSED fs_reg &dims = inst->src[SURFACE_LOGICAL_SRC_IMM_DIMS];
+   const fs_reg &arg = inst->src[SURFACE_LOGICAL_SRC_IMM_ARG];
    assert(arg.file == IMM);
 
    /* Calculate the total number of components of the payload. */
-   const unsigned addr_sz = inst->components_read(0);
-   const unsigned src_sz = inst->components_read(1);
+   const unsigned addr_sz = inst->components_read(SURFACE_LOGICAL_SRC_ADDRESS);
+   const unsigned src_sz = inst->components_read(SURFACE_LOGICAL_SRC_DATA);
 
    const bool is_typed_access =
       inst->opcode == SHADER_OPCODE_TYPED_SURFACE_READ_LOGICAL ||
@@ -5538,7 +5517,8 @@ fs_visitor::lower_logical_sends()
          break;
 
       case SHADER_OPCODE_IMAGE_SIZE_LOGICAL:
-         lower_sampler_logical_send(ibld, inst, SHADER_OPCODE_IMAGE_SIZE);
+         lower_sampler_logical_send(ibld, inst,
+                                    SHADER_OPCODE_IMAGE_SIZE_LOGICAL);
          break;
 
       case FS_OPCODE_TXB_LOGICAL:

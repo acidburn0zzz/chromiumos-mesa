@@ -1,6 +1,6 @@
 /*
- * Copyright (C) 2018 Rob Clark <robclark@freedesktop.org>
- * Copyright © 2018 Google, Inc.
+ * Copyright (C) 2019 Alyssa Rosenzweig
+ * Copyright (C) 2014-2017 Broadcom
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -21,16 +21,47 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  *
- * Authors:
- *    Rob Clark <robclark@freedesktop.org>
  */
 
-#ifndef FD6_RESOURCE_H_
-#define FD6_RESOURCE_H_
+#ifndef __PAN_JOB_H__
+#define __PAN_JOB_H__
 
-#include "freedreno_resource.h"
+/* Used as a hash table key */
 
-uint32_t fd6_fill_ubwc_buffer_sizes(struct fd_resource *rsc);
-uint32_t fd6_setup_slices(struct fd_resource *rsc);
+struct panfrost_job_key {
+        struct pipe_surface *cbufs[4];
+        struct pipe_surface *zsbuf;
+};
 
-#endif /* FD6_RESOURCE_H_ */
+/* A panfrost_job corresponds to a bound FBO we're rendering to,
+ * collecting over multiple draws. */
+
+struct panfrost_job {
+        struct panfrost_context *ctx;
+        struct panfrost_job_key key;
+
+        /* Buffers cleared (PIPE_CLEAR_* bitmask) */
+        unsigned clear;
+
+        /* Packed clear values */
+        uint32_t clear_color;
+        float clear_depth;
+        unsigned clear_stencil;
+};
+
+/* Functions for managing the above */
+
+struct panfrost_job *
+panfrost_create_job(struct panfrost_context *ctx);
+
+struct panfrost_job *
+panfrost_get_job(struct panfrost_context *ctx,
+                struct pipe_surface **cbufs, struct pipe_surface *zsbuf);
+
+struct panfrost_job *
+panfrost_get_job_for_fbo(struct panfrost_context *ctx);
+
+void
+panfrost_job_init(struct panfrost_context *ctx);
+
+#endif

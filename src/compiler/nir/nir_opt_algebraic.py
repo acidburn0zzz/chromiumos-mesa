@@ -127,6 +127,7 @@ optimizations = [
    (('flrp@32', a, b, c), ('fadd', ('fmul', c, ('fsub', b, a)), a), 'options->lower_flrp32'),
    (('flrp@64', a, b, c), ('fadd', ('fmul', c, ('fsub', b, a)), a), 'options->lower_flrp64'),
    (('ffloor', a), ('fsub', a, ('ffract', a)), 'options->lower_ffloor'),
+   (('fadd', a, ('fneg', ('ffract', a))), ('ffloor', a), '!options->lower_ffloor'),
    (('ffract', a), ('fsub', a, ('ffloor', a)), 'options->lower_ffract'),
    (('fceil', a), ('fneg', ('ffloor', ('fneg', a))), 'options->lower_fceil'),
    (('~fadd', ('fmul', a, ('fadd', 1.0, ('fneg', ('b2f', 'c@1')))), ('fmul', b, ('b2f', c))), ('bcsel', c, b, a), 'options->lower_flrp32'),
@@ -298,6 +299,7 @@ optimizations = [
    (('~bcsel', ('flt', a, b), b, a), ('fmax', a, b)),
    (('~bcsel', ('fge', a, b), b, a), ('fmin', a, b)),
    (('~bcsel', ('fge', b, a), b, a), ('fmax', a, b)),
+   (('bcsel', ('i2b', a), b, c), ('bcsel', ('ine', a, 0), b, c)),
    (('bcsel', ('inot', a), b, c), ('bcsel', a, c, b)),
    (('bcsel', a, ('bcsel', a, b, c), d), ('bcsel', a, b, d)),
    (('bcsel', a, b, ('bcsel', a, c, d)), ('bcsel', a, b, d)),
@@ -335,6 +337,7 @@ optimizations = [
    (('~fmin', ('fmax', a, 0.0), 1.0), ('fsat', a), '!options->lower_fsat'),
    (('~fmax', ('fmin', a, 1.0), 0.0), ('fsat', a), '!options->lower_fsat'),
    (('fsat', ('fsign', a)), ('b2f', ('flt', 0.0, a))),
+   (('fsat', ('b2f', a)), ('b2f', a)),
    (('fsat', a), ('fmin', ('fmax', a, 0.0), 1.0), 'options->lower_fsat'),
    (('fsat', ('fsat', a)), ('fsat', a)),
    (('fmin', ('fmax', ('fmin', ('fmax', a, b), c), b), c), ('fmin', ('fmax', a, b), c)),
@@ -519,6 +522,8 @@ optimizations = [
    (('fsqrt', a), ('frcp', ('frsq', a)), 'options->lower_fsqrt'),
    (('~frcp', ('frsq', a)), ('fsqrt', a), '!options->lower_fsqrt'),
    # Boolean simplifications
+   (('i2b32(is_used_by_if)', a), ('ine32', a, 0)),
+   (('i2b1(is_used_by_if)', a), ('ine', a, 0)),
    (('ieq', 'a@bool', True), a),
    (('ine(is_not_used_by_if)', 'a@bool', True), ('inot', a)),
    (('ine', 'a@bool', False), a),
@@ -960,6 +965,8 @@ late_optimizations = [
    # we do these late so that we don't get in the way of creating ffmas
    (('fmin', ('fadd(is_used_once)', '#c', a), ('fadd(is_used_once)', '#c', b)), ('fadd', c, ('fmin', a, b))),
    (('fmax', ('fadd(is_used_once)', '#c', a), ('fadd(is_used_once)', '#c', b)), ('fadd', c, ('fmax', a, b))),
+
+   (('bcsel', 'a@bool', 0, ('b2f32', ('inot', 'b@bool'))), ('b2f32', ('inot', ('ior', a, b)))),
 ]
 
 print(nir_algebraic.AlgebraicPass("nir_opt_algebraic", optimizations).render())

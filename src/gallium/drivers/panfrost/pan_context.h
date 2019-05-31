@@ -30,6 +30,7 @@
 #include <sys/mman.h>
 #include <assert.h>
 #include "pan_resource.h"
+#include "pan_job.h"
 
 #include "pipe/p_compiler.h"
 #include "pipe/p_config.h"
@@ -39,6 +40,7 @@
 #include "pipe/p_screen.h"
 #include "pipe/p_state.h"
 #include "util/u_blitter.h"
+#include "util/hash_table.h"
 
 /* Forward declare to avoid extra header dep */
 struct prim_convert_context;
@@ -95,6 +97,10 @@ struct panfrost_context {
         /* Gallium context */
         struct pipe_context base;
 
+        /* Bound job and map of panfrost_job_key to jobs */
+        struct panfrost_job *job;
+        struct hash_table *jobs;
+
         /* Bit mask for supported PIPE_DRAW for this hardware */
         unsigned draw_modes;
 
@@ -114,13 +120,6 @@ struct panfrost_context {
         struct panfrost_memory misc_0;
         struct panfrost_memory misc_1;
         struct panfrost_memory depth_stencil_buffer;
-
-        struct {
-                unsigned buffers;
-                const union pipe_color_union *color;
-                double depth;
-                unsigned stencil;
-        } last_clear;
 
         struct panfrost_query *occlusion_query;
 
@@ -167,9 +166,6 @@ struct panfrost_context {
 
         /* Per-draw Dirty flags are setup like any other driver */
         int dirty;
-
-        /* Per frame dirty flag - whether there was a clear. If not, we need to do a partial update, maybe */
-        bool frame_cleared;
 
         unsigned vertex_count;
 

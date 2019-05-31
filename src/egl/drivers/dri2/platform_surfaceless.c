@@ -254,8 +254,6 @@ static const __DRIswrastLoaderExtension swrast_loader_extension = {
    .getImage        = NULL,
 };
 
-#define DRM_RENDER_DEV_NAME  "%s/renderD%d"
-
 static const __DRIextension *image_loader_extensions[] = {
    &image_loader_extension.base,
    &image_lookup_extension.base,
@@ -274,73 +272,91 @@ static const __DRIextension *swrast_loader_extensions[] = {
 static bool
 surfaceless_probe_device(_EGLDisplay *disp, bool swrast)
 {
+#define MAX_DRM_DEVICES 64
+   const unsigned node_type = swrast ? DRM_NODE_PRIMARY : DRM_NODE_RENDER;
    struct dri2_egl_display *dri2_dpy = disp->DriverData;
-   const int limit = 64;
-   const int base = 128;
-   int fd;
-   int i;
+   drmDevicePtr device, devices[MAX_DRM_DEVICES] = { NULL };
+   int i, num_devices;
 
-   /* Attempt to find DRM device. */
-   for (i = 0; i < limit; ++i) {
-      char *card_path;
-      if (asprintf(&card_path, DRM_RENDER_DEV_NAME, DRM_DIR_NAME, base + i) < 0)
+   num_devices = drmGetDevices2(0, devices, ARRAY_SIZE(devices));
+   if (num_devices < 0)
+      return false;
+
+   for (i = 0; i < num_devices; ++i) {
+      device = devices[i];
+
+      if (!(device->available_nodes & (1 << node_type)))
          continue;
 
-      fd = loader_open_device(card_path);
-      free(card_path);
-      if (fd < 0)
+      dri2_dpy->fd = loader_open_device(device->nodes[node_type]);
+      if (dri2_dpy->fd < 0)
          continue;
 
+      disp->Device = _eglAddDevice(dri2_dpy->fd, swrast);
+      if (!disp->Device) {
+         close(dri2_dpy->fd);
+         dri2_dpy->fd = -1;
+         continue;
+      }
+
+      char *driver_name = loader_get_driver_for_fd(dri2_dpy->fd);
       if (swrast) {
-         dri2_dpy->driver_name = strdup("kms_swrast");
-         dri2_dpy->loader_extensions = swrast_loader_extensions;
+         /* Use kms swrast only with vgem / virtio_gpu.
+          * virtio-gpu fallbacks to software rendering when 3D features
+          * are unavailable since 6c5ab, and kms_swrast is more
+          * feature complete than swrast.
+          */
+         if (strcmp(driver_name, "vgem") == 0 ||
+             strcmp(driver_name, "virtio_gpu") == 0)
+            dri2_dpy->driver_name = strdup("kms_swrast");
+         free(driver_name);
       } else {
-         dri2_dpy->driver_name = loader_get_driver_for_fd(fd);
-         dri2_dpy->loader_extensions = image_loader_extensions;
-      }
-      if (!dri2_dpy->driver_name) {
-         close(fd);
-         continue;
+         /* Use the given hardware driver */
+         dri2_dpy->driver_name = driver_name;
       }
 
-      dri2_dpy->fd = fd;
-      if (dri2_load_driver_dri3(disp)) {
-         _EGLDevice *dev = _eglAddDevice(dri2_dpy->fd, swrast);
-         if (!dev) {
-            dlclose(dri2_dpy->driver);
-            _eglLog(_EGL_WARNING, "DRI2: failed to find EGLDevice");
-            continue;
-         }
-         disp->Device = dev;
-         return true;
-      }
-
-      close(fd);
-      dri2_dpy->fd = -1;
-      free(dri2_dpy->driver_name);
-      dri2_dpy->driver_name = NULL;
-      dri2_dpy->loader_extensions = NULL;
-   }
-
-   /* No DRM device, so attempt to fall back to software path w/o DRM. */
-   if (swrast) {
-      _eglLog(_EGL_DEBUG, "Falling back to surfaceless swrast without DRM.");
-      dri2_dpy->fd = -1;
-      dri2_dpy->driver_name = strdup("swrast");
-      if (!dri2_dpy->driver_name) {
-         return false;
-      }
-
-      if (dri2_load_driver_swrast(disp)) {
-         dri2_dpy->loader_extensions = swrast_loader_extensions;
-         return true;
-      }
+      if (dri2_dpy->driver_name && dri2_load_driver_dri3(disp))
+         break;
 
       free(dri2_dpy->driver_name);
       dri2_dpy->driver_name = NULL;
+      close(dri2_dpy->fd);
+      dri2_dpy->fd = -1;
+   }
+   drmFreeDevices(devices, num_devices);
+
+   if (i == num_devices)
+      return false;
+
+   if (swrast)
+      dri2_dpy->loader_extensions = swrast_loader_extensions;
+   else
+      dri2_dpy->loader_extensions = image_loader_extensions;
+
+   return true;
+}
+
+static bool
+surfaceless_probe_device_sw(_EGLDisplay *disp)
+{
+   struct dri2_egl_display *dri2_dpy = disp->DriverData;
+
+   dri2_dpy->fd = -1;
+   disp->Device = _eglAddDevice(dri2_dpy->fd, true);
+   assert(disp->Device);
+
+   dri2_dpy->driver_name = strdup("swrast");
+   if (!dri2_dpy->driver_name)
+      return false;
+
+   if (!dri2_load_driver_swrast(disp)) {
+      free(dri2_dpy->driver_name);
+      dri2_dpy->driver_name = NULL;
+      return false;
    }
 
-   return false;
+   dri2_dpy->loader_extensions = swrast_loader_extensions;
+   return true;
 }
 
 EGLBoolean
@@ -364,9 +380,15 @@ dri2_initialize_surfaceless(_EGLDriver *drv, _EGLDisplay *disp)
                  "No hardware driver found, falling back to software rendering");
    }
 
-   if (!driver_loaded && !surfaceless_probe_device(disp, true)) {
-      err = "DRI2: failed to load driver";
-      goto cleanup;
+   if (!driver_loaded)
+      driver_loaded = surfaceless_probe_device(disp, true);
+
+   if (!driver_loaded) {
+      _eglLog(_EGL_DEBUG, "Falling back to surfaceless swrast without DRM.");
+      if (!surfaceless_probe_device_sw(disp)) {
+         err = "DRI2: failed to load driver";
+         goto cleanup;
+      }
    }
 
    if (!dri2_create_screen(disp)) {
