@@ -261,7 +261,10 @@ static bool
 surfaceless_probe_device(_EGLDisplay *disp, bool swrast)
 {
 #define MAX_DRM_DEVICES 64
-   const unsigned node_type = swrast ? DRM_NODE_PRIMARY : DRM_NODE_RENDER;
+   // Neverware: upstream mesa uses DRM_NODE_PRIMARY here when software
+   // rendering for some unknown reason. This breaks kms-swrast rendering
+   // because the primary node isn't necessarily authenticated. [OVER-9900]
+   const unsigned node_type = DRM_NODE_RENDER;
    struct dri2_egl_display *dri2_dpy = disp->DriverData;
    drmDevicePtr device, devices[MAX_DRM_DEVICES] = { NULL };
    int i, num_devices;
