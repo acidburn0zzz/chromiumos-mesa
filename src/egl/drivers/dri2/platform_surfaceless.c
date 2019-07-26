@@ -291,6 +291,18 @@ surfaceless_probe_device(_EGLDisplay *disp, bool swrast)
       }
 
       char *driver_name = loader_get_driver_for_fd(dri2_dpy->fd);
+
+      /* Neverware [OVER-10149]
+       * Ignore Nouveau cards on systems which have more than one video
+       * card when it shows up first in the devices[] array. This results in
+       * Mesa selecting the Intel card which allows the Chrome graphics stack
+       * to work.
+       */
+      if (strcmp(driver_name, "nouveau") == 0 &&
+          i == 0 &&
+          num_devices > 1)
+         continue;
+
       if (swrast) {
          /* Use kms swrast only with vgem / virtio_gpu.
           * virtio-gpu fallbacks to software rendering when 3D features
