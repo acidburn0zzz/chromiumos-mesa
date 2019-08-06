@@ -36,20 +36,47 @@
 #include "util/u_transfer.h"
 #include "util/u_upload_mgr.h"
 #include "intel/compiler/brw_compiler.h"
+#include "intel/compiler/brw_eu_defines.h"
 #include "iris_context.h"
 #include "iris_defines.h"
+
+static bool
+prim_is_points_or_lines(const struct pipe_draw_info *draw)
+{
+   /* We don't need to worry about adjacency - it can only be used with
+    * geometry shaders, and we don't care about this info when GS is on.
+    */
+   return draw->mode == PIPE_PRIM_POINTS ||
+          draw->mode == PIPE_PRIM_LINES ||
+          draw->mode == PIPE_PRIM_LINE_LOOP ||
+          draw->mode == PIPE_PRIM_LINE_STRIP;
+}
 
 /**
  * Record the current primitive mode and restart information, flagging
  * related packets as dirty if necessary.
+ *
+ * This must be called before updating compiled shaders, because the patch
+ * information informs the TCS key.
  */
 static void
 iris_update_draw_info(struct iris_context *ice,
                       const struct pipe_draw_info *info)
 {
+   struct iris_screen *screen = (struct iris_screen *)ice->ctx.screen;
+   const struct brw_compiler *compiler = screen->compiler;
+
    if (ice->state.prim_mode != info->mode) {
       ice->state.prim_mode = info->mode;
       ice->state.dirty |= IRIS_DIRTY_VF_TOPOLOGY;
+
+
+      /* For XY Clip enables */
+      bool points_or_lines = prim_is_points_or_lines(info);
+      if (points_or_lines != ice->state.prim_is_points_or_lines) {
+         ice->state.prim_is_points_or_lines = points_or_lines;
+         ice->state.dirty |= IRIS_DIRTY_CLIP;
+      }
    }
 
    if (info->mode == PIPE_PRIM_PATCHES &&
@@ -57,13 +84,17 @@ iris_update_draw_info(struct iris_context *ice,
       ice->state.vertices_per_patch = info->vertices_per_patch;
       ice->state.dirty |= IRIS_DIRTY_VF_TOPOLOGY;
 
+      /* 8_PATCH TCS needs this for key->input_vertices */
+      if (compiler->use_tcs_8_patch)
+         ice->state.dirty |= IRIS_DIRTY_UNCOMPILED_TCS;
+
       /* Flag constants dirty for gl_PatchVerticesIn if needed. */
       const struct shader_info *tcs_info =
          iris_get_shader_info(ice, MESA_SHADER_TESS_CTRL);
       if (tcs_info &&
           tcs_info->system_values_read & (1ull << SYSTEM_VALUE_VERTICES_IN)) {
          ice->state.dirty |= IRIS_DIRTY_CONSTANTS_TCS;
-         ice->state.shaders[MESA_SHADER_TESS_CTRL].cbuf0_needs_upload = true;
+         ice->state.shaders[MESA_SHADER_TESS_CTRL].sysvals_need_upload = true;
       }
    }
 
@@ -73,7 +104,15 @@ iris_update_draw_info(struct iris_context *ice,
       ice->state.primitive_restart = info->primitive_restart;
       ice->state.cut_index = info->restart_index;
    }
+}
 
+/**
+ * Update shader draw parameters, flagging VF packets as dirty if necessary.
+ */
+static void
+iris_update_draw_parameters(struct iris_context *ice,
+                            const struct pipe_draw_info *info)
+{
    if (info->indirect) {
       pipe_resource_reference(&ice->draw.draw_params_res,
                               info->indirect->buffer);
@@ -109,6 +148,58 @@ iris_update_draw_info(struct iris_context *ice,
    }
 }
 
+static void
+iris_indirect_draw_vbo(struct iris_context *ice,
+                       const struct pipe_draw_info *dinfo)
+{
+   struct iris_batch *batch = &ice->batches[IRIS_BATCH_RENDER];
+   struct pipe_draw_info info = *dinfo;
+
+   if (info.indirect->indirect_draw_count &&
+       ice->state.predicate == IRIS_PREDICATE_STATE_USE_BIT) {
+      /* Upload MI_PREDICATE_RESULT to GPR15.*/
+      ice->vtbl.load_register_reg64(batch, CS_GPR(15), MI_PREDICATE_RESULT);
+   }
+
+   uint64_t orig_dirty = ice->state.dirty;
+
+   for (int i = 0; i < info.indirect->draw_count; i++) {
+      info.drawid = i;
+
+      iris_batch_maybe_flush(batch, 1500);
+
+      iris_update_draw_parameters(ice, &info);
+
+      ice->vtbl.upload_render_state(ice, batch, &info);
+
+      ice->state.dirty &= ~IRIS_ALL_DIRTY_FOR_RENDER;
+
+      info.indirect->offset += info.indirect->stride;
+   }
+
+   if (info.indirect->indirect_draw_count &&
+       ice->state.predicate == IRIS_PREDICATE_STATE_USE_BIT) {
+      /* Restore MI_PREDICATE_RESULT. */
+      ice->vtbl.load_register_reg64(batch, MI_PREDICATE_RESULT, CS_GPR(15));
+   }
+
+   /* Put this back for post-draw resolves, we'll clear it again after. */
+   ice->state.dirty = orig_dirty;
+}
+
+static void
+iris_simple_draw_vbo(struct iris_context *ice,
+                     const struct pipe_draw_info *draw)
+{
+   struct iris_batch *batch = &ice->batches[IRIS_BATCH_RENDER];
+
+   iris_batch_maybe_flush(batch, 1500);
+
+   iris_update_draw_parameters(ice, draw);
+
+   ice->vtbl.upload_render_state(ice, batch, draw);
+}
+
 /**
  * The pipe->draw_vbo() driver hook.  Performs a draw on the GPU.
  */
@@ -116,6 +207,8 @@ void
 iris_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info)
 {
    struct iris_context *ice = (struct iris_context *) ctx;
+   struct iris_screen *screen = (struct iris_screen*)ice->ctx.screen;
+   const struct gen_device_info *devinfo = &screen->devinfo;
    struct iris_batch *batch = &ice->batches[IRIS_BATCH_RENDER];
 
    if (ice->state.predicate == IRIS_PREDICATE_STATE_DONT_RENDER)
@@ -127,28 +220,35 @@ iris_draw_vbo(struct pipe_context *ctx, const struct pipe_draw_info *info)
    if (unlikely(INTEL_DEBUG & DEBUG_REEMIT))
       ice->state.dirty |= IRIS_ALL_DIRTY_FOR_RENDER & ~IRIS_DIRTY_SO_BUFFERS;
 
-   iris_batch_maybe_flush(batch, 1500);
-
    iris_update_draw_info(ice, info);
+
+   if (devinfo->gen == 9)
+      gen9_toggle_preemption(ice, batch, info);
 
    iris_update_compiled_shaders(ice);
 
-   bool draw_aux_buffer_disabled[BRW_MAX_DRAW_BUFFERS] = { };
-   for (gl_shader_stage stage = 0; stage < MESA_SHADER_COMPUTE; stage++) {
-      if (ice->shaders.prog[stage])
-         iris_predraw_resolve_inputs(ice,batch, &ice->state.shaders[stage],
-                                     draw_aux_buffer_disabled, true);
+   if (ice->state.dirty & IRIS_DIRTY_RENDER_RESOLVES_AND_FLUSHES) {
+      bool draw_aux_buffer_disabled[BRW_MAX_DRAW_BUFFERS] = { };
+      for (gl_shader_stage stage = 0; stage < MESA_SHADER_COMPUTE; stage++) {
+         if (ice->shaders.prog[stage])
+            iris_predraw_resolve_inputs(ice, batch, draw_aux_buffer_disabled,
+                                        stage, true);
+      }
+      iris_predraw_resolve_framebuffer(ice, batch, draw_aux_buffer_disabled);
    }
-   iris_predraw_resolve_framebuffer(ice, batch, draw_aux_buffer_disabled);
 
    iris_binder_reserve_3d(ice);
 
    ice->vtbl.update_surface_base_address(batch, &ice->state.binder);
-   ice->vtbl.upload_render_state(ice, batch, info);
 
-   ice->state.dirty &= ~IRIS_ALL_DIRTY_FOR_RENDER;
+   if (info->indirect)
+      iris_indirect_draw_vbo(ice, info);
+   else
+      iris_simple_draw_vbo(ice, info);
 
    iris_postdraw_update_resolve_tracking(ice, batch);
+
+   ice->state.dirty &= ~IRIS_ALL_DIRTY_FOR_RENDER;
 }
 
 static void
@@ -160,8 +260,9 @@ iris_update_grid_size_resource(struct iris_context *ice,
    struct iris_state_ref *grid_ref = &ice->state.grid_size;
    struct iris_state_ref *state_ref = &ice->state.grid_surf_state;
 
-   // XXX: if the shader doesn't actually care about the grid info,
-   // don't bother uploading the surface?
+   const struct iris_compiled_shader *shader = ice->shaders.prog[MESA_SHADER_COMPUTE];
+   bool grid_needs_surface = shader->bt.used_mask[IRIS_SURFACE_GROUP_CS_WORK_GROUPS];
+   bool grid_updated = false;
 
    if (grid->indirect) {
       pipe_resource_reference(&grid_ref->res, grid->indirect);
@@ -171,16 +272,23 @@ iris_update_grid_size_resource(struct iris_context *ice,
        * re-upload it properly.
        */
       memset(ice->state.last_grid, 0, sizeof(ice->state.last_grid));
-   } else {
-      /* If the size is the same, we don't need to upload anything. */
-      if (memcmp(ice->state.last_grid, grid->grid, sizeof(grid->grid)) == 0)
-         return;
-
+      grid_updated = true;
+   } else if (memcmp(ice->state.last_grid, grid->grid, sizeof(grid->grid)) != 0) {
       memcpy(ice->state.last_grid, grid->grid, sizeof(grid->grid));
-
       u_upload_data(ice->state.dynamic_uploader, 0, sizeof(grid->grid), 4,
                     grid->grid, &grid_ref->offset, &grid_ref->res);
+      grid_updated = true;
    }
+
+   /* If we changed the grid, the old surface state is invalid. */
+   if (grid_updated)
+      pipe_resource_reference(&state_ref->res, NULL);
+
+   /* Skip surface upload if we don't need it or we already have one */
+   if (!grid_needs_surface || state_ref->res)
+      return;
+
+   struct iris_bo *grid_bo = iris_resource_bo(grid_ref->res);
 
    void *surf_map = NULL;
    u_upload_alloc(ice->state.surface_uploader, 0, isl_dev->ss.size,
@@ -189,12 +297,11 @@ iris_update_grid_size_resource(struct iris_context *ice,
    state_ref->offset +=
       iris_bo_offset_from_base_address(iris_resource_bo(state_ref->res));
    isl_buffer_fill_state(&screen->isl_dev, surf_map,
-                         .address = grid_ref->offset +
-                            iris_resource_bo(grid_ref->res)->gtt_offset,
+                         .address = grid_ref->offset + grid_bo->gtt_offset,
                          .size_B = sizeof(grid->grid),
                          .format = ISL_FORMAT_RAW,
                          .stride_B = 1,
-                         .mocs = 4); // XXX: MOCS
+                         .mocs = ice->vtbl.mocs(grid_bo));
 
    ice->state.dirty |= IRIS_DIRTY_BINDINGS_CS;
 }
@@ -214,13 +321,14 @@ iris_launch_grid(struct pipe_context *ctx, const struct pipe_grid_info *grid)
    /* We can't do resolves on the compute engine, so awkwardly, we have to
     * do them on the render batch...
     */
-   iris_predraw_resolve_inputs(ice, &ice->batches[IRIS_BATCH_RENDER],
-                               &ice->state.shaders[MESA_SHADER_COMPUTE],
-                               NULL, false);
+   if (ice->state.dirty & IRIS_DIRTY_COMPUTE_RESOLVES_AND_FLUSHES) {
+      iris_predraw_resolve_inputs(ice, &ice->batches[IRIS_BATCH_RENDER], NULL,
+                                  MESA_SHADER_COMPUTE, false);
+   }
 
    iris_batch_maybe_flush(batch, 1500);
 
-   //if (dirty & IRIS_DIRTY_UNCOMPILED_CS)
+   if (ice->state.dirty & IRIS_DIRTY_UNCOMPILED_CS)
       iris_update_compiled_compute_shader(ice);
 
    iris_update_grid_size_resource(ice, grid);
@@ -229,7 +337,7 @@ iris_launch_grid(struct pipe_context *ctx, const struct pipe_grid_info *grid)
    ice->vtbl.update_surface_base_address(batch, &ice->state.binder);
 
    if (ice->state.compute_predicate) {
-      ice->vtbl.load_register_mem64(batch, MI_PREDICATE_DATA,
+      ice->vtbl.load_register_mem64(batch, MI_PREDICATE_RESULT,
                                     ice->state.compute_predicate, 0);
       ice->state.compute_predicate = NULL;
    }

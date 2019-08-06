@@ -311,7 +311,14 @@ def generate(env):
     # Speed up dependency checking.  See
     # - https://github.com/SCons/scons/wiki/GoFastButton
     # - https://bugs.freedesktop.org/show_bug.cgi?id=109443
-    scons_version = distutils.version.StrictVersion(SCons.__version__)
+
+    # Scons version string has consistently been in this format:
+    # MajorVersion.MinorVersion.Patch[.alpha/beta.yyyymmdd]
+    # so this formula should cover all versions regardless of type
+    # stable, alpha or beta.
+    # For simplicity alpha and beta flags are removed.
+
+    scons_version = distutils.version.StrictVersion('.'.join(SCons.__version__.split('.')[:3]))
     if scons_version < distutils.version.StrictVersion('3.0.2') or \
        scons_version > distutils.version.StrictVersion('3.0.4'):
         env.Decider('MD5-timestamp')
@@ -323,7 +330,7 @@ def generate(env):
         '__STDC_CONSTANT_MACROS',
         '__STDC_FORMAT_MACROS',
         '__STDC_LIMIT_MACROS',
-        'HAVE_NO_AUTOCONF',
+        'HAVE_SCONS',
     ]
     if env['build'] in ('debug', 'checked'):
         cppdefines += ['DEBUG']
@@ -363,6 +370,9 @@ def generate(env):
 
         if check_functions(env, ['timespec_get']):
             cppdefines += ['HAVE_TIMESPEC_GET']
+
+        if check_header(env, 'sys/shm.h'):
+            cppdefines += ['HAVE_SYS_SHM_H']
 
     if platform == 'windows':
         cppdefines += [

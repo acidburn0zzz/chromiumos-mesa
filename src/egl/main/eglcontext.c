@@ -178,9 +178,12 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *disp,
           *     is supported for OpenGL contexts, and requesting a
           *     forward-compatible context for OpenGL versions less than 3.0
           *     will generate an error."
+          *
+          * Note: since the forward-compatible flag can be set more than one way,
+          *       the OpenGL version check is performed once, below.
           */
          if ((val & EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE_BIT_KHR) &&
-             (api != EGL_OPENGL_API || ctx->ClientMajorVersion < 3)) {
+              api != EGL_OPENGL_API) {
             err = EGL_BAD_ATTRIBUTE;
             break;
          }
@@ -247,9 +250,17 @@ _eglParseContextAttribList(_EGLContext *ctx, _EGLDisplay *disp,
           *     meaningful for OpenGL contexts, and specifying it for other
           *     types of contexts, including OpenGL ES contexts, will generate
           *     an error."
+          *
+          * EGL 1.5 defines EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY
+          * (without a suffix) which has the same value as the KHR token,
+          * and specifies that it now works with both GL and ES contexts:
+          *
+          *    "This attribute is supported only for OpenGL and OpenGL ES
+          *     contexts."
           */
-           if (!disp->Extensions.KHR_create_context
-               || api != EGL_OPENGL_API) {
+           if (!(disp->Extensions.KHR_create_context && api == EGL_OPENGL_API)
+               && !(disp->Version >= 15 && (api == EGL_OPENGL_API ||
+                                            api == EGL_OPENGL_ES_API))) {
             err = EGL_BAD_ATTRIBUTE;
             break;
          }

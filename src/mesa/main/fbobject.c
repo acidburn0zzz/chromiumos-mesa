@@ -675,11 +675,11 @@ fbo_incomplete(struct gl_context *ctx, const char *msg, int index)
 {
    static GLuint msg_id;
 
-   _mesa_gl_debug(ctx, &msg_id,
-                  MESA_DEBUG_SOURCE_API,
-                  MESA_DEBUG_TYPE_OTHER,
-                  MESA_DEBUG_SEVERITY_MEDIUM,
-                  "FBO incomplete: %s [%d]\n", msg, index);
+   _mesa_gl_debugf(ctx, &msg_id,
+                   MESA_DEBUG_SOURCE_API,
+                   MESA_DEBUG_TYPE_OTHER,
+                   MESA_DEBUG_SEVERITY_MEDIUM,
+                   "FBO incomplete: %s [%d]\n", msg, index);
 
    if (MESA_DEBUG_FLAGS & DEBUG_INCOMPLETE_FBO) {
       _mesa_debug(NULL, "FBO Incomplete: %s [%d]\n", msg, index);
@@ -4282,8 +4282,8 @@ get_framebuffer_attachment_parameter(struct gl_context *ctx,
       }
       else {
          if (ctx->Extensions.EXT_sRGB) {
-            *params =
-               _mesa_get_format_color_encoding(att->Renderbuffer->Format);
+            *params = (_mesa_is_format_srgb(att->Renderbuffer->Format) ?
+                       GL_SRGB : GL_LINEAR);
          }
          else {
             /* According to ARB_framebuffer_sRGB, we should return LINEAR

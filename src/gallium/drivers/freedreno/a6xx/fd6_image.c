@@ -28,8 +28,11 @@
 #include "pipe/p_state.h"
 
 #include "freedreno_resource.h"
+#include "freedreno_state.h"
+
 #include "fd6_image.h"
 #include "fd6_format.h"
+#include "fd6_resource.h"
 #include "fd6_texture.h"
 
 struct fd6_image {
@@ -40,12 +43,14 @@ struct fd6_image {
 	enum a6xx_tex_type type;
 	bool srgb;
 	uint32_t cpp;
+	uint32_t level;
 	uint32_t width;
 	uint32_t height;
 	uint32_t depth;
 	uint32_t pitch;
 	uint32_t array_pitch;
 	struct fd_bo *bo;
+	uint32_t ubwc_offset;
 	uint32_t offset;
 	bool buffer;
 };
@@ -76,6 +81,7 @@ static void translate_image(struct fd6_image *img, const struct pipe_image_view 
 
 	if (prsc->target == PIPE_BUFFER) {
 		img->buffer = true;
+		img->ubwc_offset = 0;    /* not valid for buffers */
 		img->offset = pimg->u.buf.offset;
 		img->pitch  = 0;
 		img->array_pitch = 0;
@@ -93,6 +99,7 @@ static void translate_image(struct fd6_image *img, const struct pipe_image_view 
 		unsigned lvl = pimg->u.tex.level;
 		unsigned layers = pimg->u.tex.last_layer - pimg->u.tex.first_layer + 1;
 
+		img->ubwc_offset = fd_resource_ubwc_offset(rsc, lvl, pimg->u.tex.first_layer);
 		img->offset = fd_resource_offset(rsc, lvl, pimg->u.tex.first_layer);
 		img->pitch  = rsc->slices[lvl].pitch * rsc->cpp;
 
@@ -120,6 +127,7 @@ static void translate_image(struct fd6_image *img, const struct pipe_image_view 
 			break;
 		}
 
+		img->level  = lvl;
 		img->width  = u_minify(prsc->width0, lvl);
 		img->height = u_minify(prsc->height0, lvl);
 	}
@@ -146,6 +154,7 @@ static void translate_buf(struct fd6_image *img, const struct pipe_shader_buffer
 	img->bo        = rsc->bo;
 	img->buffer    = true;
 
+	img->ubwc_offset = 0;    /* not valid for buffers */
 	img->offset = pimg->buffer_offset;
 	img->pitch  = 0;
 	img->array_pitch = 0;
@@ -161,18 +170,20 @@ static void translate_buf(struct fd6_image *img, const struct pipe_shader_buffer
 
 static void emit_image_tex(struct fd_ringbuffer *ring, struct fd6_image *img)
 {
-	OUT_RING(ring, A6XX_TEX_CONST_0_FMT(img->fmt) |
-		A6XX_TEX_CONST_0_TILE_MODE(fd_resource(img->prsc)->tile_mode) |
-		fd6_tex_swiz(img->prsc, img->pfmt, PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y,
-			PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W) |
-		COND(img->srgb, A6XX_TEX_CONST_0_SRGB));
+	struct fd_resource *rsc = fd_resource(img->prsc);
+	bool ubwc_enabled = fd_resource_ubwc_enabled(rsc, img->level);
+
+	OUT_RING(ring, fd6_tex_const_0(img->prsc, img->level, img->pfmt,
+			PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y,
+			PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W));
 	OUT_RING(ring, A6XX_TEX_CONST_1_WIDTH(img->width) |
 		A6XX_TEX_CONST_1_HEIGHT(img->height));
 	OUT_RING(ring, A6XX_TEX_CONST_2_FETCHSIZE(img->fetchsize) |
 		COND(img->buffer, A6XX_TEX_CONST_2_UNK4 | A6XX_TEX_CONST_2_UNK31) |
 		A6XX_TEX_CONST_2_TYPE(img->type) |
 		A6XX_TEX_CONST_2_PITCH(img->pitch));
-	OUT_RING(ring, A6XX_TEX_CONST_3_ARRAY_PITCH(img->array_pitch));
+	OUT_RING(ring, A6XX_TEX_CONST_3_ARRAY_PITCH(img->array_pitch) |
+		COND(ubwc_enabled, A6XX_TEX_CONST_3_FLAG | A6XX_TEX_CONST_3_UNK27));
 	if (img->bo) {
 		OUT_RELOC(ring, img->bo, img->offset,
 				(uint64_t)A6XX_TEX_CONST_5_DEPTH(img->depth) << 32, 0);
@@ -180,16 +191,25 @@ static void emit_image_tex(struct fd_ringbuffer *ring, struct fd6_image *img)
 		OUT_RING(ring, 0x00000000);
 		OUT_RING(ring, A6XX_TEX_CONST_5_DEPTH(img->depth));
 	}
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
+
+	OUT_RING(ring, 0x00000000);   /* texconst6 */
+
+	if (ubwc_enabled) {
+		OUT_RELOC(ring, rsc->bo, img->ubwc_offset, 0, 0);
+		OUT_RING(ring, A6XX_TEX_CONST_9_FLAG_BUFFER_ARRAY_PITCH(rsc->ubwc_size));
+		OUT_RING(ring, A6XX_TEX_CONST_10_FLAG_BUFFER_PITCH(rsc->ubwc_pitch));
+	} else {
+		OUT_RING(ring, 0x00000000);   /* texconst7 */
+		OUT_RING(ring, 0x00000000);   /* texconst8 */
+		OUT_RING(ring, 0x00000000);   /* texconst9 */
+		OUT_RING(ring, 0x00000000);   /* texconst10 */
+	}
+
+	OUT_RING(ring, 0x00000000);   /* texconst11 */
+	OUT_RING(ring, 0x00000000);   /* texconst12 */
+	OUT_RING(ring, 0x00000000);   /* texconst13 */
+	OUT_RING(ring, 0x00000000);   /* texconst14 */
+	OUT_RING(ring, 0x00000000);   /* texconst15 */
 }
 
 void
@@ -210,14 +230,23 @@ fd6_emit_ssbo_tex(struct fd_ringbuffer *ring, const struct pipe_shader_buffer *p
 
 static void emit_image_ssbo(struct fd_ringbuffer *ring, struct fd6_image *img)
 {
+	struct fd_resource *rsc = fd_resource(img->prsc);
+	enum a6xx_tile_mode tile_mode = TILE6_LINEAR;
+	bool ubwc_enabled = fd_resource_ubwc_enabled(rsc, img->level);
+
+	if (rsc->tile_mode && !fd_resource_level_linear(img->prsc, img->level)) {
+		tile_mode = rsc->tile_mode;
+	}
+
 	OUT_RING(ring, A6XX_IBO_0_FMT(img->fmt) |
-		A6XX_IBO_0_TILE_MODE(fd_resource(img->prsc)->tile_mode));
+		A6XX_IBO_0_TILE_MODE(tile_mode));
 	OUT_RING(ring, A6XX_IBO_1_WIDTH(img->width) |
 		A6XX_IBO_1_HEIGHT(img->height));
 	OUT_RING(ring, A6XX_IBO_2_PITCH(img->pitch) |
 		COND(img->buffer, A6XX_IBO_2_UNK4 | A6XX_IBO_2_UNK31) |
 		A6XX_IBO_2_TYPE(img->type));
-	OUT_RING(ring, A6XX_IBO_3_ARRAY_PITCH(img->array_pitch));
+	OUT_RING(ring, A6XX_IBO_3_ARRAY_PITCH(img->array_pitch) |
+		COND(ubwc_enabled, A6XX_IBO_3_FLAG | A6XX_IBO_3_UNK27));
 	if (img->bo) {
 		OUT_RELOCW(ring, img->bo, img->offset,
 			(uint64_t)A6XX_IBO_5_DEPTH(img->depth) << 32, 0);
@@ -226,10 +255,18 @@ static void emit_image_ssbo(struct fd_ringbuffer *ring, struct fd6_image *img)
 		OUT_RING(ring, A6XX_IBO_5_DEPTH(img->depth));
 	}
 	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
-	OUT_RING(ring, 0x00000000);
+
+	if (ubwc_enabled) {
+		OUT_RELOCW(ring, rsc->bo, img->ubwc_offset, 0, 0);
+		OUT_RING(ring, A6XX_IBO_9_FLAG_BUFFER_ARRAY_PITCH(rsc->ubwc_size));
+		OUT_RING(ring, A6XX_IBO_10_FLAG_BUFFER_PITCH(rsc->ubwc_pitch));
+	} else {
+		OUT_RING(ring, 0x00000000);
+		OUT_RING(ring, 0x00000000);
+		OUT_RING(ring, 0x00000000);
+		OUT_RING(ring, 0x00000000);
+	}
+
 	OUT_RING(ring, 0x00000000);
 	OUT_RING(ring, 0x00000000);
 	OUT_RING(ring, 0x00000000);
@@ -266,4 +303,34 @@ fd6_build_ibo_state(struct fd_context *ctx, const struct ir3_shader_variant *v,
 	}
 
 	return state;
+}
+
+static void fd6_set_shader_images(struct pipe_context *pctx,
+		enum pipe_shader_type shader,
+		unsigned start, unsigned count,
+		const struct pipe_image_view *images)
+{
+	struct fd_context *ctx = fd_context(pctx);
+	struct fd_shaderimg_stateobj *so = &ctx->shaderimg[shader];
+
+	fd_set_shader_images(pctx, shader, start, count, images);
+
+	if (!images)
+		return;
+
+	for (unsigned i = 0; i < count; i++) {
+		unsigned n = i + start;
+		struct pipe_image_view *buf = &so->si[n];
+
+		if (!buf->resource)
+			continue;
+
+		fd6_validate_format(ctx, fd_resource(buf->resource), buf->format);
+	}
+}
+
+void
+fd6_image_init(struct pipe_context *pctx)
+{
+	pctx->set_shader_images = fd6_set_shader_images;
 }

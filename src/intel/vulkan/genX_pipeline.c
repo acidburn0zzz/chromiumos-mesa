@@ -448,6 +448,79 @@ static const uint32_t vk_to_gen_front_face[] = {
    [VK_FRONT_FACE_CLOCKWISE]                 = 0
 };
 
+/** Returns the final polygon mode for rasterization
+ *
+ * This function takes into account polygon mode, primitive topology and the
+ * different shader stages which might generate their own type of primitives.
+ */
+static VkPolygonMode
+anv_raster_polygon_mode(struct anv_pipeline *pipeline,
+                        const VkPipelineInputAssemblyStateCreateInfo *ia_info,
+                        const VkPipelineRasterizationStateCreateInfo *rs_info)
+{
+   /* Points always override everything.  This saves us from having to handle
+    * rs_info->polygonMode in all of the line cases below.
+    */
+   if (rs_info->polygonMode == VK_POLYGON_MODE_POINT)
+      return VK_POLYGON_MODE_POINT;
+
+   if (anv_pipeline_has_stage(pipeline, MESA_SHADER_GEOMETRY)) {
+      switch (get_gs_prog_data(pipeline)->output_topology) {
+      case _3DPRIM_POINTLIST:
+         return VK_POLYGON_MODE_POINT;
+
+      case _3DPRIM_LINELIST:
+      case _3DPRIM_LINESTRIP:
+      case _3DPRIM_LINELOOP:
+         return VK_POLYGON_MODE_LINE;
+
+      case _3DPRIM_TRILIST:
+      case _3DPRIM_TRIFAN:
+      case _3DPRIM_TRISTRIP:
+      case _3DPRIM_RECTLIST:
+      case _3DPRIM_QUADLIST:
+      case _3DPRIM_QUADSTRIP:
+      case _3DPRIM_POLYGON:
+         return rs_info->polygonMode;
+      }
+      unreachable("Unsupported GS output topology");
+   } else if (anv_pipeline_has_stage(pipeline, MESA_SHADER_TESS_EVAL)) {
+      switch (get_tes_prog_data(pipeline)->output_topology) {
+      case BRW_TESS_OUTPUT_TOPOLOGY_POINT:
+         return VK_POLYGON_MODE_POINT;
+
+      case BRW_TESS_OUTPUT_TOPOLOGY_LINE:
+         return VK_POLYGON_MODE_LINE;
+
+      case BRW_TESS_OUTPUT_TOPOLOGY_TRI_CW:
+      case BRW_TESS_OUTPUT_TOPOLOGY_TRI_CCW:
+         return rs_info->polygonMode;
+      }
+      unreachable("Unsupported TCS output topology");
+   } else {
+      switch (ia_info->topology) {
+      case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
+         return VK_POLYGON_MODE_POINT;
+
+      case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+      case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+      case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
+      case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
+         return VK_POLYGON_MODE_LINE;
+
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY:
+         return rs_info->polygonMode;
+
+      default:
+         unreachable("Unsupported primitive topology");
+      }
+   }
+}
+
 static void
 emit_rs_state(struct anv_pipeline *pipeline,
               const VkPipelineRasterizationStateCreateInfo *rs_info,
@@ -1066,6 +1139,7 @@ emit_cb_state(struct anv_pipeline *pipeline,
 
 static void
 emit_3dstate_clip(struct anv_pipeline *pipeline,
+                  const VkPipelineInputAssemblyStateCreateInfo *ia_info,
                   const VkPipelineViewportStateCreateInfo *vp_info,
                   const VkPipelineRasterizationStateCreateInfo *rs_info)
 {
@@ -1075,8 +1149,16 @@ emit_3dstate_clip(struct anv_pipeline *pipeline,
       clip.ClipEnable               = true;
       clip.StatisticsEnable         = true;
       clip.EarlyCullEnable          = true;
-      clip.APIMode                  = APIMODE_D3D,
-      clip.ViewportXYClipTestEnable = true;
+      clip.APIMode                  = APIMODE_D3D;
+      clip.GuardbandClipTestEnable  = true;
+
+      /* Only enable the XY clip test when the final polygon rasterization
+       * mode is VK_POLYGON_MODE_FILL.  We want to leave it disabled for
+       * points and lines so we get "pop-free" clipping.
+       */
+      VkPolygonMode raster_mode =
+         anv_raster_polygon_mode(pipeline, ia_info, rs_info);
+      clip.ViewportXYClipTestEnable = (raster_mode == VK_POLYGON_MODE_FILL);
 
 #if GEN_GEN >= 8
       clip.VertexSubPixelPrecisionSelect = _8Bit;
@@ -1162,10 +1244,10 @@ emit_3dstate_streamout(struct anv_pipeline *pipeline,
          so.RenderStreamSelect = stream_info ?
                                  stream_info->rasterizationStream : 0;
 
-         so.Buffer0SurfacePitch = xfb_info->strides[0];
-         so.Buffer1SurfacePitch = xfb_info->strides[1];
-         so.Buffer2SurfacePitch = xfb_info->strides[2];
-         so.Buffer3SurfacePitch = xfb_info->strides[3];
+         so.Buffer0SurfacePitch = xfb_info->buffers[0].stride;
+         so.Buffer1SurfacePitch = xfb_info->buffers[1].stride;
+         so.Buffer2SurfacePitch = xfb_info->buffers[2].stride;
+         so.Buffer3SurfacePitch = xfb_info->buffers[3].stride;
 
          int urb_entry_read_offset = 0;
          int urb_entry_read_length =
@@ -1434,6 +1516,11 @@ emit_3dstate_hs_te_ds(struct anv_pipeline *pipeline,
       hs.PerThreadScratchSpace = get_scratch_space(tcs_bin);
       hs.ScratchSpaceBasePointer =
          get_scratch_address(pipeline, MESA_SHADER_TESS_CTRL, tcs_bin);
+
+#if GEN_GEN >= 9
+      hs.DispatchMode = tcs_prog_data->base.dispatch_mode;
+      hs.IncludePrimitiveID = tcs_prog_data->include_primitive_id;
+#endif
    }
 
    const VkPipelineTessellationDomainOriginStateCreateInfo *domain_origin_state =
@@ -1761,7 +1848,7 @@ emit_3dstate_ps(struct anv_pipeline *pipeline,
                                brw_wm_prog_data_prog_offset(wm_prog_data, ps, 2);
 
       ps.SingleProgramFlow          = false;
-      ps.VectorMaskEnable           = true;
+      ps.VectorMaskEnable           = GEN_GEN >= 8;
       /* WA_1606682166 */
       ps.SamplerCount               = GEN_GEN == 11 ? 0 : get_sampler_count(fs_bin);
       /* Gen 11 workarounds table #2056 WABTPPrefetchDisable */
@@ -1946,7 +2033,9 @@ genX(graphics_pipeline_create)(
 
    emit_urb_setup(pipeline);
 
-   emit_3dstate_clip(pipeline, pCreateInfo->pViewportState,
+   emit_3dstate_clip(pipeline,
+                     pCreateInfo->pInputAssemblyState,
+                     pCreateInfo->pViewportState,
                      pCreateInfo->pRasterizationState);
    emit_3dstate_streamout(pipeline, pCreateInfo->pRasterizationState);
 
@@ -2087,9 +2176,29 @@ compute_pipeline_create(
       vfe.URBEntryAllocationSize = GEN_GEN <= 7 ? 0 : 2;
       vfe.CURBEAllocationSize    = vfe_curbe_allocation;
 
-      vfe.PerThreadScratchSpace = get_scratch_space(cs_bin);
-      vfe.ScratchSpaceBasePointer =
-         get_scratch_address(pipeline, MESA_SHADER_COMPUTE, cs_bin);
+      if (cs_bin->prog_data->total_scratch) {
+         if (GEN_GEN >= 8) {
+            /* Broadwell's Per Thread Scratch Space is in the range [0, 11]
+             * where 0 = 1k, 1 = 2k, 2 = 4k, ..., 11 = 2M.
+             */
+            vfe.PerThreadScratchSpace =
+               ffs(cs_bin->prog_data->total_scratch) - 11;
+         } else if (GEN_IS_HASWELL) {
+            /* Haswell's Per Thread Scratch Space is in the range [0, 10]
+             * where 0 = 2k, 1 = 4k, 2 = 8k, ..., 10 = 2M.
+             */
+            vfe.PerThreadScratchSpace =
+               ffs(cs_bin->prog_data->total_scratch) - 12;
+         } else {
+            /* IVB and BYT use the range [0, 11] to mean [1kB, 12kB]
+             * where 0 = 1kB, 1 = 2kB, 2 = 3kB, ..., 11 = 12kB.
+             */
+            vfe.PerThreadScratchSpace =
+               cs_bin->prog_data->total_scratch / 1024 - 1;
+         }
+         vfe.ScratchSpaceBasePointer =
+            get_scratch_address(pipeline, MESA_SHADER_COMPUTE, cs_bin);
+      }
    }
 
    struct GENX(INTERFACE_DESCRIPTOR_DATA) desc = {

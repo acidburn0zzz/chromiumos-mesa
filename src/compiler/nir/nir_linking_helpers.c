@@ -59,6 +59,15 @@ get_variable_io_mask(nir_variable *var, gl_shader_stage stage)
    return ((1ull << slots) - 1) << location;
 }
 
+static uint8_t
+get_num_components(nir_variable *var)
+{
+   if (glsl_type_is_struct_or_ifc(glsl_without_array(var->type)))
+      return 4;
+
+   return glsl_get_vector_elements(glsl_without_array(var->type));
+}
+
 static void
 tcs_add_output_reads(nir_shader *shader, uint64_t *read, uint64_t *patches_read)
 {
@@ -80,12 +89,14 @@ tcs_add_output_reads(nir_shader *shader, uint64_t *read, uint64_t *patches_read)
                continue;
 
             nir_variable *var = nir_deref_instr_get_variable(deref);
-            if (var->data.patch) {
-               patches_read[var->data.location_frac] |=
-                  get_variable_io_mask(var, shader->info.stage);
-            } else {
-               read[var->data.location_frac] |=
-                  get_variable_io_mask(var, shader->info.stage);
+            for (unsigned i = 0; i < get_num_components(var); i++) {
+               if (var->data.patch) {
+                  patches_read[var->data.location_frac + i] |=
+                     get_variable_io_mask(var, shader->info.stage);
+               } else {
+                  read[var->data.location_frac + i] |=
+                     get_variable_io_mask(var, shader->info.stage);
+               }
             }
          }
       }
@@ -161,22 +172,26 @@ nir_remove_unused_varyings(nir_shader *producer, nir_shader *consumer)
    uint64_t patches_read[4] = { 0 }, patches_written[4] = { 0 };
 
    nir_foreach_variable(var, &producer->outputs) {
-      if (var->data.patch) {
-         patches_written[var->data.location_frac] |=
-            get_variable_io_mask(var, producer->info.stage);
-      } else {
-         written[var->data.location_frac] |=
-            get_variable_io_mask(var, producer->info.stage);
+      for (unsigned i = 0; i < get_num_components(var); i++) {
+         if (var->data.patch) {
+            patches_written[var->data.location_frac + i] |=
+               get_variable_io_mask(var, producer->info.stage);
+         } else {
+            written[var->data.location_frac + i] |=
+               get_variable_io_mask(var, producer->info.stage);
+         }
       }
    }
 
    nir_foreach_variable(var, &consumer->inputs) {
-      if (var->data.patch) {
-         patches_read[var->data.location_frac] |=
-            get_variable_io_mask(var, consumer->info.stage);
-      } else {
-         read[var->data.location_frac] |=
-            get_variable_io_mask(var, consumer->info.stage);
+      for (unsigned i = 0; i < get_num_components(var); i++) {
+         if (var->data.patch) {
+            patches_read[var->data.location_frac + i] |=
+               get_variable_io_mask(var, consumer->info.stage);
+         } else {
+            read[var->data.location_frac + i] |=
+               get_variable_io_mask(var, consumer->info.stage);
+         }
       }
    }
 
@@ -243,6 +258,7 @@ struct assigned_comps
    uint8_t comps;
    uint8_t interp_type;
    uint8_t interp_loc;
+   bool is_32bit;
 };
 
 /* Packing arrays and dual slot varyings is difficult so to avoid complex
@@ -275,8 +291,10 @@ get_unmoveable_components_masks(struct exec_list *var_list,
             continue;
 
          unsigned location = var->data.location - VARYING_SLOT_VAR0;
+
          unsigned elements =
-            glsl_get_vector_elements(glsl_without_array(type));
+            glsl_type_is_vector_or_scalar(glsl_without_array(type)) ?
+            glsl_get_vector_elements(glsl_without_array(type)) : 4;
 
          bool dual_slot = glsl_type_is_dual_slot(glsl_without_array(type));
          unsigned slots = glsl_count_attribute_slots(type, false);
@@ -306,6 +324,8 @@ get_unmoveable_components_masks(struct exec_list *var_list,
             comps[location + i].interp_type =
                get_interp_type(var, type, default_to_smooth_interp);
             comps[location + i].interp_loc = get_interp_loc(var);
+            comps[location + i].is_32bit =
+               glsl_type_is_32bit(glsl_without_array(type));
          }
       }
    }
@@ -421,6 +441,7 @@ struct varying_component {
    nir_variable *var;
    uint8_t interp_type;
    uint8_t interp_loc;
+   bool is_32bit;
    bool is_patch;
    bool initialised;
 };
@@ -455,7 +476,7 @@ gather_varying_component_info(nir_shader *consumer,
                               unsigned *varying_comp_info_size,
                               bool default_to_smooth_interp)
 {
-   unsigned store_varying_info_idx[MAX_VARYINGS_INCL_PATCH][4] = {0};
+   unsigned store_varying_info_idx[MAX_VARYINGS_INCL_PATCH][4] = {{0}};
    unsigned num_of_comps_to_pack = 0;
 
    /* Count the number of varying that can be packed and create a mapping
@@ -537,6 +558,7 @@ gather_varying_component_info(nir_shader *consumer,
             vc_info->interp_type =
                get_interp_type(in_var, type, default_to_smooth_interp);
             vc_info->interp_loc = get_interp_loc(in_var);
+            vc_info->is_32bit = glsl_type_is_32bit(type);
             vc_info->is_patch = in_var->data.patch;
          }
       }
@@ -570,6 +592,14 @@ assign_remap_locations(struct varying_loc (*remap)[4],
             continue;
          }
 
+         /* We can only pack varyings with matching types, and the current
+          * algorithm only supports packing 32-bit.
+          */
+         if (!assigned_comps[tmp_cursor].is_32bit) {
+            tmp_comp = 0;
+            continue;
+         }
+
          while (tmp_comp < 4 &&
                 (assigned_comps[tmp_cursor].comps & (1 << tmp_comp))) {
             tmp_comp++;
@@ -587,6 +617,7 @@ assign_remap_locations(struct varying_loc (*remap)[4],
       assigned_comps[tmp_cursor].comps |= (1 << tmp_comp);
       assigned_comps[tmp_cursor].interp_type = info->interp_type;
       assigned_comps[tmp_cursor].interp_loc = info->interp_loc;
+      assigned_comps[tmp_cursor].is_32bit = info->is_32bit;
 
       /* Assign remap location */
       remap[location][info->var->data.location_frac].component = tmp_comp++;
@@ -695,7 +726,7 @@ nir_compact_varyings(nir_shader *producer, nir_shader *consumer,
    assert(producer->info.stage != MESA_SHADER_FRAGMENT);
    assert(consumer->info.stage != MESA_SHADER_VERTEX);
 
-   struct assigned_comps assigned_comps[MAX_VARYINGS_INCL_PATCH] = {0};
+   struct assigned_comps assigned_comps[MAX_VARYINGS_INCL_PATCH] = {{0}};
 
    get_unmoveable_components_masks(&producer->outputs, assigned_comps,
                                    producer->info.stage,
@@ -768,7 +799,7 @@ can_replace_varying(nir_variable *out_var)
    if (glsl_type_is_array(out_var->type) ||
        glsl_type_is_dual_slot(out_var->type) ||
        glsl_type_is_matrix(out_var->type) ||
-       glsl_type_is_struct(out_var->type))
+       glsl_type_is_struct_or_ifc(out_var->type))
       return false;
 
    /* Limit this pass to scalars for now to keep things simple. Most varyings
@@ -939,3 +970,134 @@ nir_link_opt_varyings(nir_shader *producer, nir_shader *consumer)
 
    return progress;
 }
+
+/* TODO any better helper somewhere to sort a list? */
+
+static void
+insert_sorted(struct exec_list *var_list, nir_variable *new_var)
+{
+   nir_foreach_variable(var, var_list) {
+      if (var->data.location > new_var->data.location) {
+         exec_node_insert_node_before(&var->node, &new_var->node);
+         return;
+      }
+   }
+   exec_list_push_tail(var_list, &new_var->node);
+}
+
+static void
+sort_varyings(struct exec_list *var_list)
+{
+   struct exec_list new_list;
+   exec_list_make_empty(&new_list);
+   nir_foreach_variable_safe(var, var_list) {
+      exec_node_remove(&var->node);
+      insert_sorted(&new_list, var);
+   }
+   exec_list_move_nodes_to(&new_list, var_list);
+}
+
+void
+nir_assign_io_var_locations(struct exec_list *var_list, unsigned *size,
+                            gl_shader_stage stage)
+{
+   unsigned location = 0;
+   unsigned assigned_locations[VARYING_SLOT_TESS_MAX];
+   uint64_t processed_locs[2] = {0};
+
+   sort_varyings(var_list);
+
+   const int base = stage == MESA_SHADER_FRAGMENT ?
+      (int) FRAG_RESULT_DATA0 : (int) VARYING_SLOT_VAR0;
+
+   int UNUSED last_loc = 0;
+   bool last_partial = false;
+   nir_foreach_variable(var, var_list) {
+      const struct glsl_type *type = var->type;
+      if (nir_is_per_vertex_io(var, stage)) {
+         assert(glsl_type_is_array(type));
+         type = glsl_get_array_element(type);
+      }
+
+      unsigned var_size;
+      if (var->data.compact) {
+         /* compact variables must be arrays of scalars */
+         assert(glsl_type_is_array(type));
+         assert(glsl_type_is_scalar(glsl_get_array_element(type)));
+         unsigned start = 4 * location + var->data.location_frac;
+         unsigned end = start + glsl_get_length(type);
+         var_size = end / 4 - location;
+         last_partial = end % 4 != 0;
+      } else {
+         /* Compact variables bypass the normal varying compacting pass,
+          * which means they cannot be in the same vec4 slot as a normal
+          * variable. If part of the current slot is taken up by a compact
+          * variable, we need to go to the next one.
+          */
+         if (last_partial) {
+            location++;
+            last_partial = false;
+         }
+         var_size = glsl_count_attribute_slots(type, false);
+      }
+
+      /* Builtins don't allow component packing so we only need to worry about
+       * user defined varyings sharing the same location.
+       */
+      bool processed = false;
+      if (var->data.location >= base) {
+         unsigned glsl_location = var->data.location - base;
+
+         for (unsigned i = 0; i < var_size; i++) {
+            if (processed_locs[var->data.index] &
+                ((uint64_t)1 << (glsl_location + i)))
+               processed = true;
+            else
+               processed_locs[var->data.index] |=
+                  ((uint64_t)1 << (glsl_location + i));
+         }
+      }
+
+      /* Because component packing allows varyings to share the same location
+       * we may have already have processed this location.
+       */
+      if (processed) {
+         unsigned driver_location = assigned_locations[var->data.location];
+         var->data.driver_location = driver_location;
+
+         /* An array may be packed such that is crosses multiple other arrays
+          * or variables, we need to make sure we have allocated the elements
+          * consecutively if the previously proccessed var was shorter than
+          * the current array we are processing.
+          *
+          * NOTE: The code below assumes the var list is ordered in ascending
+          * location order.
+          */
+         assert(last_loc <= var->data.location);
+         last_loc = var->data.location;
+         unsigned last_slot_location = driver_location + var_size;
+         if (last_slot_location > location) {
+            unsigned num_unallocated_slots = last_slot_location - location;
+            unsigned first_unallocated_slot = var_size - num_unallocated_slots;
+            for (unsigned i = first_unallocated_slot; i < num_unallocated_slots; i++) {
+               assigned_locations[var->data.location + i] = location;
+               location++;
+            }
+         }
+         continue;
+      }
+
+      for (unsigned i = 0; i < var_size; i++) {
+         assigned_locations[var->data.location + i] = location + i;
+      }
+
+      var->data.driver_location = location;
+      location += var_size;
+   }
+
+   if (last_partial)
+      location++;
+
+   *size = location;
+}
+

@@ -34,6 +34,7 @@
 #include "fd6_draw.h"
 #include "fd6_emit.h"
 #include "fd6_gmem.h"
+#include "fd6_image.h"
 #include "fd6_program.h"
 #include "fd6_query.h"
 #include "fd6_rasterizer.h"
@@ -84,6 +85,7 @@ fd6_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 		return NULL;
 
 	pctx = &fd6_ctx->base.base;
+	pctx->screen = pscreen;
 
 	fd6_ctx->base.dev = fd_device_ref(screen->dev);
 	fd6_ctx->base.screen = fd_screen(pscreen);
@@ -103,6 +105,9 @@ fd6_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
 	pctx = fd_context_init(&fd6_ctx->base, pscreen, primtypes, priv, flags);
 	if (!pctx)
 		return NULL;
+
+	/* after fd_context_init() to override set_shader_images() */
+	fd6_image_init(pctx);
 
 	util_blitter_set_texture_multisample(fd6_ctx->base.blitter, true);
 

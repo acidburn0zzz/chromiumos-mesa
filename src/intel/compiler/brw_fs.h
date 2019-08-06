@@ -62,7 +62,7 @@ class fs_visitor : public backend_shader
 public:
    fs_visitor(const struct brw_compiler *compiler, void *log_data,
               void *mem_ctx,
-              const void *key,
+              const brw_base_prog_key *key,
               struct brw_stage_prog_data *prog_data,
               struct gl_program *prog,
               const nir_shader *shader,
@@ -80,8 +80,6 @@ public:
 
    fs_reg vgrf(const glsl_type *const type);
    void import_uniforms(fs_visitor *v);
-   void setup_uniform_clipplane_values();
-   void compute_clip_distance();
 
    void VARYING_PULL_CONSTANT_LOAD(const brw::fs_builder &bld,
                                    const fs_reg &dst,
@@ -92,7 +90,7 @@ public:
 
    bool run_fs(bool allow_spilling, bool do_rep_send);
    bool run_vs();
-   bool run_tcs_single_patch();
+   bool run_tcs();
    bool run_tes();
    bool run_gs();
    bool run_cs(unsigned min_dispatch_width);
@@ -110,17 +108,13 @@ public:
    void assign_urb_setup();
    void convert_attr_sources_to_hw_regs(fs_inst *inst);
    void assign_vs_urb_setup();
-   void assign_tcs_single_patch_urb_setup();
+   void assign_tcs_urb_setup();
    void assign_tes_urb_setup();
    void assign_gs_urb_setup();
    bool assign_regs(bool allow_spilling, bool spill_all);
    void assign_regs_trivial();
    void calculate_payload_ranges(int payload_node_count,
                                  int *payload_last_use_ip);
-   void setup_payload_interference(struct ra_graph *g, int payload_reg_count,
-                                   int first_payload_node);
-   int choose_spill_reg(struct ra_graph *g);
-   void spill_reg(unsigned spill_reg);
    void split_virtual_grfs();
    bool compact_virtual_grfs();
    void assign_constant_locations();
@@ -183,16 +177,21 @@ public:
    void emit_interpolation_setup_gen6();
    void compute_sample_position(fs_reg dst, fs_reg int_sample_pos);
    fs_reg emit_mcs_fetch(const fs_reg &coordinate, unsigned components,
-                         const fs_reg &sampler);
+                         const fs_reg &texture,
+                         const fs_reg &texture_handle);
    void emit_gen6_gather_wa(uint8_t wa, fs_reg dst);
    fs_reg resolve_source_modifiers(const fs_reg &src);
    void emit_discard_jump();
+   void emit_fsign(const class brw::fs_builder &, const nir_alu_instr *instr,
+                   fs_reg result, fs_reg *op, unsigned fsign_src);
    bool opt_peephole_sel();
    bool opt_peephole_csel();
    bool opt_peephole_predicated_break();
    bool opt_saturate_propagation();
    bool opt_cmod_propagation();
    bool opt_zero_samples();
+
+   void set_tcs_invocation_id();
 
    void emit_nir_code();
    void nir_setup_outputs();
@@ -204,7 +203,8 @@ public:
    void nir_emit_loop(nir_loop *loop);
    void nir_emit_block(nir_block *block);
    void nir_emit_instr(nir_instr *instr);
-   void nir_emit_alu(const brw::fs_builder &bld, nir_alu_instr *instr);
+   void nir_emit_alu(const brw::fs_builder &bld, nir_alu_instr *instr,
+                     bool need_dest);
    bool try_emit_b2fi_of_inot(const brw::fs_builder &bld, fs_reg result,
                               nir_alu_instr *instr);
    void nir_emit_load_const(const brw::fs_builder &bld,
@@ -247,6 +247,12 @@ public:
    fs_reg get_nir_src_imm(const nir_src &src);
    fs_reg get_nir_dest(const nir_dest &dest);
    fs_reg get_indirect_offset(nir_intrinsic_instr *instr);
+   fs_reg get_tcs_single_patch_icp_handle(const brw::fs_builder &bld,
+                                          nir_intrinsic_instr *instr);
+   fs_reg get_tcs_eight_patch_icp_handle(const brw::fs_builder &bld,
+                                         nir_intrinsic_instr *instr);
+   struct brw_reg get_tcs_output_urb_handle();
+
    void emit_percomp(const brw::fs_builder &bld, const fs_inst &inst,
                      unsigned wr_mask);
 
@@ -259,6 +265,7 @@ public:
    fs_inst *emit_single_fb_write(const brw::fs_builder &bld,
                                  fs_reg color1, fs_reg color2,
                                  fs_reg src0_alpha, unsigned components);
+   void emit_alpha_to_coverage_workaround(const fs_reg &src0_alpha);
    void emit_fb_writes();
    fs_inst *emit_non_coherent_fb_read(const brw::fs_builder &bld,
                                       const fs_reg &dst, unsigned target);
@@ -295,7 +302,7 @@ public:
    void dump_instruction(backend_instruction *inst);
    void dump_instruction(backend_instruction *inst, FILE *file);
 
-   const void *const key;
+   const brw_base_prog_key *const key;
    const struct brw_sampler_prog_key_data *key_tex;
 
    struct brw_gs_compile *gs_compile;
@@ -371,7 +378,6 @@ public:
    fs_reg pixel_w;
    fs_reg delta_xy[BRW_BARYCENTRIC_MODE_COUNT];
    fs_reg shader_start_time;
-   fs_reg userplane[MAX_CLIP_PLANES];
    fs_reg final_gs_vertex_count;
    fs_reg control_data_bits;
    fs_reg invocation_id;

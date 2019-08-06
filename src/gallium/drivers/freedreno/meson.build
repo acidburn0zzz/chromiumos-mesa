@@ -193,6 +193,7 @@ files_libfreedreno = files(
   'a6xx/fd6_gmem.h',
   'a6xx/fd6_image.c',
   'a6xx/fd6_image.h',
+  'a6xx/fd6_perfcntr.c',
   'a6xx/fd6_program.c',
   'a6xx/fd6_program.h',
   'a6xx/fd6_query.c',
@@ -214,11 +215,12 @@ files_libfreedreno = files(
 )
 
 freedreno_includes = [
+  inc_mesa, inc_mapi,
   inc_src, inc_include, inc_gallium, inc_gallium_aux,
   inc_freedreno, include_directories('ir3'),
 ]
 
-freedreno_c_args = []
+freedreno_c_args = [ c_vis_args, no_override_init_args ]
 if cc.has_argument('-Wpacked-bitfield-compat')
   freedreno_c_args += '-Wno-packed-bitfield-compat'
 endif
@@ -230,7 +232,7 @@ endif
 
 libfreedreno = static_library(
   'freedreno',
-  [files_libfreedreno],
+  [files_libfreedreno, freedreno_xml_header_files],
   include_directories : freedreno_includes,
   c_args : [freedreno_c_args, c_vis_args],
   cpp_args : [freedreno_cpp_args, cpp_vis_args],

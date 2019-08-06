@@ -34,6 +34,7 @@
 #include "main/hash.h"
 #include "main/fbobject.h"
 #include "main/version.h"
+#include "main/glthread.h"
 #include "swrast/s_renderbuffer.h"
 #include "util/ralloc.h"
 #include "util/disk_cache.h"
@@ -62,6 +63,7 @@ DRI_CONF_BEGIN
 	 DRI_CONF_DESC_END
       DRI_CONF_OPT_END
       DRI_CONF_MESA_NO_ERROR("false")
+      DRI_CONF_MESA_GLTHREAD("false")
    DRI_CONF_SECTION_END
 
    DRI_CONF_SECTION_QUALITY
@@ -147,6 +149,8 @@ intel_dri2_flush_with_flags(__DRIcontext *cPriv,
       return;
 
    struct gl_context *ctx = &brw->ctx;
+
+   _mesa_glthread_finish(ctx);
 
    FLUSH_VERTICES(ctx, 0);
 
@@ -285,11 +289,11 @@ static const struct intel_image_format intel_image_formats[] = {
 
    { __DRI_IMAGE_FOURCC_P010, __DRI_IMAGE_COMPONENTS_Y_UV, 2,
      { { 0, 0, 0, __DRI_IMAGE_FORMAT_R16, 2 },
-       { 1, 1, 1, __DRI_IMAGE_FORMAT_GR1616, 4 } } , 65535.0f/1023.0f },
+       { 1, 1, 1, __DRI_IMAGE_FORMAT_GR1616, 4 } } },
 
    { __DRI_IMAGE_FOURCC_P012, __DRI_IMAGE_COMPONENTS_Y_UV, 2,
      { { 0, 0, 0, __DRI_IMAGE_FORMAT_R16, 2 },
-       { 1, 1, 1, __DRI_IMAGE_FORMAT_GR1616, 4 } } , 65535.0f/4095.0f },
+       { 1, 1, 1, __DRI_IMAGE_FORMAT_GR1616, 4 } } },
 
    { __DRI_IMAGE_FOURCC_P016, __DRI_IMAGE_COMPONENTS_Y_UV, 2,
      { { 0, 0, 0, __DRI_IMAGE_FORMAT_R16, 2 },
@@ -1383,7 +1387,8 @@ intel_query_dma_buf_modifiers(__DRIscreen *_screen, int fourcc, int max,
       for (i = 0; i < num_mods && i < max; i++) {
          if (f->components == __DRI_IMAGE_COMPONENTS_Y_U_V ||
              f->components == __DRI_IMAGE_COMPONENTS_Y_UV ||
-             f->components == __DRI_IMAGE_COMPONENTS_Y_XUXV) {
+             f->components == __DRI_IMAGE_COMPONENTS_Y_XUXV ||
+             f->components == __DRI_IMAGE_COMPONENTS_Y_UXVX) {
             external_only[i] = GL_TRUE;
          }
          else {
@@ -2416,7 +2421,7 @@ set_max_gl_versions(struct intel_screen *screen)
  * Return the revision (generally the revid field of the PCI header) of the
  * graphics device.
  */
-int
+static int
 intel_device_get_revision(int fd)
 {
    struct drm_i915_getparam gp;
@@ -2442,10 +2447,10 @@ shader_debug_log_mesa(void *data, const char *fmt, ...)
 
    va_start(args, fmt);
    GLuint msg_id = 0;
-   _mesa_gl_vdebug(&brw->ctx, &msg_id,
-                   MESA_DEBUG_SOURCE_SHADER_COMPILER,
-                   MESA_DEBUG_TYPE_OTHER,
-                   MESA_DEBUG_SEVERITY_NOTIFICATION, fmt, args);
+   _mesa_gl_vdebugf(&brw->ctx, &msg_id,
+                    MESA_DEBUG_SOURCE_SHADER_COMPILER,
+                    MESA_DEBUG_TYPE_OTHER,
+                    MESA_DEBUG_SEVERITY_NOTIFICATION, fmt, args);
    va_end(args);
 }
 
@@ -2466,10 +2471,10 @@ shader_perf_log_mesa(void *data, const char *fmt, ...)
 
    if (brw->perf_debug) {
       GLuint msg_id = 0;
-      _mesa_gl_vdebug(&brw->ctx, &msg_id,
-                      MESA_DEBUG_SOURCE_SHADER_COMPILER,
-                      MESA_DEBUG_TYPE_PERFORMANCE,
-                      MESA_DEBUG_SEVERITY_MEDIUM, fmt, args);
+      _mesa_gl_vdebugf(&brw->ctx, &msg_id,
+                       MESA_DEBUG_SOURCE_SHADER_COMPILER,
+                       MESA_DEBUG_TYPE_PERFORMANCE,
+                       MESA_DEBUG_SEVERITY_MEDIUM, fmt, args);
    }
    va_end(args);
 }
@@ -2520,6 +2525,8 @@ __DRIconfig **intelInitScreen2(__DRIscreen *dri_screen)
 
    if (!gen_get_device_info(screen->deviceID, &screen->devinfo))
       return NULL;
+
+   screen->devinfo.revision = intel_device_get_revision(dri_screen->fd);
 
    if (!intel_init_bufmgr(screen))
        return NULL;

@@ -36,8 +36,7 @@ static bool is_move(nir_alu_instr *instr)
 {
    assert(instr->src[0].src.is_ssa);
 
-   if (instr->op != nir_op_fmov &&
-       instr->op != nir_op_imov)
+   if (instr->op != nir_op_mov)
       return false;
 
    if (instr->dest.saturate)
@@ -142,17 +141,16 @@ copy_prop_alu_src(nir_alu_instr *parent_alu_instr, unsigned index)
       return false;
 
    nir_ssa_def *def;
-   unsigned new_swizzle[4] = {0, 0, 0, 0};
+   unsigned new_swizzle[NIR_MAX_VEC_COMPONENTS] = {0, 0, 0, 0};
 
-   if (alu_instr->op == nir_op_fmov ||
-       alu_instr->op == nir_op_imov) {
-      for (unsigned i = 0; i < 4; i++)
+   if (alu_instr->op == nir_op_mov) {
+      for (unsigned i = 0; i < NIR_MAX_VEC_COMPONENTS; i++)
          new_swizzle[i] = alu_instr->src[0].swizzle[src->swizzle[i]];
       def = alu_instr->src[0].src.ssa;
    } else {
       def = NULL;
 
-      for (unsigned i = 0; i < 4; i++) {
+      for (unsigned i = 0; i < NIR_MAX_VEC_COMPONENTS; i++) {
          if (!nir_alu_instr_channel_used(parent_alu_instr, index, i))
             continue;
 
@@ -167,7 +165,7 @@ copy_prop_alu_src(nir_alu_instr *parent_alu_instr, unsigned index)
       }
    }
 
-   for (unsigned i = 0; i < 4; i++)
+   for (unsigned i = 0; i < NIR_MAX_VEC_COMPONENTS; i++)
       src->swizzle[i] = new_swizzle[i];
 
    nir_instr_rewrite_src(&parent_alu_instr->instr, &src->src,

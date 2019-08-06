@@ -68,6 +68,9 @@ stream_state(struct iris_batch *batch,
    struct iris_bo *bo = iris_resource_bo(res);
    iris_use_pinned_bo(batch, bo, false);
 
+   iris_record_state_size(batch->state_sizes,
+                          bo->gtt_offset + *out_offset, size);
+
    /* If the caller has asked for a BO, we leave them the responsibility of
     * adding bo->gtt_offset (say, by handing an address to genxml).  If not,
     * we assume they want the offset from a base address.
@@ -207,7 +210,7 @@ blorp_vf_invalidate_for_vb_48b_transitions(struct blorp_batch *blorp_batch,
 
    for (unsigned i = 0; i < num_vbs; i++) {
       struct iris_bo *bo = addrs[i].buffer;
-      uint16_t high_bits = bo ? bo->gtt_offset >> 32u : 0;
+      uint16_t high_bits = bo->gtt_offset >> 32u;
 
       if (high_bits != ice->state.last_vbo_high_bits[i]) {
          need_invalidate = true;
@@ -216,8 +219,10 @@ blorp_vf_invalidate_for_vb_48b_transitions(struct blorp_batch *blorp_batch,
    }
 
    if (need_invalidate) {
-      iris_emit_pipe_control_flush(batch, PIPE_CONTROL_VF_CACHE_INVALIDATE |
-                                          PIPE_CONTROL_CS_STALL);
+      iris_emit_pipe_control_flush(batch,
+                                   "workaround: VF cache 32-bit key [blorp]",
+                                   PIPE_CONTROL_VF_CACHE_INVALIDATE |
+                                   PIPE_CONTROL_CS_STALL);
    }
 }
 
@@ -246,26 +251,17 @@ blorp_emit_urb_config(struct blorp_batch *blorp_batch,
 {
    struct iris_context *ice = blorp_batch->blorp->driver_ctx;
    struct iris_batch *batch = blorp_batch->driver_batch;
-   const struct gen_device_info *devinfo = &batch->screen->devinfo;
 
-   // XXX: Track last URB config and avoid re-emitting it if it's good enough
-   const unsigned push_size_kB = 32;
-   unsigned entries[4];
-   unsigned start[4];
    unsigned size[4] = { vs_entry_size, 1, 1, 1 };
 
-   gen_get_urb_config(devinfo, 1024 * push_size_kB,
-                      1024 * ice->shaders.urb_size,
-                      false, false, size, entries, start);
+   /* If last VS URB size is good enough for what the BLORP operation needed,
+    * then we can skip reconfiguration
+    */
+   if (ice->shaders.last_vs_entry_size >= vs_entry_size)
+      return;
 
-   for (int i = MESA_SHADER_VERTEX; i <= MESA_SHADER_GEOMETRY; i++) {
-      blorp_emit(blorp_batch, GENX(3DSTATE_URB_VS), urb) {
-         urb._3DCommandSubOpcode += i;
-         urb.VSURBStartingAddress     = start[i];
-         urb.VSURBEntryAllocationSize = size[i] - 1;
-         urb.VSNumberofURBEntries     = entries[i];
-      }
-   }
+   genX(emit_urb_setup)(ice, batch, size, false, false);
+   ice->state.dirty |= IRIS_DIRTY_URB;
 }
 
 static void
@@ -285,6 +281,7 @@ iris_blorp_exec(struct blorp_batch *blorp_batch,
     *     be set in this packet."
     */
    iris_emit_pipe_control_flush(batch,
+                                "workaround: RT BTI change [blorp]",
                                 PIPE_CONTROL_RENDER_TARGET_FLUSH |
                                 PIPE_CONTROL_STALL_AT_SCOREBOARD);
 #endif
@@ -310,26 +307,41 @@ iris_blorp_exec(struct blorp_batch *blorp_batch,
 
    iris_require_command_space(batch, 1400);
 
-   // XXX: Emit L3 state
-
-#if GEN_GEN == 8
-   // XXX: PMA - gen8_write_pma_stall_bits(ice, 0);
-#endif
-
-   // XXX: TODO...drawing rectangle...unrevert Jason's patches on master
-
    blorp_exec(blorp_batch, params);
-
-   // XXX: aperture checks?
 
    /* We've smashed all state compared to what the normal 3D pipeline
     * rendering tracks for GL.
     */
-   // XXX: skip some if (!(batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL))
-   ice->state.dirty |= ~(IRIS_DIRTY_POLYGON_STIPPLE |
+
+   uint64_t skip_bits = (IRIS_DIRTY_POLYGON_STIPPLE |
                          IRIS_DIRTY_SO_BUFFERS |
                          IRIS_DIRTY_SO_DECL_LIST |
-                         IRIS_DIRTY_LINE_STIPPLE);
+                         IRIS_DIRTY_LINE_STIPPLE |
+                         IRIS_ALL_DIRTY_FOR_COMPUTE |
+                         IRIS_DIRTY_SCISSOR_RECT |
+                         IRIS_DIRTY_UNCOMPILED_VS |
+                         IRIS_DIRTY_UNCOMPILED_TCS |
+                         IRIS_DIRTY_UNCOMPILED_TES |
+                         IRIS_DIRTY_UNCOMPILED_GS |
+                         IRIS_DIRTY_UNCOMPILED_FS |
+                         IRIS_DIRTY_VF |
+                         IRIS_DIRTY_URB |
+                         IRIS_DIRTY_SF_CL_VIEWPORT |
+                         IRIS_DIRTY_SAMPLER_STATES_VS |
+                         IRIS_DIRTY_SAMPLER_STATES_TCS |
+                         IRIS_DIRTY_SAMPLER_STATES_TES |
+                         IRIS_DIRTY_SAMPLER_STATES_GS);
+
+   /* we can skip flagging IRIS_DIRTY_DEPTH_BUFFER, if
+    * BLORP_BATCH_NO_EMIT_DEPTH_STENCIL is set.
+    */
+   if (blorp_batch->flags & BLORP_BATCH_NO_EMIT_DEPTH_STENCIL)
+      skip_bits |= IRIS_DIRTY_DEPTH_BUFFER;
+
+   if (!params->wm_prog_data)
+      skip_bits |= IRIS_DIRTY_BLEND_STATE | IRIS_DIRTY_PS_BLEND;
+
+   ice->state.dirty |= ~skip_bits;
 
    if (params->dst.enabled) {
       iris_render_cache_add_bo(batch, params->dst.addr.buffer,

@@ -87,8 +87,7 @@ static const struct debug_named_value debug_options[] = {
 		{"hiprio",    FD_DBG_HIPRIO, "Force high-priority context"},
 		{"ttile",     FD_DBG_TTILE,  "Enable texture tiling (a5xx)"},
 		{"perfcntrs", FD_DBG_PERFC,  "Expose performance counters"},
-		{"softpin",   FD_DBG_SOFTPIN,"Enable softpin command submission (experimental)"},
-		{"ubwc",      FD_DBG_UBWC,   "Enable UBWC for all internal buffers (experimental)"},
+		{"noubwc",    FD_DBG_NOUBWC, "Disable UBWC for all internal buffers"},
 		DEBUG_NAMED_VALUE_END
 };
 
@@ -102,7 +101,7 @@ static const char *
 fd_screen_get_name(struct pipe_screen *pscreen)
 {
 	static char buffer[128];
-	util_snprintf(buffer, sizeof(buffer), "FD%03d",
+	snprintf(buffer, sizeof(buffer), "FD%03d",
 			fd_screen(pscreen)->device_id);
 	return buffer;
 }
@@ -197,6 +196,13 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 	case PIPE_CAP_INVALIDATE_BUFFER:
 		return 1;
 
+	case PIPE_CAP_PACKED_UNIFORMS:
+		return !is_a2xx(screen);
+
+	case PIPE_CAP_ROBUST_BUFFER_ACCESS_BEHAVIOR:
+	case PIPE_CAP_DEVICE_RESET_STATUS_QUERY:
+		return screen->has_robustness;
+
 	case PIPE_CAP_VERTEXID_NOBASE:
 		return is_a3xx(screen) || is_a4xx(screen);
 
@@ -211,7 +217,9 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 	case PIPE_CAP_DEPTH_CLIP_DISABLE_SEPARATE:
 		return 0;
 
-	case PIPE_CAP_SM3:
+	case PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD:
+	case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
+	case PIPE_CAP_VERTEX_SHADER_SATURATE:
 	case PIPE_CAP_PRIMITIVE_RESTART:
 	case PIPE_CAP_TGSI_INSTANCEID:
 	case PIPE_CAP_VERTEX_ELEMENT_INSTANCE_DIVISOR:
@@ -279,10 +287,16 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 			return 120;
 		return is_ir3(screen) ? 140 : 120;
 
+	case PIPE_CAP_ESSL_FEATURE_LEVEL:
+		/* we can probably enable 320 for a5xx too, but need to test: */
+		if (is_a6xx(screen)) return 320;
+		if (is_a5xx(screen)) return 310;
+		if (is_ir3(screen))  return 300;
+		return 120;
+
 	case PIPE_CAP_SHADER_BUFFER_OFFSET_ALIGNMENT:
 		if (is_a6xx(screen)) return 64;
 		if (is_a5xx(screen)) return 4;
-			return 4;
 		return 0;
 
 	case PIPE_CAP_MAX_TEXTURE_GATHER_COMPONENTS:
@@ -292,6 +306,15 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 
 	/* TODO if we need this, do it in nir/ir3 backend to avoid breaking precompile: */
 	case PIPE_CAP_FORCE_PERSAMPLE_INTERP:
+		return 0;
+
+	case PIPE_CAP_FBFETCH:
+		if (fd_device_version(screen->dev) >= FD_VERSION_GMEM_BASE &&
+				is_a6xx(screen))
+			return 1;
+		return 0;
+	case PIPE_CAP_SAMPLE_SHADING:
+		if (is_a6xx(screen)) return 1;
 		return 0;
 
 	case PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION:
@@ -338,6 +361,7 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 		return 0;
 	case PIPE_CAP_STREAM_OUTPUT_PAUSE_RESUME:
 	case PIPE_CAP_STREAM_OUTPUT_INTERLEAVE_BUFFERS:
+	case PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL:
 		if (is_ir3(screen))
 			return 1;
 		return 0;
@@ -348,7 +372,8 @@ fd_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 		return 0;
 
 	/* Texturing. */
-	case PIPE_CAP_MAX_TEXTURE_2D_LEVELS:
+	case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
+		return 1 << (MAX_MIP_LEVELS - 1);
 	case PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS:
 		return MAX_MIP_LEVELS;
 	case PIPE_CAP_MAX_TEXTURE_3D_LEVELS:
@@ -583,7 +608,7 @@ fd_get_compute_param(struct pipe_screen *pscreen, enum pipe_shader_ir ir_type,
 
 	case PIPE_COMPUTE_CAP_IR_TARGET:
 		if (ret)
-			sprintf(ret, ir);
+			sprintf(ret, "%s", ir);
 		return strlen(ir) * sizeof(char);
 
 	case PIPE_COMPUTE_CAP_GRID_DIMENSION:
@@ -642,7 +667,7 @@ fd_get_compiler_options(struct pipe_screen *pscreen,
 	return ir2_get_compiler_options();
 }
 
-boolean
+bool
 fd_screen_bo_get_handle(struct pipe_screen *pscreen,
 		struct fd_bo *bo,
 		struct renderonly_scanout *scanout,
@@ -655,14 +680,14 @@ fd_screen_bo_get_handle(struct pipe_screen *pscreen,
 		return fd_bo_get_name(bo, &whandle->handle) == 0;
 	} else if (whandle->type == WINSYS_HANDLE_TYPE_KMS) {
 		if (renderonly_get_handle(scanout, whandle))
-			return TRUE;
+			return true;
 		whandle->handle = fd_bo_handle(bo);
-		return TRUE;
+		return true;
 	} else if (whandle->type == WINSYS_HANDLE_TYPE_FD) {
 		whandle->handle = fd_bo_dmabuf(bo);
-		return TRUE;
+		return true;
 	} else {
-		return FALSE;
+		return false;
 	}
 }
 
@@ -766,6 +791,10 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 	}
 	screen->gmemsize_bytes = val;
 
+	if (fd_device_version(dev) >= FD_VERSION_GMEM_BASE) {
+		fd_pipe_get_param(screen->pipe, FD_GMEM_BASE, &screen->gmem_base);
+	}
+
 	if (fd_pipe_get_param(screen->pipe, FD_DEVICE_ID, &val)) {
 		DBG("could not get device-id");
 		goto fail;
@@ -810,6 +839,11 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 		screen->priority_mask = (1 << val) - 1;
 	}
 
+	if ((fd_device_version(dev) >= FD_VERSION_ROBUSTNESS) &&
+			(fd_pipe_get_param(screen->pipe, FD_PP_PGTABLE, &val) == 0)) {
+		screen->has_robustness = val;
+	}
+
 	struct sysinfo si;
 	sysinfo(&si);
 	screen->ram_size = si.totalram;
@@ -848,6 +882,7 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 		fd4_screen_init(pscreen);
 		break;
 	case 530:
+	case 540:
 		fd5_screen_init(pscreen);
 		break;
 	case 630:
@@ -872,12 +907,11 @@ fd_screen_create(struct fd_device *dev, struct renderonly *ro)
 		screen->num_vsc_pipes = 8;
 	}
 
-	/* NOTE: don't enable reordering on a2xx, since completely untested.
-	 * Also, don't enable if we have too old of a kernel to support
+	/* NOTE: don't enable if we have too old of a kernel to support
 	 * growable cmdstream buffers, since memory requirement for cmdstream
 	 * buffers would be too much otherwise.
 	 */
-	if ((screen->gpu_id >= 300) && (fd_device_version(dev) >= FD_VERSION_UNLIMITED_CMDS))
+	if (fd_device_version(dev) >= FD_VERSION_UNLIMITED_CMDS)
 		screen->reorder = !(fd_mesa_debug & FD_DBG_INORDER);
 
 	fd_bc_init(&screen->batch_cache);

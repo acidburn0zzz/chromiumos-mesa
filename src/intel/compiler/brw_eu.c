@@ -33,7 +33,7 @@
 #include "brw_eu_defines.h"
 #include "brw_eu.h"
 #include "brw_shader.h"
-#include "common/gen_debug.h"
+#include "dev/gen_debug.h"
 
 #include "util/ralloc.h"
 
@@ -488,7 +488,13 @@ static const struct opcode_desc opcode_descs[128] = {
    [BRW_OPCODE_ASR] = {
       .name = "asr",     .nsrc = 2, .ndst = 1, .gens = GEN_ALL,
    },
-   /* Reserved - 13-15 */
+   /* Reserved - 13 */
+   [BRW_OPCODE_ROR] = {
+      .name = "ror",     .nsrc = 2, .ndst = 1, .gens = GEN_GE(GEN11),
+   },
+   [BRW_OPCODE_ROL] = {
+      .name = "rol",     .nsrc = 2, .ndst = 1, .gens = GEN_GE(GEN11),
+   },
    [BRW_OPCODE_CMP] = {
       .name = "cmp",     .nsrc = 2, .ndst = 1, .gens = GEN_ALL,
    },

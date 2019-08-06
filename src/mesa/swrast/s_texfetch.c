@@ -464,7 +464,11 @@ texfetch_funcs[] =
    FETCH_NULL(SRGB8_ALPHA8_ASTC_5x5x5),
    FETCH_NULL(SRGB8_ALPHA8_ASTC_6x5x5),
    FETCH_NULL(SRGB8_ALPHA8_ASTC_6x6x5),
-   FETCH_NULL(SRGB8_ALPHA8_ASTC_6x6x6)
+   FETCH_NULL(SRGB8_ALPHA8_ASTC_6x6x6),
+
+   FETCH_NULL(ATC_RGB),
+   FETCH_NULL(ATC_RGBA_EXPLICIT),
+   FETCH_NULL(ATC_RGBA_INTERPOLATED)
 };
 
 
@@ -487,10 +491,8 @@ set_fetch_functions(const struct gl_sampler_object *samp,
 
    STATIC_ASSERT(ARRAY_SIZE(texfetch_funcs) == MESA_FORMAT_COUNT);
 
-   if (samp->sRGBDecode == GL_SKIP_DECODE_EXT &&
-       _mesa_get_format_color_encoding(format) == GL_SRGB) {
+   if (samp->sRGBDecode == GL_SKIP_DECODE_EXT)
       format = _mesa_get_srgb_format_linear(format);
-   }
 
    assert(format < MESA_FORMAT_COUNT);
 

@@ -30,46 +30,38 @@
 #include "pan_screen.h"
 #include "pan_allocate.h"
 #include "drm-uapi/drm.h"
+#include "util/u_range.h"
 
-struct panfrost_bo {
-        /* Address to the BO in question */
+/* Describes the memory layout of a BO */
 
-        uint8_t *cpu[MAX_MIP_LEVELS];
-
-        /* Not necessarily a GPU mapping of cpu! In case of texture tiling, gpu
-         * points to the GPU-side, tiled texture, while cpu points to the
-         * CPU-side, untiled texture from mesa */
-
-        mali_ptr gpu[MAX_MIP_LEVELS];
-
-        /* Memory entry corresponding to gpu above */
-        struct panfrost_memory_entry *entry[MAX_MIP_LEVELS];
-
-        /* Set if this bo was imported rather than allocated */
-        bool imported;
-
-        /* Number of bytes of the imported allocation */
-        size_t imported_size;
-
-        /* Set for tiled, clear for linear. */
-        bool tiled;
-
-        /* Is something other than level 0 ever written? */
-        bool is_mipmap;
-
-        /* If AFBC is enabled for this resource, we lug around an AFBC
-         * metadata buffer as well. The actual AFBC resource is also in
-         * afbc_slab (only defined for AFBC) at position afbc_main_offset */
-
-        bool has_afbc;
-        struct panfrost_memory afbc_slab;
-        int afbc_metadata_size;
-
-        /* Similarly for TE */
-        bool has_checksum;
-        struct panfrost_memory checksum_slab;
-        int checksum_stride;
+enum panfrost_memory_layout {
+        PAN_LINEAR,
+        PAN_TILED,
+        PAN_AFBC
 };
+
+struct panfrost_slice {
+        unsigned offset;
+        unsigned stride;
+
+        /* If there is a header preceding each slice, how big is
+         * that header?  Used for AFBC */
+        unsigned header_size;
+
+        /* If checksumming is enabled following the slice, what
+         * is its offset/stride? */
+        unsigned checksum_offset;
+        unsigned checksum_stride;
+
+        /* Has anything been written to this slice? */
+        bool initialized;
+};
+
+void
+panfrost_bo_reference(struct panfrost_bo *bo);
+
+void
+panfrost_bo_unreference(struct pipe_screen *screen, struct panfrost_bo *bo);
 
 struct panfrost_resource {
         struct pipe_resource base;
@@ -78,16 +70,70 @@ struct panfrost_resource {
         struct renderonly_scanout *scanout;
 
         struct panfrost_resource *separate_stencil;
+
+        struct util_range valid_buffer_range;
+
+        /* Description of the mip levels */
+        struct panfrost_slice slices[MAX_MIP_LEVELS];
+
+        /* Distance from tree to tree */
+        unsigned cubemap_stride;
+
+        /* Internal layout (tiled?) */
+        enum panfrost_memory_layout layout;
+
+        /* Is transaciton elimination enabled? */
+        bool checksummed;
 };
 
 static inline struct panfrost_resource *
 pan_resource(struct pipe_resource *p)
 {
-   return (struct panfrost_resource *)p;
+        return (struct panfrost_resource *)p;
 }
+
+struct panfrost_gtransfer {
+        struct pipe_transfer base;
+        void *map;
+};
+
+static inline struct panfrost_gtransfer *
+pan_transfer(struct pipe_transfer *p)
+{
+        return (struct panfrost_gtransfer *)p;
+}
+
+mali_ptr
+panfrost_get_texture_address(
+        struct panfrost_resource *rsrc,
+        unsigned level, unsigned face);
 
 void panfrost_resource_screen_init(struct panfrost_screen *screen);
 
 void panfrost_resource_context_init(struct pipe_context *pctx);
+
+void
+panfrost_resource_hint_layout(
+                struct panfrost_screen *screen,
+                struct panfrost_resource *rsrc,
+                enum panfrost_memory_layout layout,
+                signed weight);
+
+/* AFBC */
+
+bool
+panfrost_format_supports_afbc(enum pipe_format format);
+
+unsigned
+panfrost_afbc_header_size(unsigned width, unsigned height);
+
+/* Blitting */
+
+void
+panfrost_blit(struct pipe_context *pipe,
+              const struct pipe_blit_info *info);
+
+void
+panfrost_blit_wallpaper(struct panfrost_context *ctx);
 
 #endif /* PAN_RESOURCE_H */

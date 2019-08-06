@@ -153,26 +153,8 @@ iris_isl_format_for_pipe_format(enum pipe_format pf)
       [PIPE_FORMAT_B10G10R10A2_UNORM]       = ISL_FORMAT_B10G10R10A2_UNORM,
       [PIPE_FORMAT_R8G8B8X8_UNORM]          = ISL_FORMAT_R8G8B8X8_UNORM,
 
-#if 0
-      /* Leave these disabled for now, we'd need border color hacks and
-       * we don't currently have the surface format in that code...
-       */
-      //[PIPE_FORMAT_A8_UINT]                 = ISL_FORMAT_A8_UINT,
-      //[PIPE_FORMAT_A8_SINT]                 = ISL_FORMAT_A8_SINT,
-      //[PIPE_FORMAT_A8_SNORM]                = ISL_FORMAT_A8_SNORM,
-      //[PIPE_FORMAT_A16_UINT]                = ISL_FORMAT_A16_UINT,
-      //[PIPE_FORMAT_A16_SINT]                = ISL_FORMAT_A16_SINT,
-      //[PIPE_FORMAT_A16_SNORM]               = ISL_FORMAT_A16_SNORM,
-      [PIPE_FORMAT_A16_FLOAT]               = ISL_FORMAT_A16_FLOAT,
-      //[PIPE_FORMAT_A32_UINT]                = ISL_FORMAT_A32_UINT,
-      //[PIPE_FORMAT_A32_SINT]                = ISL_FORMAT_A32_SINT,
-      [PIPE_FORMAT_A32_FLOAT]               = ISL_FORMAT_A32_FLOAT,
-#endif
-      [PIPE_FORMAT_A8_UNORM]                = ISL_FORMAT_A8_UNORM,
-      [PIPE_FORMAT_A16_UNORM]               = ISL_FORMAT_A16_UNORM,
-
       /* Just use red formats for these - they're actually renderable,
-       * and faster to sample than the legacy L/I formats.
+       * and faster to sample than the legacy L/I/A/LA formats.
        */
       [PIPE_FORMAT_I8_UNORM]                = ISL_FORMAT_R8_UNORM,
       [PIPE_FORMAT_I8_UINT]                 = ISL_FORMAT_R8_UINT,
@@ -200,26 +182,39 @@ iris_isl_format_for_pipe_format(enum pipe_format pf)
       [PIPE_FORMAT_L32_SINT]                = ISL_FORMAT_R32_SINT,
       [PIPE_FORMAT_L32_FLOAT]               = ISL_FORMAT_R32_FLOAT,
 
-      /* Sadly, there is no R8_SRGB format so we have to use luminance. */
+      /* We also map alpha and luminance-alpha formats to red as well,
+       * though most of these (other than A8_UNORM) will be non-renderable.
+       */
+      [PIPE_FORMAT_A8_UINT]                 = ISL_FORMAT_R8_UINT,
+      [PIPE_FORMAT_A8_UNORM]                = ISL_FORMAT_R8_UNORM,
+      [PIPE_FORMAT_A8_SINT]                 = ISL_FORMAT_R8_SINT,
+      [PIPE_FORMAT_A8_SNORM]                = ISL_FORMAT_R8_SNORM,
+      [PIPE_FORMAT_A16_UINT]                = ISL_FORMAT_R16_UINT,
+      [PIPE_FORMAT_A16_UNORM]               = ISL_FORMAT_R16_UNORM,
+      [PIPE_FORMAT_A16_SINT]                = ISL_FORMAT_R16_SINT,
+      [PIPE_FORMAT_A16_SNORM]               = ISL_FORMAT_R16_SNORM,
+      [PIPE_FORMAT_A16_FLOAT]               = ISL_FORMAT_R16_FLOAT,
+      [PIPE_FORMAT_A32_UINT]                = ISL_FORMAT_R32_UINT,
+      [PIPE_FORMAT_A32_SINT]                = ISL_FORMAT_R32_SINT,
+      [PIPE_FORMAT_A32_FLOAT]               = ISL_FORMAT_R32_FLOAT,
+
+      [PIPE_FORMAT_L8A8_UINT]               = ISL_FORMAT_R8G8_UINT,
+      [PIPE_FORMAT_L8A8_UNORM]              = ISL_FORMAT_R8G8_UNORM,
+      [PIPE_FORMAT_L8A8_SINT]               = ISL_FORMAT_R8G8_SINT,
+      [PIPE_FORMAT_L8A8_SNORM]              = ISL_FORMAT_R8G8_SNORM,
+      [PIPE_FORMAT_L16A16_UINT]             = ISL_FORMAT_R16G16_UINT,
+      [PIPE_FORMAT_L16A16_UNORM]            = ISL_FORMAT_R16G16_UNORM,
+      [PIPE_FORMAT_L16A16_SINT]             = ISL_FORMAT_R16G16_SINT,
+      [PIPE_FORMAT_L16A16_SNORM]            = ISL_FORMAT_R16G16_SNORM,
+      [PIPE_FORMAT_L16A16_FLOAT]            = ISL_FORMAT_R16G16_FLOAT,
+      [PIPE_FORMAT_L32A32_UINT]             = ISL_FORMAT_R32G32_UINT,
+      [PIPE_FORMAT_L32A32_SINT]             = ISL_FORMAT_R32G32_SINT,
+      [PIPE_FORMAT_L32A32_FLOAT]            = ISL_FORMAT_R32G32_FLOAT,
+
+      /* Sadly, we have to use luminance[-alpha] formats for sRGB decoding. */
+      [PIPE_FORMAT_R8_SRGB]                 = ISL_FORMAT_L8_UNORM_SRGB,
       [PIPE_FORMAT_L8_SRGB]                 = ISL_FORMAT_L8_UNORM_SRGB,
-
-#if 0
-      /* Just fake these with RGBA at a higher level for now */
-      [PIPE_FORMAT_L8A8_UINT]               = ISL_FORMAT_L8A8_UINT,
-      [PIPE_FORMAT_L8A8_UNORM]              = ISL_FORMAT_L8A8_UNORM,
-      [PIPE_FORMAT_L8A8_SINT]               = ISL_FORMAT_L8A8_SINT,
-      //[PIPE_FORMAT_L8A8_SNORM]              = ISL_FORMAT_L8A8_SNORM,
-      //[PIPE_FORMAT_L16A16_UINT]             = ISL_FORMAT_L16A16_UINT,
-      [PIPE_FORMAT_L16A16_UNORM]            = ISL_FORMAT_L16A16_UNORM,
-      //[PIPE_FORMAT_L16A16_SINT]             = ISL_FORMAT_L16A16_SINT,
-      //[PIPE_FORMAT_L16A16_SNORM]            = ISL_FORMAT_L16A16_SNORM,
-      [PIPE_FORMAT_L16A16_FLOAT]            = ISL_FORMAT_L16A16_FLOAT,
-      //[PIPE_FORMAT_L32A32_UINT]             = ISL_FORMAT_L32A32_UINT,
-      //[PIPE_FORMAT_L32A32_SINT]             = ISL_FORMAT_L32A32_SINT,
-      [PIPE_FORMAT_L32A32_FLOAT]            = ISL_FORMAT_L32A32_FLOAT,
-
       [PIPE_FORMAT_L8A8_SRGB]               = ISL_FORMAT_L8A8_UNORM_SRGB,
-#endif
 
       [PIPE_FORMAT_R10G10B10A2_SSCALED]     = ISL_FORMAT_R10G10B10A2_SSCALED,
       [PIPE_FORMAT_R10G10B10A2_SNORM]       = ISL_FORMAT_R10G10B10A2_SNORM,
@@ -320,30 +315,19 @@ iris_isl_format_for_pipe_format(enum pipe_format pf)
       [PIPE_FORMAT_ASTC_12x12_SRGB]         = ISL_FORMAT_ASTC_LDR_2D_12X12_U8SRGB,
 
       [PIPE_FORMAT_A1B5G5R5_UNORM]          = ISL_FORMAT_A1B5G5R5_UNORM,
+
+      /* We support these so that we know the API expects no alpha channel.
+       * Otherwise, the state tracker would just give us a format with alpha
+       * and we wouldn't know to override the swizzle to 1.
+       */
+      [PIPE_FORMAT_R16G16B16X16_UINT]       = ISL_FORMAT_R16G16B16A16_UINT,
+      [PIPE_FORMAT_R16G16B16X16_SINT]       = ISL_FORMAT_R16G16B16A16_SINT,
+      [PIPE_FORMAT_R32G32B32X32_UINT]       = ISL_FORMAT_R32G32B32A32_UINT,
+      [PIPE_FORMAT_R32G32B32X32_SINT]       = ISL_FORMAT_R32G32B32A32_SINT,
+      [PIPE_FORMAT_R10G10B10X2_SNORM]       = ISL_FORMAT_R10G10B10A2_SNORM,
    };
    assert(pf < PIPE_FORMAT_COUNT);
    return table[pf];
-}
-
-// XXX: use RED for ALPHA textures
-UNUSED static enum pipe_format
-alpha_to_red(enum pipe_format pf)
-{
-   switch (pf) {
-   case PIPE_FORMAT_A8_UNORM:  return PIPE_FORMAT_R8_UNORM;
-   case PIPE_FORMAT_A16_UNORM: return PIPE_FORMAT_R16_UNORM;
-   case PIPE_FORMAT_A8_SNORM:  return PIPE_FORMAT_R8_SNORM;
-   case PIPE_FORMAT_A16_SNORM: return PIPE_FORMAT_R16_SNORM;
-   case PIPE_FORMAT_A16_FLOAT: return PIPE_FORMAT_R16_FLOAT;
-   case PIPE_FORMAT_A32_FLOAT: return PIPE_FORMAT_R32_FLOAT;
-   case PIPE_FORMAT_A8_UINT:   return PIPE_FORMAT_A8_UINT;
-   case PIPE_FORMAT_A8_SINT:   return PIPE_FORMAT_A8_SINT;
-   case PIPE_FORMAT_A16_UINT:  return PIPE_FORMAT_R16_UINT;
-   case PIPE_FORMAT_A16_SINT:  return PIPE_FORMAT_R16_SINT;
-   case PIPE_FORMAT_A32_UINT:  return PIPE_FORMAT_R32_UINT;
-   case PIPE_FORMAT_A32_SINT:  return PIPE_FORMAT_R32_SINT;
-   default:                    return pf;
-   }
 }
 
 struct iris_format_info
@@ -351,31 +335,54 @@ iris_format_for_usage(const struct gen_device_info *devinfo,
                       enum pipe_format pformat,
                       isl_surf_usage_flags_t usage)
 {
+   enum isl_format format = iris_isl_format_for_pipe_format(pformat);
+   const struct isl_format_layout *fmtl = isl_format_get_layout(format);
    struct isl_swizzle swizzle = ISL_SWIZZLE_IDENTITY;
 
-   if (usage & ISL_SURF_USAGE_TEXTURE_BIT) {
-      if (!util_format_is_srgb(pformat)) {
-         if (util_format_is_intensity(pformat)) {
-            swizzle = ISL_SWIZZLE(RED, RED, RED, RED);
-         } else if (util_format_is_luminance(pformat)) {
-            swizzle = ISL_SWIZZLE(RED, RED, RED, ONE);
-         //} else if (util_format_is_alpha(pformat)) {
-            //pformat = alpha_to_red(pformat);
-            //swizzle = ISL_SWIZZLE(ZERO, ZERO, ZERO, RED);
-         }
+   if (!util_format_is_srgb(pformat)) {
+      if (util_format_is_intensity(pformat)) {
+         swizzle = ISL_SWIZZLE(RED, RED, RED, RED);
+      } else if (util_format_is_luminance(pformat)) {
+         swizzle = ISL_SWIZZLE(RED, RED, RED, ONE);
+      } else if (util_format_is_luminance_alpha(pformat)) {
+         swizzle = ISL_SWIZZLE(RED, RED, RED, GREEN);
+      } else if (util_format_is_alpha(pformat)) {
+         swizzle = ISL_SWIZZLE(ZERO, ZERO, ZERO, RED);
       }
-      if (pformat == PIPE_FORMAT_DXT1_RGB ||
-          pformat == PIPE_FORMAT_DXT1_SRGB)
-         swizzle = ISL_SWIZZLE(RED, GREEN, BLUE, ONE);
    }
 
-   enum isl_format format = iris_isl_format_for_pipe_format(pformat);
+   /* When faking RGBX pipe formats with RGBA ISL formats, override alpha. */
+   if (!util_format_has_alpha(pformat) && fmtl->channels.a.type != ISL_VOID) {
+      swizzle = ISL_SWIZZLE(RED, GREEN, BLUE, ONE);
+   }
 
-   /* Convert RGBX into RGBA for rendering */
+   if ((usage & ISL_SURF_USAGE_RENDER_TARGET_BIT) &&
+       pformat == PIPE_FORMAT_A8_UNORM) {
+      /* Most of the hardware A/LA formats are not renderable, except
+       * for A8_UNORM.  SURFACE_STATE's shader channel select fields
+       * cannot be used to swap RGB and A channels when rendering (as
+       * it could impact alpha blending), so we have to use the actual
+       * A8_UNORM format when rendering.
+       */
+      format = ISL_FORMAT_A8_UNORM;
+      swizzle = ISL_SWIZZLE_IDENTITY;
+   }
+
+   /* We choose RGBA over RGBX for rendering the hardware doesn't support
+    * rendering to RGBX. However, when this internal override is used on Gen9+,
+    * fast clears don't work correctly.
+    *
+    * i965 fixes this by pretending to not support RGBX formats, and the higher
+    * layers of Mesa pick the RGBA format instead. Gallium doesn't work that
+    * way, and might choose a different format, like BGRX instead of RGBX,
+    * which will also cause problems when sampling from a surface fast cleared
+    * as RGBX. So we always choose RGBA instead of RGBX explicitly
+    * here.
+    */
    if (isl_format_is_rgbx(format) &&
-       (usage & ISL_SURF_USAGE_RENDER_TARGET_BIT) &&
        !isl_format_supports_rendering(devinfo, format)) {
       format = isl_format_rgbx_to_rgba(format);
+      swizzle = ISL_SWIZZLE(RED, GREEN, BLUE, ONE);
    }
 
    return (struct iris_format_info) { .fmt = format, .swizzle = swizzle };
@@ -387,7 +394,7 @@ iris_format_for_usage(const struct gen_device_info *devinfo,
  * Returns true if the given format is supported for the given usage
  * (PIPE_BIND_*) and sample count.
  */
-boolean
+bool
 iris_is_format_supported(struct pipe_screen *pscreen,
                          enum pipe_format pformat,
                          enum pipe_texture_target target,
@@ -399,8 +406,8 @@ iris_is_format_supported(struct pipe_screen *pscreen,
    const struct gen_device_info *devinfo = &screen->devinfo;
    uint32_t max_samples = devinfo->gen == 8 ? 8 : 16;
 
-   // XXX: msaa max
-   if (sample_count > max_samples || !util_is_power_of_two_or_zero(sample_count))
+   if (sample_count > max_samples ||
+       !util_is_power_of_two_or_zero(sample_count))
       return false;
 
    if (pformat == PIPE_FORMAT_NONE)
@@ -427,6 +434,24 @@ iris_is_format_supported(struct pipe_screen *pscreen,
    }
 
    if (usage & PIPE_BIND_RENDER_TARGET) {
+      /* Alpha and luminance-alpha formats other than A8_UNORM are not
+       * renderable.  For texturing, we can use R or RG formats with
+       * shader channel selects (SCS) to swizzle the data into the correct
+       * channels.  But for render targets, the hardware prohibits using
+       * SCS to move shader outputs between the RGB and A channels, as it
+       * would alter what data is used for alpha blending.
+       *
+       * For BLORP, we can apply the swizzle in the shader.  But for
+       * general rendering, this would mean recompiling the shader, which
+       * we'd like to avoid doing.  So we mark these formats non-renderable.
+       *
+       * We do support A8_UNORM as it's required and is renderable.
+       */
+      if (pformat != PIPE_FORMAT_A8_UNORM &&
+          (util_format_is_alpha(pformat) ||
+           util_format_is_luminance_alpha(pformat)))
+         supported = false;
+
       enum isl_format rt_format = format;
 
       if (isl_format_is_rgbx(format) &&
@@ -440,9 +465,13 @@ iris_is_format_supported(struct pipe_screen *pscreen,
    }
 
    if (usage & PIPE_BIND_SHADER_IMAGE) {
-      // XXX: allow untyped reads
-      supported &= isl_format_supports_typed_reads(devinfo, format) &&
-                   isl_format_supports_typed_writes(devinfo, format);
+      /* Dataport doesn't support compression, and we can't resolve an MCS
+       * compressed surface.  (Buffer images may have sample count of 0.)
+       */
+      supported &= sample_count == 0;
+
+      supported &= isl_format_supports_typed_writes(devinfo, format);
+      supported &= isl_has_matching_typed_storage_image_format(devinfo, format);
    }
 
    if (usage & PIPE_BIND_SAMPLER_VIEW) {
@@ -468,38 +497,6 @@ iris_is_format_supported(struct pipe_screen *pscreen,
       supported &= format == ISL_FORMAT_R8_UINT ||
                    format == ISL_FORMAT_R16_UINT ||
                    format == ISL_FORMAT_R32_UINT;
-   }
-
-   if (usage & PIPE_BIND_CONSTANT_BUFFER) {
-      // XXX:
-   }
-
-   if (usage & PIPE_BIND_STREAM_OUTPUT) {
-      // XXX:
-   }
-
-   if (usage & PIPE_BIND_CURSOR) {
-      // XXX:
-   }
-
-   if (usage & PIPE_BIND_CUSTOM) {
-      // XXX:
-   }
-
-   if (usage & PIPE_BIND_SHADER_BUFFER) {
-      // XXX:
-   }
-
-   if (usage & PIPE_BIND_COMPUTE_RESOURCE) {
-      // XXX:
-   }
-
-   if (usage & PIPE_BIND_COMMAND_ARGS_BUFFER) {
-      // XXX:
-   }
-
-   if (usage & PIPE_BIND_QUERY_BUFFER) {
-      // XXX:
    }
 
    return supported;

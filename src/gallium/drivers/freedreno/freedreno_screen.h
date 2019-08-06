@@ -59,6 +59,7 @@ struct fd_screen {
 
 	struct slab_parent_pool transfer_pool;
 
+	uint64_t gmem_base;
 	uint32_t gmemsize_bytes;
 	uint32_t device_id;
 	uint32_t gpu_id;         /* 220, 305, etc */
@@ -70,6 +71,7 @@ struct fd_screen {
 	uint32_t num_vsc_pipes;
 	uint32_t priority_mask;
 	bool has_timestamp;
+	bool has_robustness;
 
 	unsigned num_perfcntr_groups;
 	const struct fd_perfcntr_group *perfcntr_groups;
@@ -112,7 +114,7 @@ fd_screen(struct pipe_screen *pscreen)
 	return (struct fd_screen *)pscreen;
 }
 
-boolean fd_screen_bo_get_handle(struct pipe_screen *pscreen,
+bool fd_screen_bo_get_handle(struct pipe_screen *pscreen,
 		struct fd_bo *bo,
 		struct renderonly_scanout *scanout,
 		unsigned stride,

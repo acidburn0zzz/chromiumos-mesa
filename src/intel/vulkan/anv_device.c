@@ -37,16 +37,40 @@
 #include "util/build_id.h"
 #include "util/disk_cache.h"
 #include "util/mesa-sha1.h"
+#include "util/os_file.h"
+#include "util/u_atomic.h"
 #include "util/u_string.h"
 #include "git_sha1.h"
 #include "vk_util.h"
 #include "common/gen_defines.h"
+#include "compiler/glsl_types.h"
 
 #include "genxml/gen7_pack.h"
 
+/* This is probably far to big but it reflects the max size used for messages
+ * in OpenGLs KHR_debug.
+ */
+#define MAX_DEBUG_MESSAGE_LENGTH    4096
+
 static void
 compiler_debug_log(void *data, const char *fmt, ...)
-{ }
+{
+   char str[MAX_DEBUG_MESSAGE_LENGTH];
+   struct anv_device *device = (struct anv_device *)data;
+
+   if (list_empty(&device->instance->debug_report_callbacks.callbacks))
+      return;
+
+   va_list args;
+   va_start(args, fmt);
+   (void) vsnprintf(str, MAX_DEBUG_MESSAGE_LENGTH, fmt, args);
+   va_end(args);
+
+   vk_debug_report(&device->instance->debug_report_callbacks,
+                   VK_DEBUG_REPORT_DEBUG_BIT_EXT,
+                   VK_DEBUG_REPORT_OBJECT_TYPE_UNKNOWN_EXT,
+                   0, 0, 0, "anv", str);
+}
 
 static void
 compiler_perf_log(void *data, const char *fmt, ...)
@@ -128,6 +152,8 @@ anv_physical_device_init_heaps(struct anv_physical_device *device, int fd)
        */
       device->memory.heap_count = 1;
       device->memory.heaps[0] = (struct anv_memory_heap) {
+         .vma_start = LOW_HEAP_MIN_ADDRESS,
+         .vma_size = LOW_HEAP_SIZE,
          .size = heap_size,
          .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
          .supports_48bit_addresses = false,
@@ -147,11 +173,19 @@ anv_physical_device_init_heaps(struct anv_physical_device *device, int fd)
 
       device->memory.heap_count = 2;
       device->memory.heaps[0] = (struct anv_memory_heap) {
+         .vma_start = HIGH_HEAP_MIN_ADDRESS,
+         /* Leave the last 4GiB out of the high vma range, so that no state
+          * base address + size can overflow 48 bits. For more information see
+          * the comment about Wa32bitGeneralStateOffset in anv_allocator.c
+          */
+         .vma_size = gtt_size - (1ull << 32) - HIGH_HEAP_MIN_ADDRESS,
          .size = heap_size_48bit,
          .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
          .supports_48bit_addresses = true,
       };
       device->memory.heaps[1] = (struct anv_memory_heap) {
+         .vma_start = LOW_HEAP_MIN_ADDRESS,
+         .vma_size = LOW_HEAP_SIZE,
          .size = heap_size_32bit,
          .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
          .supports_48bit_addresses = false,
@@ -244,6 +278,14 @@ anv_physical_device_init_uuids(struct anv_physical_device *device)
    _mesa_sha1_update(&sha1_ctx, build_id_data(note), build_id_len);
    _mesa_sha1_update(&sha1_ctx, &device->chipset_id,
                      sizeof(device->chipset_id));
+   _mesa_sha1_update(&sha1_ctx, &device->always_use_bindless,
+                     sizeof(device->always_use_bindless));
+   _mesa_sha1_update(&sha1_ctx, &device->has_a64_buffer_access,
+                     sizeof(device->has_a64_buffer_access));
+   _mesa_sha1_update(&sha1_ctx, &device->has_bindless_images,
+                     sizeof(device->has_bindless_images));
+   _mesa_sha1_update(&sha1_ctx, &device->has_bindless_samplers,
+                     sizeof(device->has_bindless_samplers));
    _mesa_sha1_final(&sha1_ctx, sha1);
    memcpy(device->pipeline_cache_uuid, sha1, VK_UUID_SIZE);
 
@@ -302,6 +344,29 @@ anv_physical_device_free_disk_cache(struct anv_physical_device *device)
 #endif
 }
 
+static uint64_t
+get_available_system_memory()
+{
+   char *meminfo = os_read_file("/proc/meminfo");
+   if (!meminfo)
+      return 0;
+
+   char *str = strstr(meminfo, "MemAvailable:");
+   if (!str) {
+      free(meminfo);
+      return 0;
+   }
+
+   uint64_t kb_mem_available;
+   if (sscanf(str, "MemAvailable: %" PRIx64, &kb_mem_available) == 1) {
+      free(meminfo);
+      return kb_mem_available << 10;
+   }
+
+   free(meminfo);
+   return 0;
+}
+
 static VkResult
 anv_physical_device_init(struct anv_physical_device *device,
                          struct anv_instance *instance,
@@ -356,10 +421,8 @@ anv_physical_device_init(struct anv_physical_device *device,
       intel_logw("Ivy Bridge Vulkan support is incomplete");
    } else if (device->info.gen == 7 && device->info.is_baytrail) {
       intel_logw("Bay Trail Vulkan support is incomplete");
-   } else if (device->info.gen >= 8 && device->info.gen <= 10) {
-      /* Gen8-10 fully supported */
-   } else if (device->info.gen == 11) {
-      intel_logw("Vulkan is not yet fully supported on gen11.");
+   } else if (device->info.gen >= 8 && device->info.gen <= 11) {
+      /* Gen8-11 fully supported */
    } else {
       result = vk_errorf(device->instance, device,
                          VK_ERROR_INCOMPATIBLE_DRIVER,
@@ -418,6 +481,30 @@ anv_physical_device_init(struct anv_physical_device *device,
 
    device->has_context_isolation =
       anv_gem_get_param(fd, I915_PARAM_HAS_CONTEXT_ISOLATION);
+
+   device->always_use_bindless =
+      env_var_as_boolean("ANV_ALWAYS_BINDLESS", false);
+
+   /* We first got the A64 messages on broadwell and we can only use them if
+    * we can pass addresses directly into the shader which requires softpin.
+    */
+   device->has_a64_buffer_access = device->info.gen >= 8 &&
+                                   device->use_softpin;
+
+   /* We first get bindless image access on Skylake and we can only really do
+    * it if we don't have any relocations so we need softpin.
+    */
+   device->has_bindless_images = device->info.gen >= 9 &&
+                                 device->use_softpin;
+
+   /* We've had bindless samplers since Ivy Bridge (forever in Vulkan terms)
+    * because it's just a matter of setting the sampler address in the sample
+    * message header.  However, we've not bothered to wire it up for vec4 so
+    * we leave it disabled on gen7.
+    */
+   device->has_bindless_samplers = device->info.gen >= 8;
+
+   device->has_mem_available = get_available_system_memory() != 0;
 
    /* Starting with Gen10, the timestamp frequency of the command streamer may
     * vary from one part to another. We can query the value from the kernel.
@@ -685,6 +772,7 @@ VkResult anv_CreateInstance(
       env_var_as_boolean("ANV_ENABLE_PIPELINE_CACHE", true);
 
    _mesa_locale_init();
+   glsl_type_singleton_init_or_ref();
 
    VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
 
@@ -715,6 +803,7 @@ void anv_DestroyInstance(
 
    vk_debug_report_instance_destroy(&instance->debug_report_callbacks);
 
+   glsl_type_singleton_decref();
    _mesa_locale_fini();
 
    vk_free(&instance->alloc, instance);
@@ -812,7 +901,7 @@ VkResult anv_EnumeratePhysicalDeviceGroups(
       memset(p->physicalDevices, 0, sizeof(p->physicalDevices));
       p->physicalDevices[0] =
          anv_physical_device_to_handle(&instance->physicalDevice);
-      p->subsetAllocation = VK_FALSE;
+      p->subsetAllocation = false;
 
       vk_foreach_struct(ext, p->pNext)
          anv_debug_ignored_stype(ext->sType);
@@ -904,8 +993,6 @@ void anv_GetPhysicalDeviceFeatures2(
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES_KHR: {
          VkPhysicalDevice8BitStorageFeaturesKHR *features =
             (VkPhysicalDevice8BitStorageFeaturesKHR *)ext;
-         ANV_FROM_HANDLE(anv_physical_device, pdevice, physicalDevice);
-
          features->storageBuffer8BitAccess = pdevice->info.gen >= 8;
          features->uniformAndStorageBuffer8BitAccess = pdevice->info.gen >= 8;
          features->storagePushConstant8 = pdevice->info.gen >= 8;
@@ -922,20 +1009,25 @@ void anv_GetPhysicalDeviceFeatures2(
          break;
       }
 
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_ADDRESS_FEATURES_EXT: {
-         VkPhysicalDeviceBufferAddressFeaturesEXT *features = (void *)ext;
-         features->bufferDeviceAddress = pdevice->use_softpin &&
-                                         pdevice->info.gen >= 8;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT: {
+         VkPhysicalDeviceBufferDeviceAddressFeaturesEXT *features = (void *)ext;
+         features->bufferDeviceAddress = pdevice->has_a64_buffer_access;
          features->bufferDeviceAddressCaptureReplay = false;
          features->bufferDeviceAddressMultiDevice = false;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_NV: {
+         VkPhysicalDeviceComputeShaderDerivativesFeaturesNV *features =
+            (VkPhysicalDeviceComputeShaderDerivativesFeaturesNV *)ext;
+         features->computeDerivativeGroupQuads = true;
+         features->computeDerivativeGroupLinear = true;
          break;
       }
 
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT: {
          VkPhysicalDeviceConditionalRenderingFeaturesEXT *features =
             (VkPhysicalDeviceConditionalRenderingFeaturesEXT*)ext;
-         ANV_FROM_HANDLE(anv_physical_device, pdevice, physicalDevice);
-
          features->conditionalRendering = pdevice->info.gen >= 8 ||
                                           pdevice->info.is_haswell;
          features->inheritedConditionalRendering = pdevice->info.gen >= 8 ||
@@ -946,7 +1038,64 @@ void anv_GetPhysicalDeviceFeatures2(
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT: {
          VkPhysicalDeviceDepthClipEnableFeaturesEXT *features =
             (VkPhysicalDeviceDepthClipEnableFeaturesEXT *)ext;
-         features->depthClipEnable = VK_TRUE;
+         features->depthClipEnable = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT16_INT8_FEATURES_KHR: {
+         VkPhysicalDeviceFloat16Int8FeaturesKHR *features = (void *)ext;
+         features->shaderFloat16 = pdevice->info.gen >= 8;
+         features->shaderInt8 = pdevice->info.gen >= 8;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT: {
+         VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT *features =
+            (VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT *)ext;
+         features->fragmentShaderSampleInterlock = pdevice->info.gen >= 9;
+         features->fragmentShaderPixelInterlock = pdevice->info.gen >= 9;
+         features->fragmentShaderShadingRateInterlock = false;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT: {
+         VkPhysicalDeviceHostQueryResetFeaturesEXT *features =
+            (VkPhysicalDeviceHostQueryResetFeaturesEXT *)ext;
+         features->hostQueryReset = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT: {
+         VkPhysicalDeviceDescriptorIndexingFeaturesEXT *features =
+            (VkPhysicalDeviceDescriptorIndexingFeaturesEXT *)ext;
+         features->shaderInputAttachmentArrayDynamicIndexing = false;
+         features->shaderUniformTexelBufferArrayDynamicIndexing = true;
+         features->shaderStorageTexelBufferArrayDynamicIndexing = true;
+         features->shaderUniformBufferArrayNonUniformIndexing = false;
+         features->shaderSampledImageArrayNonUniformIndexing = true;
+         features->shaderStorageBufferArrayNonUniformIndexing = true;
+         features->shaderStorageImageArrayNonUniformIndexing = true;
+         features->shaderInputAttachmentArrayNonUniformIndexing = false;
+         features->shaderUniformTexelBufferArrayNonUniformIndexing = true;
+         features->shaderStorageTexelBufferArrayNonUniformIndexing = true;
+         features->descriptorBindingUniformBufferUpdateAfterBind = false;
+         features->descriptorBindingSampledImageUpdateAfterBind = true;
+         features->descriptorBindingStorageImageUpdateAfterBind = true;
+         features->descriptorBindingStorageBufferUpdateAfterBind = true;
+         features->descriptorBindingUniformTexelBufferUpdateAfterBind = true;
+         features->descriptorBindingStorageTexelBufferUpdateAfterBind = true;
+         features->descriptorBindingUpdateUnusedWhilePending = true;
+         features->descriptorBindingPartiallyBound = true;
+         features->descriptorBindingVariableDescriptorCount = false;
+         features->runtimeDescriptorArray = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_FEATURES_EXT: {
+         VkPhysicalDeviceInlineUniformBlockFeaturesEXT *features =
+            (VkPhysicalDeviceInlineUniformBlockFeaturesEXT *)ext;
+         features->inlineUniformBlock = true;
+         features->descriptorBindingInlineUniformBlockUpdateAfterBind = true;
          break;
       }
 
@@ -959,9 +1108,16 @@ void anv_GetPhysicalDeviceFeatures2(
          break;
       }
 
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES_KHR: {
+         VkPhysicalDeviceImagelessFramebufferFeaturesKHR *features =
+            (VkPhysicalDeviceImagelessFramebufferFeaturesKHR *)ext;
+         features->imagelessFramebuffer = true;
+         break;
+      }
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES: {
          VkPhysicalDeviceProtectedMemoryFeatures *features = (void *)ext;
-         features->protectedMemory = VK_FALSE;
+         features->protectedMemory = false;
          break;
       }
 
@@ -979,14 +1135,35 @@ void anv_GetPhysicalDeviceFeatures2(
          break;
       }
 
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETER_FEATURES: {
-         VkPhysicalDeviceShaderDrawParameterFeatures *features = (void *)ext;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES_KHR: {
+         VkPhysicalDeviceShaderAtomicInt64FeaturesKHR *features = (void *)ext;
+         features->shaderBufferInt64Atomics =
+            pdevice->info.gen >= 9 && pdevice->use_softpin;
+         features->shaderSharedInt64Atomics = VK_FALSE;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES_EXT: {
+         VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT *features = (void *)ext;
+         features->shaderDemoteToHelperInvocation = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES: {
+         VkPhysicalDeviceShaderDrawParametersFeatures *features = (void *)ext;
          features->shaderDrawParameters = true;
          break;
       }
 
-      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTER_FEATURES: {
-         VkPhysicalDeviceVariablePointerFeatures *features = (void *)ext;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_FEATURES_EXT: {
+         VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT *features =
+            (VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT *)ext;
+         features->texelBufferAlignment = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES: {
+         VkPhysicalDeviceVariablePointersFeatures *features = (void *)ext;
          features->variablePointersStorageBuffer = true;
          features->variablePointers = true;
          break;
@@ -995,16 +1172,30 @@ void anv_GetPhysicalDeviceFeatures2(
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT: {
          VkPhysicalDeviceTransformFeedbackFeaturesEXT *features =
             (VkPhysicalDeviceTransformFeedbackFeaturesEXT *)ext;
-         features->transformFeedback = VK_TRUE;
-         features->geometryStreams = VK_TRUE;
+         features->transformFeedback = true;
+         features->geometryStreams = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES_KHR: {
+         VkPhysicalDeviceUniformBufferStandardLayoutFeaturesKHR *features =
+            (VkPhysicalDeviceUniformBufferStandardLayoutFeaturesKHR *)ext;
+         features->uniformBufferStandardLayout = true;
          break;
       }
 
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT: {
          VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT *features =
             (VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT *)ext;
-         features->vertexAttributeInstanceRateDivisor = VK_TRUE;
-         features->vertexAttributeInstanceRateZeroDivisor = VK_TRUE;
+         features->vertexAttributeInstanceRateDivisor = true;
+         features->vertexAttributeInstanceRateZeroDivisor = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_YCBCR_IMAGE_ARRAYS_FEATURES_EXT: {
+         VkPhysicalDeviceYcbcrImageArraysFeaturesEXT *features =
+            (VkPhysicalDeviceYcbcrImageArraysFeaturesEXT *)ext;
+         features->ycbcrImageArrays = true;
          break;
       }
 
@@ -1014,6 +1205,11 @@ void anv_GetPhysicalDeviceFeatures2(
       }
    }
 }
+
+#define MAX_PER_STAGE_DESCRIPTOR_UNIFORM_BUFFERS   64
+
+#define MAX_PER_STAGE_DESCRIPTOR_INPUT_ATTACHMENTS 64
+#define MAX_DESCRIPTOR_SET_INPUT_ATTACHMENTS       256
 
 void anv_GetPhysicalDeviceProperties(
     VkPhysicalDevice                            physicalDevice,
@@ -1026,10 +1222,19 @@ void anv_GetPhysicalDeviceProperties(
    const uint32_t max_raw_buffer_sz = devinfo->gen >= 7 ?
                                       (1ul << 30) : (1ul << 27);
 
-   const uint32_t max_samplers = (devinfo->gen >= 8 || devinfo->is_haswell) ?
-                                 128 : 16;
+   const uint32_t max_ssbos = pdevice->has_a64_buffer_access ? UINT16_MAX : 64;
+   const uint32_t max_textures =
+      pdevice->has_bindless_images ? UINT16_MAX : 128;
+   const uint32_t max_samplers =
+      pdevice->has_bindless_samplers ? UINT16_MAX :
+      (devinfo->gen >= 8 || devinfo->is_haswell) ? 128 : 16;
+   const uint32_t max_images =
+      pdevice->has_bindless_images ? UINT16_MAX : MAX_IMAGES;
 
-   const uint32_t max_images = devinfo->gen < 9 ? MAX_GEN8_IMAGES : MAX_IMAGES;
+   /* The moment we have anything bindless, claim a high per-stage limit */
+   const uint32_t max_per_stage =
+      pdevice->has_a64_buffer_access ? UINT32_MAX :
+                                       MAX_BINDING_TABLE_SIZE - MAX_RTS;
 
    VkSampleCountFlags sample_counts =
       isl_device_get_sample_counts(&pdevice->isl_dev);
@@ -1051,20 +1256,20 @@ void anv_GetPhysicalDeviceProperties(
       .sparseAddressSpaceSize                   = 0,
       .maxBoundDescriptorSets                   = MAX_SETS,
       .maxPerStageDescriptorSamplers            = max_samplers,
-      .maxPerStageDescriptorUniformBuffers      = 64,
-      .maxPerStageDescriptorStorageBuffers      = 64,
-      .maxPerStageDescriptorSampledImages       = max_samplers,
+      .maxPerStageDescriptorUniformBuffers      = MAX_PER_STAGE_DESCRIPTOR_UNIFORM_BUFFERS,
+      .maxPerStageDescriptorStorageBuffers      = max_ssbos,
+      .maxPerStageDescriptorSampledImages       = max_textures,
       .maxPerStageDescriptorStorageImages       = max_images,
-      .maxPerStageDescriptorInputAttachments    = 64,
-      .maxPerStageResources                     = 250,
+      .maxPerStageDescriptorInputAttachments    = MAX_PER_STAGE_DESCRIPTOR_INPUT_ATTACHMENTS,
+      .maxPerStageResources                     = max_per_stage,
       .maxDescriptorSetSamplers                 = 6 * max_samplers, /* number of stages * maxPerStageDescriptorSamplers */
-      .maxDescriptorSetUniformBuffers           = 6 * 64,           /* number of stages * maxPerStageDescriptorUniformBuffers */
+      .maxDescriptorSetUniformBuffers           = 6 * MAX_PER_STAGE_DESCRIPTOR_UNIFORM_BUFFERS,           /* number of stages * maxPerStageDescriptorUniformBuffers */
       .maxDescriptorSetUniformBuffersDynamic    = MAX_DYNAMIC_BUFFERS / 2,
-      .maxDescriptorSetStorageBuffers           = 6 * 64,           /* number of stages * maxPerStageDescriptorStorageBuffers */
+      .maxDescriptorSetStorageBuffers           = 6 * max_ssbos,    /* number of stages * maxPerStageDescriptorStorageBuffers */
       .maxDescriptorSetStorageBuffersDynamic    = MAX_DYNAMIC_BUFFERS / 2,
-      .maxDescriptorSetSampledImages            = 6 * max_samplers, /* number of stages * maxPerStageDescriptorSampledImages */
+      .maxDescriptorSetSampledImages            = 6 * max_textures, /* number of stages * maxPerStageDescriptorSampledImages */
       .maxDescriptorSetStorageImages            = 6 * max_images,   /* number of stages * maxPerStageDescriptorStorageImages */
-      .maxDescriptorSetInputAttachments         = 256,
+      .maxDescriptorSetInputAttachments         = MAX_DESCRIPTOR_SET_INPUT_ATTACHMENTS,
       .maxVertexInputAttributes                 = MAX_VBS,
       .maxVertexInputBindings                   = MAX_VBS,
       .maxVertexInputAttributeOffset            = 2047,
@@ -1083,21 +1288,21 @@ void anv_GetPhysicalDeviceProperties(
       .maxGeometryOutputComponents              = 128,
       .maxGeometryOutputVertices                = 256,
       .maxGeometryTotalOutputComponents         = 1024,
-      .maxFragmentInputComponents               = 112, /* 128 components - (POS, PSIZ, CLIP_DIST0, CLIP_DIST1) */
+      .maxFragmentInputComponents               = 116, /* 128 components - (PSIZ, CLIP_DIST0, CLIP_DIST1) */
       .maxFragmentOutputAttachments             = 8,
       .maxFragmentDualSrcAttachments            = 1,
       .maxFragmentCombinedOutputResources       = 8,
-      .maxComputeSharedMemorySize               = 32768,
+      .maxComputeSharedMemorySize               = 64 * 1024,
       .maxComputeWorkGroupCount                 = { 65535, 65535, 65535 },
-      .maxComputeWorkGroupInvocations           = 16 * devinfo->max_cs_threads,
+      .maxComputeWorkGroupInvocations           = 32 * devinfo->max_cs_threads,
       .maxComputeWorkGroupSize = {
          16 * devinfo->max_cs_threads,
          16 * devinfo->max_cs_threads,
          16 * devinfo->max_cs_threads,
       },
       .subPixelPrecisionBits                    = 8,
-      .subTexelPrecisionBits                    = 4 /* FIXME */,
-      .mipmapPrecisionBits                      = 4 /* FIXME */,
+      .subTexelPrecisionBits                    = 8,
+      .mipmapPrecisionBits                      = 8,
       .maxDrawIndexedIndexValue                 = UINT32_MAX,
       .maxDrawIndirectCount                     = UINT32_MAX,
       .maxSamplerLodBias                        = 16,
@@ -1107,7 +1312,10 @@ void anv_GetPhysicalDeviceProperties(
       .viewportBoundsRange                      = { INT16_MIN, INT16_MAX },
       .viewportSubPixelBits                     = 13, /* We take a float? */
       .minMemoryMapAlignment                    = 4096, /* A page */
-      .minTexelBufferOffsetAlignment            = 1,
+      /* The dataport requires texel alignment so we need to assume a worst
+       * case of R32G32B32A32 which is 16 bytes.
+       */
+      .minTexelBufferOffsetAlignment            = 16,
       /* We need 16 for UBO block reads to work and 32 for push UBOs */
       .minUniformBufferOffsetAlignment          = 32,
       .minStorageBufferOffsetAlignment          = 4,
@@ -1132,7 +1340,7 @@ void anv_GetPhysicalDeviceProperties(
       .sampledImageStencilSampleCounts          = sample_counts,
       .storageImageSampleCounts                 = VK_SAMPLE_COUNT_1_BIT,
       .maxSampleMaskWords                       = 1,
-      .timestampComputeAndGraphics              = false,
+      .timestampComputeAndGraphics              = true,
       .timestampPeriod                          = 1000000000.0 / devinfo->timestamp_frequency,
       .maxClipDistances                         = 8,
       .maxCullDistances                         = 8,
@@ -1198,8 +1406,51 @@ void anv_GetPhysicalDeviceProperties2(
                VK_RESOLVE_MODE_MAX_BIT_KHR;
          }
 
-         props->independentResolveNone = VK_TRUE;
-         props->independentResolve = VK_TRUE;
+         props->independentResolveNone = true;
+         props->independentResolve = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES_EXT: {
+         VkPhysicalDeviceDescriptorIndexingPropertiesEXT *props =
+            (VkPhysicalDeviceDescriptorIndexingPropertiesEXT *)ext;
+
+         /* It's a bit hard to exactly map our implementation to the limits
+          * described here.  The bindless surface handle in the extended
+          * message descriptors is 20 bits and it's an index into the table of
+          * RENDER_SURFACE_STATE structs that starts at bindless surface base
+          * address.  Given that most things consume two surface states per
+          * view (general/sampled for textures and write-only/read-write for
+          * images), we claim 2^19 things.
+          *
+          * For SSBOs, we just use A64 messages so there is no real limit
+          * there beyond the limit on the total size of a descriptor set.
+          */
+         const unsigned max_bindless_views = 1 << 19;
+
+         props->maxUpdateAfterBindDescriptorsInAllPools = max_bindless_views;
+         props->shaderUniformBufferArrayNonUniformIndexingNative = false;
+         props->shaderSampledImageArrayNonUniformIndexingNative = false;
+         props->shaderStorageBufferArrayNonUniformIndexingNative = true;
+         props->shaderStorageImageArrayNonUniformIndexingNative = false;
+         props->shaderInputAttachmentArrayNonUniformIndexingNative = false;
+         props->robustBufferAccessUpdateAfterBind = true;
+         props->quadDivergentImplicitLod = false;
+         props->maxPerStageDescriptorUpdateAfterBindSamplers = max_bindless_views;
+         props->maxPerStageDescriptorUpdateAfterBindUniformBuffers = MAX_PER_STAGE_DESCRIPTOR_UNIFORM_BUFFERS;
+         props->maxPerStageDescriptorUpdateAfterBindStorageBuffers = UINT32_MAX;
+         props->maxPerStageDescriptorUpdateAfterBindSampledImages = max_bindless_views;
+         props->maxPerStageDescriptorUpdateAfterBindStorageImages = max_bindless_views;
+         props->maxPerStageDescriptorUpdateAfterBindInputAttachments = MAX_PER_STAGE_DESCRIPTOR_INPUT_ATTACHMENTS;
+         props->maxPerStageUpdateAfterBindResources = UINT32_MAX;
+         props->maxDescriptorSetUpdateAfterBindSamplers = max_bindless_views;
+         props->maxDescriptorSetUpdateAfterBindUniformBuffers = 6 * MAX_PER_STAGE_DESCRIPTOR_UNIFORM_BUFFERS;
+         props->maxDescriptorSetUpdateAfterBindUniformBuffersDynamic = MAX_DYNAMIC_BUFFERS / 2;
+         props->maxDescriptorSetUpdateAfterBindStorageBuffers = UINT32_MAX;
+         props->maxDescriptorSetUpdateAfterBindStorageBuffersDynamic = MAX_DYNAMIC_BUFFERS / 2;
+         props->maxDescriptorSetUpdateAfterBindSampledImages = max_bindless_views;
+         props->maxDescriptorSetUpdateAfterBindStorageImages = max_bindless_views;
+         props->maxDescriptorSetUpdateAfterBindInputAttachments = MAX_DESCRIPTOR_SET_INPUT_ATTACHMENTS;
          break;
       }
 
@@ -1208,11 +1459,11 @@ void anv_GetPhysicalDeviceProperties2(
             (VkPhysicalDeviceDriverPropertiesKHR *) ext;
 
          driver_props->driverID = VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA_KHR;
-         util_snprintf(driver_props->driverName, VK_MAX_DRIVER_NAME_SIZE_KHR,
-                "Intel open-source Mesa driver");
+         snprintf(driver_props->driverName, VK_MAX_DRIVER_NAME_SIZE_KHR,
+                  "Intel open-source Mesa driver");
 
-         util_snprintf(driver_props->driverInfo, VK_MAX_DRIVER_INFO_SIZE_KHR,
-                "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
+         snprintf(driver_props->driverInfo, VK_MAX_DRIVER_INFO_SIZE_KHR,
+                  "Mesa " PACKAGE_VERSION MESA_GIT_SHA1);
 
          driver_props->conformanceVersion = (VkConformanceVersionKHR) {
             .major = 1,
@@ -1223,6 +1474,14 @@ void anv_GetPhysicalDeviceProperties2(
          break;
       }
 
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT: {
+         VkPhysicalDeviceExternalMemoryHostPropertiesEXT *props =
+            (VkPhysicalDeviceExternalMemoryHostPropertiesEXT *) ext;
+         /* Userptr needs page aligned memory. */
+         props->minImportedHostPointerAlignment = 4096;
+         break;
+      }
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES: {
          VkPhysicalDeviceIDProperties *id_props =
             (VkPhysicalDeviceIDProperties *)ext;
@@ -1230,6 +1489,21 @@ void anv_GetPhysicalDeviceProperties2(
          memcpy(id_props->driverUUID, pdevice->driver_uuid, VK_UUID_SIZE);
          /* The LUID is for Windows. */
          id_props->deviceLUIDValid = false;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_PROPERTIES_EXT: {
+         VkPhysicalDeviceInlineUniformBlockPropertiesEXT *props =
+            (VkPhysicalDeviceInlineUniformBlockPropertiesEXT *)ext;
+         props->maxInlineUniformBlockSize = MAX_INLINE_UNIFORM_BLOCK_SIZE;
+         props->maxPerStageDescriptorInlineUniformBlocks =
+            MAX_INLINE_UNIFORM_BLOCK_DESCRIPTORS;
+         props->maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks =
+            MAX_INLINE_UNIFORM_BLOCK_DESCRIPTORS;
+         props->maxDescriptorSetInlineUniformBlocks =
+            MAX_INLINE_UNIFORM_BLOCK_DESCRIPTORS;
+         props->maxDescriptorSetUpdateAfterBindInlineUniformBlocks =
+            MAX_INLINE_UNIFORM_BLOCK_DESCRIPTORS;
          break;
       }
 
@@ -1265,8 +1539,7 @@ void anv_GetPhysicalDeviceProperties2(
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES: {
          VkPhysicalDevicePointClippingProperties *properties =
             (VkPhysicalDevicePointClippingProperties *) ext;
-         properties->pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
-         anv_finishme("Implement pop-free point clipping");
+         properties->pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_USER_CLIP_PLANES_ONLY;
          break;
       }
 
@@ -1307,13 +1580,61 @@ void anv_GetPhysicalDeviceProperties2(
 
          properties->supportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT |
                                            VK_SUBGROUP_FEATURE_VOTE_BIT |
-                                           VK_SUBGROUP_FEATURE_ARITHMETIC_BIT |
                                            VK_SUBGROUP_FEATURE_BALLOT_BIT |
                                            VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
                                            VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT |
-                                           VK_SUBGROUP_FEATURE_CLUSTERED_BIT |
                                            VK_SUBGROUP_FEATURE_QUAD_BIT;
-         properties->quadOperationsInAllStages = VK_TRUE;
+         if (pdevice->info.gen >= 8) {
+            /* TODO: There's no technical reason why these can't be made to
+             * work on gen7 but they don't at the moment so it's best to leave
+             * the feature disabled than enabled and broken.
+             */
+            properties->supportedOperations |=
+               VK_SUBGROUP_FEATURE_ARITHMETIC_BIT |
+               VK_SUBGROUP_FEATURE_CLUSTERED_BIT;
+         }
+         properties->quadOperationsInAllStages = pdevice->info.gen >= 8;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT: {
+         VkPhysicalDeviceSubgroupSizeControlPropertiesEXT *props =
+            (VkPhysicalDeviceSubgroupSizeControlPropertiesEXT *)ext;
+         STATIC_ASSERT(8 <= BRW_SUBGROUP_SIZE && BRW_SUBGROUP_SIZE <= 32);
+         props->minSubgroupSize = 8;
+         props->maxSubgroupSize = 32;
+         props->maxComputeWorkgroupSubgroups = pdevice->info.max_cs_threads;
+         props->requiredSubgroupSizeStages = VK_SHADER_STAGE_COMPUTE_BIT;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_PROPERTIES_EXT: {
+         VkPhysicalDeviceTexelBufferAlignmentPropertiesEXT *props =
+            (VkPhysicalDeviceTexelBufferAlignmentPropertiesEXT *)ext;
+
+         /* From the SKL PRM Vol. 2d, docs for RENDER_SURFACE_STATE::Surface
+          * Base Address:
+          *
+          *    "For SURFTYPE_BUFFER non-rendertarget surfaces, this field
+          *    specifies the base address of the first element of the surface,
+          *    computed in software by adding the surface base address to the
+          *    byte offset of the element in the buffer. The base address must
+          *    be aligned to element size."
+          *
+          * The typed dataport messages require that things be texel aligned.
+          * Otherwise, we may just load/store the wrong data or, in the worst
+          * case, there may be hangs.
+          */
+         props->storageTexelBufferOffsetAlignmentBytes = 16;
+         props->storageTexelBufferOffsetSingleTexelAlignment = true;
+
+         /* The sampler, however, is much more forgiving and it can handle
+          * arbitrary byte alignment for linear and buffer surfaces.  It's
+          * hard to find a good PRM citation for this but years of empirical
+          * experience demonstrate that this is true.
+          */
+         props->uniformTexelBufferOffsetAlignmentBytes = 1;
+         props->uniformTexelBufferOffsetSingleTexelAlignment = false;
          break;
       }
 
@@ -1327,10 +1648,10 @@ void anv_GetPhysicalDeviceProperties2(
          props->maxTransformFeedbackStreamDataSize = 128 * 4;
          props->maxTransformFeedbackBufferDataSize = 128 * 4;
          props->maxTransformFeedbackBufferDataStride = 2048;
-         props->transformFeedbackQueries = VK_TRUE;
-         props->transformFeedbackStreamsLinesTriangles = VK_FALSE;
-         props->transformFeedbackRasterizationStreamSelect = VK_FALSE;
-         props->transformFeedbackDraw = VK_TRUE;
+         props->transformFeedbackQueries = true;
+         props->transformFeedbackStreamsLinesTriangles = false;
+         props->transformFeedbackRasterizationStreamSelect = false;
+         props->transformFeedbackDraw = true;
          break;
       }
 
@@ -1412,6 +1733,58 @@ void anv_GetPhysicalDeviceMemoryProperties(
    }
 }
 
+static void
+anv_get_memory_budget(VkPhysicalDevice physicalDevice,
+                      VkPhysicalDeviceMemoryBudgetPropertiesEXT *memoryBudget)
+{
+   ANV_FROM_HANDLE(anv_physical_device, device, physicalDevice);
+   uint64_t sys_available = get_available_system_memory();
+   assert(sys_available > 0);
+
+   VkDeviceSize total_heaps_size = 0;
+   for (size_t i = 0; i < device->memory.heap_count; i++)
+         total_heaps_size += device->memory.heaps[i].size;
+
+   for (size_t i = 0; i < device->memory.heap_count; i++) {
+      VkDeviceSize heap_size = device->memory.heaps[i].size;
+      VkDeviceSize heap_used = device->memory.heaps[i].used;
+      VkDeviceSize heap_budget;
+
+      double heap_proportion = (double) heap_size / total_heaps_size;
+      VkDeviceSize sys_available_prop = sys_available * heap_proportion;
+
+      /*
+       * Let's not incite the app to starve the system: report at most 90% of
+       * available system memory.
+       */
+      uint64_t heap_available = sys_available_prop * 9 / 10;
+      heap_budget = MIN2(heap_size, heap_used + heap_available);
+
+      /*
+       * Round down to the nearest MB
+       */
+      heap_budget &= ~((1ull << 20) - 1);
+
+      /*
+       * The heapBudget value must be non-zero for array elements less than
+       * VkPhysicalDeviceMemoryProperties::memoryHeapCount. The heapBudget
+       * value must be less than or equal to VkMemoryHeap::size for each heap.
+       */
+      assert(0 < heap_budget && heap_budget <= heap_size);
+
+      memoryBudget->heapUsage[i] = heap_used;
+      memoryBudget->heapBudget[i] = heap_budget;
+   }
+
+   /* The heapBudget and heapUsage values must be zero for array elements
+    * greater than or equal to VkPhysicalDeviceMemoryProperties::memoryHeapCount
+    */
+   for (uint32_t i = device->memory.heap_count; i < VK_MAX_MEMORY_HEAPS; i++) {
+      memoryBudget->heapBudget[i] = 0;
+      memoryBudget->heapUsage[i] = 0;
+   }
+}
+
 void anv_GetPhysicalDeviceMemoryProperties2(
     VkPhysicalDevice                            physicalDevice,
     VkPhysicalDeviceMemoryProperties2*          pMemoryProperties)
@@ -1421,6 +1794,9 @@ void anv_GetPhysicalDeviceMemoryProperties2(
 
    vk_foreach_struct(ext, pMemoryProperties->pNext) {
       switch (ext->sType) {
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT:
+         anv_get_memory_budget(physicalDevice, (void*)ext);
+         break;
       default:
          anv_debug_ignored_stype(ext->sType);
          break;
@@ -1574,6 +1950,25 @@ anv_state_pool_emit_data(struct anv_state_pool *pool, size_t size, size_t align,
    return state;
 }
 
+/* Haswell border color is a bit of a disaster.  Float and unorm formats use a
+ * straightforward 32-bit float color in the first 64 bytes.  Instead of using
+ * a nice float/integer union like Gen8+, Haswell specifies the integer border
+ * color as a separate entry /after/ the float color.  The layout of this entry
+ * also depends on the format's bpp (with extra hacks for RG32), and overlaps.
+ *
+ * Since we don't know the format/bpp, we can't make any of the border colors
+ * containing '1' work for all formats, as it would be in the wrong place for
+ * some of them.  We opt to make 32-bit integers work as this seems like the
+ * most common option.  Fortunately, transparent black works regardless, as
+ * all zeroes is the same in every bit-size.
+ */
+struct hsw_border_color {
+   float float32[4];
+   uint32_t _pad0[12];
+   uint32_t uint32[4];
+   uint32_t _pad1[108];
+};
+
 struct gen8_border_color {
    union {
       float float32[4];
@@ -1586,18 +1981,33 @@ struct gen8_border_color {
 static void
 anv_device_init_border_colors(struct anv_device *device)
 {
-   static const struct gen8_border_color border_colors[] = {
-      [VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK] =  { .float32 = { 0.0, 0.0, 0.0, 0.0 } },
-      [VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK] =       { .float32 = { 0.0, 0.0, 0.0, 1.0 } },
-      [VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE] =       { .float32 = { 1.0, 1.0, 1.0, 1.0 } },
-      [VK_BORDER_COLOR_INT_TRANSPARENT_BLACK] =    { .uint32 = { 0, 0, 0, 0 } },
-      [VK_BORDER_COLOR_INT_OPAQUE_BLACK] =         { .uint32 = { 0, 0, 0, 1 } },
-      [VK_BORDER_COLOR_INT_OPAQUE_WHITE] =         { .uint32 = { 1, 1, 1, 1 } },
-   };
+   if (device->info.is_haswell) {
+      static const struct hsw_border_color border_colors[] = {
+         [VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK] =  { .float32 = { 0.0, 0.0, 0.0, 0.0 } },
+         [VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK] =       { .float32 = { 0.0, 0.0, 0.0, 1.0 } },
+         [VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE] =       { .float32 = { 1.0, 1.0, 1.0, 1.0 } },
+         [VK_BORDER_COLOR_INT_TRANSPARENT_BLACK] =    { .uint32 = { 0, 0, 0, 0 } },
+         [VK_BORDER_COLOR_INT_OPAQUE_BLACK] =         { .uint32 = { 0, 0, 0, 1 } },
+         [VK_BORDER_COLOR_INT_OPAQUE_WHITE] =         { .uint32 = { 1, 1, 1, 1 } },
+      };
 
-   device->border_colors = anv_state_pool_emit_data(&device->dynamic_state_pool,
-                                                    sizeof(border_colors), 64,
-                                                    border_colors);
+      device->border_colors =
+         anv_state_pool_emit_data(&device->dynamic_state_pool,
+                                  sizeof(border_colors), 512, border_colors);
+   } else {
+      static const struct gen8_border_color border_colors[] = {
+         [VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK] =  { .float32 = { 0.0, 0.0, 0.0, 0.0 } },
+         [VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK] =       { .float32 = { 0.0, 0.0, 0.0, 1.0 } },
+         [VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE] =       { .float32 = { 1.0, 1.0, 1.0, 1.0 } },
+         [VK_BORDER_COLOR_INT_TRANSPARENT_BLACK] =    { .uint32 = { 0, 0, 0, 0 } },
+         [VK_BORDER_COLOR_INT_OPAQUE_BLACK] =         { .uint32 = { 0, 0, 0, 1 } },
+         [VK_BORDER_COLOR_INT_OPAQUE_WHITE] =         { .uint32 = { 1, 1, 1, 1 } },
+      };
+
+      device->border_colors =
+         anv_state_pool_emit_data(&device->dynamic_state_pool,
+                                  sizeof(border_colors), 64, border_colors);
+   }
 }
 
 static void
@@ -1757,10 +2167,12 @@ get_bo_from_pool(struct gen_batch_decode_bo *ret,
 
 /* Finding a buffer for batch decoding */
 static struct gen_batch_decode_bo
-decode_get_bo(void *v_batch, uint64_t address)
+decode_get_bo(void *v_batch, bool ppgtt, uint64_t address)
 {
    struct anv_device *device = v_batch;
    struct gen_batch_decode_bo ret_bo = {};
+
+   assert(ppgtt);
 
    if (get_bo_from_pool(&ret_bo, &device->dynamic_state_pool.block_pool, address))
       return ret_bo;
@@ -1859,16 +2271,18 @@ VkResult anv_CreateDevice(
    if (!device)
       return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   const unsigned decode_flags =
-      GEN_BATCH_DECODE_FULL |
-      ((INTEL_DEBUG & DEBUG_COLOR) ? GEN_BATCH_DECODE_IN_COLOR : 0) |
-      GEN_BATCH_DECODE_OFFSETS |
-      GEN_BATCH_DECODE_FLOATS;
+   if (INTEL_DEBUG & DEBUG_BATCH) {
+      const unsigned decode_flags =
+         GEN_BATCH_DECODE_FULL |
+         ((INTEL_DEBUG & DEBUG_COLOR) ? GEN_BATCH_DECODE_IN_COLOR : 0) |
+         GEN_BATCH_DECODE_OFFSETS |
+         GEN_BATCH_DECODE_FLOATS;
 
-   gen_batch_decode_ctx_init(&device->decoder_ctx,
-                             &physical_device->info,
-                             stderr, decode_flags, NULL,
-                             decode_get_bo, NULL, device);
+      gen_batch_decode_ctx_init(&device->decoder_ctx,
+                                &physical_device->info,
+                                stderr, decode_flags, NULL,
+                                decode_get_bo, NULL, device);
+   }
 
    device->_loader_data.loaderMagic = ICD_LOADER_MAGIC;
    device->instance = physical_device->instance;
@@ -1901,19 +2315,19 @@ VkResult anv_CreateDevice(
       }
 
       /* keep the page with address zero out of the allocator */
-      util_vma_heap_init(&device->vma_lo, LOW_HEAP_MIN_ADDRESS, LOW_HEAP_SIZE);
-      device->vma_lo_available =
-         physical_device->memory.heaps[physical_device->memory.heap_count - 1].size;
+      struct anv_memory_heap *low_heap =
+         &physical_device->memory.heaps[physical_device->memory.heap_count - 1];
+      util_vma_heap_init(&device->vma_lo, low_heap->vma_start, low_heap->vma_size);
+      device->vma_lo_available = low_heap->size;
 
-      /* Leave the last 4GiB out of the high vma range, so that no state base
-       * address + size can overflow 48 bits. For more information see the
-       * comment about Wa32bitGeneralStateOffset in anv_allocator.c
-       */
-      util_vma_heap_init(&device->vma_hi, HIGH_HEAP_MIN_ADDRESS,
-                         HIGH_HEAP_SIZE);
+      struct anv_memory_heap *high_heap =
+         &physical_device->memory.heaps[0];
+      util_vma_heap_init(&device->vma_hi, high_heap->vma_start, high_heap->vma_size);
       device->vma_hi_available = physical_device->memory.heap_count == 1 ? 0 :
-         physical_device->memory.heaps[0].size;
+         high_heap->size;
    }
+
+   list_inithead(&device->memory_objects);
 
    /* As per spec, the driver implementation may deny requests to acquire
     * a priority above the default priority (MEDIUM) if the caller does not
@@ -1961,7 +2375,7 @@ VkResult anv_CreateDevice(
       result = vk_error(VK_ERROR_INITIALIZATION_FAILED);
       goto fail_mutex;
    }
-   if (pthread_cond_init(&device->queue_submit, NULL) != 0) {
+   if (pthread_cond_init(&device->queue_submit, &condattr) != 0) {
       pthread_condattr_destroy(&condattr);
       result = vk_error(VK_ERROR_INITIALIZATION_FAILED);
       goto fail_mutex;
@@ -2013,7 +2427,7 @@ VkResult anv_CreateDevice(
          goto fail_surface_state_pool;
    }
 
-   result = anv_bo_init_new(&device->workaround_bo, device, 1024);
+   result = anv_bo_init_new(&device->workaround_bo, device, 4096);
    if (result != VK_SUCCESS)
       goto fail_binding_table_pool;
 
@@ -2027,9 +2441,6 @@ VkResult anv_CreateDevice(
 
    if (device->info.gen >= 10)
       anv_device_init_hiz_clear_value_bo(device);
-
-   if (physical_device->use_softpin)
-      device->pinned_buffers = _mesa_pointer_set_create(NULL);
 
    anv_scratch_pool_init(device, &device->scratch_pool);
 
@@ -2121,9 +2532,6 @@ void anv_DestroyDevice(
 
    anv_queue_finish(&device->queue);
 
-   if (physical_device->use_softpin)
-      _mesa_set_destroy(device->pinned_buffers, NULL);
-
 #ifdef HAVE_VALGRIND
    /* We only need to free these to prevent valgrind errors.  The backing
     * BO will go away in a couple of lines so we don't actually leak.
@@ -2157,7 +2565,8 @@ void anv_DestroyDevice(
 
    anv_gem_destroy_context(device, device->context_id);
 
-   gen_batch_decode_ctx_finish(&device->decoder_ctx);
+   if (INTEL_DEBUG & DEBUG_BATCH)
+      gen_batch_decode_ctx_finish(&device->decoder_ctx);
 
    close(device->fd);
 
@@ -2379,8 +2788,11 @@ anv_vma_free(struct anv_device *device, struct anv_bo *bo)
       util_vma_heap_free(&device->vma_lo, addr_48b, bo->size);
       device->vma_lo_available += bo->size;
    } else {
-      assert(addr_48b >= HIGH_HEAP_MIN_ADDRESS &&
-             addr_48b <= HIGH_HEAP_MAX_ADDRESS);
+      MAYBE_UNUSED const struct anv_physical_device *physical_device =
+         &device->instance->physicalDevice;
+      assert(addr_48b >= physical_device->memory.heaps[0].vma_start &&
+             addr_48b < (physical_device->memory.heaps[0].vma_start +
+                         physical_device->memory.heaps[0].vma_size));
       util_vma_heap_free(&device->vma_hi, addr_48b, bo->size);
       device->vma_hi_available += bo->size;
    }
@@ -2433,6 +2845,7 @@ VkResult anv_AllocateMemory(
    mem->map = NULL;
    mem->map_size = 0;
    mem->ahw = NULL;
+   mem->host_ptr = NULL;
 
    uint64_t bo_flags = 0;
 
@@ -2545,6 +2958,30 @@ VkResult anv_AllocateMemory(
       goto success;
    }
 
+   const VkImportMemoryHostPointerInfoEXT *host_ptr_info =
+      vk_find_struct_const(pAllocateInfo->pNext,
+                           IMPORT_MEMORY_HOST_POINTER_INFO_EXT);
+   if (host_ptr_info && host_ptr_info->handleType) {
+      if (host_ptr_info->handleType ==
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_MAPPED_FOREIGN_MEMORY_BIT_EXT) {
+         result = vk_error(VK_ERROR_INVALID_EXTERNAL_HANDLE);
+         goto fail;
+      }
+
+      assert(host_ptr_info->handleType ==
+             VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT);
+
+      result = anv_bo_cache_import_host_ptr(
+         device, &device->bo_cache, host_ptr_info->pHostPointer,
+         pAllocateInfo->allocationSize, bo_flags, &mem->bo);
+
+      if (result != VK_SUCCESS)
+         goto fail;
+
+      mem->host_ptr = host_ptr_info->pHostPointer;
+      goto success;
+   }
+
    /* Regular allocate (not importing memory). */
 
    if (export_info && export_info->handleTypes)
@@ -2580,7 +3017,14 @@ VkResult anv_AllocateMemory(
    }
 
  success:
+   pthread_mutex_lock(&device->mutex);
+   list_addtail(&mem->link, &device->memory_objects);
+   pthread_mutex_unlock(&device->mutex);
+
    *pMem = anv_device_memory_to_handle(mem);
+
+   p_atomic_add(&pdevice->memory.heaps[mem->type->heapIndex].used,
+                mem->bo->size);
 
    return VK_SUCCESS;
 
@@ -2634,6 +3078,32 @@ VkResult anv_GetMemoryFdPropertiesKHR(
    }
 }
 
+VkResult anv_GetMemoryHostPointerPropertiesEXT(
+   VkDevice                                    _device,
+   VkExternalMemoryHandleTypeFlagBits          handleType,
+   const void*                                 pHostPointer,
+   VkMemoryHostPointerPropertiesEXT*           pMemoryHostPointerProperties)
+{
+   ANV_FROM_HANDLE(anv_device, device, _device);
+
+   assert(pMemoryHostPointerProperties->sType ==
+          VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT);
+
+   switch (handleType) {
+   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT: {
+      struct anv_physical_device *pdevice = &device->instance->physicalDevice;
+
+      /* Host memory can be imported as any memory type. */
+      pMemoryHostPointerProperties->memoryTypeBits =
+         (1ull << pdevice->memory.type_count) - 1;
+
+      return VK_SUCCESS;
+   }
+   default:
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+}
+
 void anv_FreeMemory(
     VkDevice                                    _device,
     VkDeviceMemory                              _mem,
@@ -2641,16 +3111,24 @@ void anv_FreeMemory(
 {
    ANV_FROM_HANDLE(anv_device, device, _device);
    ANV_FROM_HANDLE(anv_device_memory, mem, _mem);
+   struct anv_physical_device *pdevice = &device->instance->physicalDevice;
 
    if (mem == NULL)
       return;
 
+   pthread_mutex_lock(&device->mutex);
+   list_del(&mem->link);
+   pthread_mutex_unlock(&device->mutex);
+
    if (mem->map)
       anv_UnmapMemory(_device, _mem);
 
+   p_atomic_add(&pdevice->memory.heaps[mem->type->heapIndex].used,
+                -mem->bo->size);
+
    anv_bo_cache_release(device, &device->bo_cache, mem->bo);
 
-#ifdef ANDROID
+#if defined(ANDROID) && ANDROID_API_LEVEL >= 26
    if (mem->ahw)
       AHardwareBuffer_release(mem->ahw);
 #endif
@@ -2671,6 +3149,11 @@ VkResult anv_MapMemory(
 
    if (mem == NULL) {
       *ppData = NULL;
+      return VK_SUCCESS;
+   }
+
+   if (mem->host_ptr) {
+      *ppData = mem->host_ptr + offset;
       return VK_SUCCESS;
    }
 
@@ -2726,7 +3209,7 @@ void anv_UnmapMemory(
 {
    ANV_FROM_HANDLE(anv_device_memory, mem, _memory);
 
-   if (mem == NULL)
+   if (mem == NULL || mem->host_ptr)
       return;
 
    anv_gem_munmap(mem->map, mem->map_size);
@@ -2844,8 +3327,8 @@ void anv_GetBufferMemoryRequirements2(
       switch (ext->sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *requirements = (void *)ext;
-         requirements->prefersDedicatedAllocation = VK_FALSE;
-         requirements->requiresDedicatedAllocation = VK_FALSE;
+         requirements->prefersDedicatedAllocation = false;
+         requirements->requiresDedicatedAllocation = false;
          break;
       }
 
@@ -2950,11 +3433,11 @@ void anv_GetImageMemoryRequirements2(
              *
              * See also anv_AllocateMemory.
              */
-            requirements->prefersDedicatedAllocation = VK_TRUE;
-            requirements->requiresDedicatedAllocation = VK_TRUE;
+            requirements->prefersDedicatedAllocation = true;
+            requirements->requiresDedicatedAllocation = true;
          } else {
-            requirements->prefersDedicatedAllocation = VK_FALSE;
-            requirements->requiresDedicatedAllocation = VK_FALSE;
+            requirements->prefersDedicatedAllocation = false;
+            requirements->requiresDedicatedAllocation = false;
          }
          break;
       }
@@ -3175,12 +3658,6 @@ VkResult anv_CreateBuffer(
    buffer->usage = pCreateInfo->usage;
    buffer->address = ANV_NULL_ADDRESS;
 
-   if (buffer->usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_EXT) {
-      pthread_mutex_lock(&device->mutex);
-      _mesa_set_add(device->pinned_buffers, buffer);
-      pthread_mutex_unlock(&device->mutex);
-   }
-
    *pBuffer = anv_buffer_to_handle(buffer);
 
    return VK_SUCCESS;
@@ -3196,12 +3673,6 @@ void anv_DestroyBuffer(
 
    if (!buffer)
       return;
-
-   if (buffer->usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_EXT) {
-      pthread_mutex_lock(&device->mutex);
-      _mesa_set_remove_key(device->pinned_buffers, buffer);
-      pthread_mutex_unlock(&device->mutex);
-   }
 
    vk_free2(&device->alloc, pAllocator, buffer);
 }
@@ -3228,6 +3699,7 @@ anv_fill_buffer_surface_state(struct anv_device *device, struct anv_state state,
                          .mocs = device->default_mocs,
                          .size_B = range,
                          .format = format,
+                         .swizzle = ISL_SWIZZLE_IDENTITY,
                          .stride_B = stride);
 }
 
@@ -3241,6 +3713,11 @@ void anv_DestroySampler(
 
    if (!sampler)
       return;
+
+   if (sampler->bindless_state.map) {
+      anv_state_pool_free(&device->dynamic_state_pool,
+                          sampler->bindless_state);
+   }
 
    vk_free2(&device->alloc, pAllocator, sampler);
 }
@@ -3256,17 +3733,33 @@ VkResult anv_CreateFramebuffer(
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO);
 
-   size_t size = sizeof(*framebuffer) +
-                 sizeof(struct anv_image_view *) * pCreateInfo->attachmentCount;
-   framebuffer = vk_alloc2(&device->alloc, pAllocator, size, 8,
-                            VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-   if (framebuffer == NULL)
-      return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+   size_t size = sizeof(*framebuffer);
 
-   framebuffer->attachment_count = pCreateInfo->attachmentCount;
-   for (uint32_t i = 0; i < pCreateInfo->attachmentCount; i++) {
-      VkImageView _iview = pCreateInfo->pAttachments[i];
-      framebuffer->attachments[i] = anv_image_view_from_handle(_iview);
+   /* VK_KHR_imageless_framebuffer extension says:
+    *
+    *    If flags includes VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT_KHR,
+    *    parameter pAttachments is ignored.
+    */
+   if (!(pCreateInfo->flags & VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT_KHR)) {
+      size += sizeof(struct anv_image_view *) * pCreateInfo->attachmentCount;
+      framebuffer = vk_alloc2(&device->alloc, pAllocator, size, 8,
+                              VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (framebuffer == NULL)
+         return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+
+      for (uint32_t i = 0; i < pCreateInfo->attachmentCount; i++) {
+         ANV_FROM_HANDLE(anv_image_view, iview, pCreateInfo->pAttachments[i]);
+         framebuffer->attachments[i] = iview;
+      }
+      framebuffer->attachment_count = pCreateInfo->attachmentCount;
+   } else {
+      assert(device->enabled_extensions.KHR_imageless_framebuffer);
+      framebuffer = vk_alloc2(&device->alloc, pAllocator, size, 8,
+                              VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (framebuffer == NULL)
+         return vk_error(VK_ERROR_OUT_OF_HOST_MEMORY);
+
+      framebuffer->attachment_count = 0;
    }
 
    framebuffer->width = pCreateInfo->width;

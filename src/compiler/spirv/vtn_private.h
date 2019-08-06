@@ -88,6 +88,12 @@ _vtn_fail(struct vtn_builder *b, const char *file, unsigned line,
          vtn_fail(__VA_ARGS__); \
    } while (0)
 
+#define _vtn_fail_with(t, msg, v) \
+   vtn_fail("%s: %s (%u)\n", msg, spirv_ ## t ## _to_string(v), v)
+
+#define vtn_fail_with_decoration(msg, v) _vtn_fail_with(decoration, msg, v)
+#define vtn_fail_with_opcode(msg, v)     _vtn_fail_with(op, msg, v)
+
 /** Assert that a condition is true and, if it isn't, vtn_fail
  *
  * This macro is transitional only and should not be used in new code.  Use
@@ -335,6 +341,13 @@ struct vtn_type {
           * (i.e. a block that contains only builtins).
           */
          bool builtin_block:1;
+
+         /* for structs and unions it specifies the minimum alignment of the
+          * members. 0 means packed.
+          *
+          * Set by CPacked and Alignment Decorations in kernels.
+          */
+         bool packed:1;
       };
 
       /* Members for pointer types */
@@ -383,6 +396,8 @@ bool vtn_type_contains_block(struct vtn_builder *b, struct vtn_type *type);
 bool vtn_types_compatible(struct vtn_builder *b,
                           struct vtn_type *t1, struct vtn_type *t2);
 
+struct vtn_type *vtn_type_without_array(struct vtn_type *type);
+
 struct vtn_variable;
 
 enum vtn_access_mode {
@@ -423,6 +438,7 @@ enum vtn_variable_mode {
    vtn_variable_mode_cross_workgroup,
    vtn_variable_mode_input,
    vtn_variable_mode_output,
+   vtn_variable_mode_image,
 };
 
 struct vtn_pointer {
@@ -458,8 +474,15 @@ struct vtn_pointer {
    enum gl_access_qualifier access;
 };
 
-bool vtn_pointer_uses_ssa_offset(struct vtn_builder *b,
-                                 struct vtn_pointer *ptr);
+bool vtn_mode_uses_ssa_offset(struct vtn_builder *b,
+                              enum vtn_variable_mode mode);
+
+static inline bool vtn_pointer_uses_ssa_offset(struct vtn_builder *b,
+                                               struct vtn_pointer *ptr)
+{
+   return vtn_mode_uses_ssa_offset(b, ptr->mode);
+}
+
 
 struct vtn_variable {
    enum vtn_variable_mode mode;
@@ -545,7 +568,7 @@ struct vtn_decoration {
     */
    int scope;
 
-   const uint32_t *literals;
+   const uint32_t *operands;
    struct vtn_value *group;
 
    union {
@@ -564,7 +587,7 @@ struct vtn_builder {
    size_t spirv_word_count;
 
    nir_shader *shader;
-   const struct spirv_to_nir_options *options;
+   struct spirv_to_nir_options *options;
    struct vtn_block *block;
 
    /* Current offset, file, line, and column.  Useful for debugging.  Set
@@ -613,6 +636,9 @@ struct vtn_builder {
 
    /* false by default, set to true by the ContractionOff execution mode */
    bool exact;
+
+   /* when a physical memory model is choosen */
+   bool physical_ptrs;
 };
 
 nir_ssa_def *
@@ -682,10 +708,28 @@ vtn_constant_uint(struct vtn_builder *b, uint32_t value_id)
                "Expected id %u to be an integer constant", value_id);
 
    switch (glsl_get_bit_size(val->type->type)) {
-   case 8:  return val->constant->values[0].u8[0];
-   case 16: return val->constant->values[0].u16[0];
-   case 32: return val->constant->values[0].u32[0];
-   case 64: return val->constant->values[0].u64[0];
+   case 8:  return val->constant->values[0].u8;
+   case 16: return val->constant->values[0].u16;
+   case 32: return val->constant->values[0].u32;
+   case 64: return val->constant->values[0].u64;
+   default: unreachable("Invalid bit size");
+   }
+}
+
+static inline int64_t
+vtn_constant_int(struct vtn_builder *b, uint32_t value_id)
+{
+   struct vtn_value *val = vtn_value(b, value_id, vtn_value_type_constant);
+
+   vtn_fail_if(val->type->base_type != vtn_base_type_scalar ||
+               !glsl_type_is_integer(val->type->type),
+               "Expected id %u to be an integer constant", value_id);
+
+   switch (glsl_get_bit_size(val->type->type)) {
+   case 8:  return val->constant->values[0].i8;
+   case 16: return val->constant->values[0].i16;
+   case 32: return val->constant->values[0].i32;
+   case 64: return val->constant->values[0].i64;
    default: unreachable("Invalid bit size");
    }
 }
@@ -720,10 +764,12 @@ vtn_pointer_to_offset(struct vtn_builder *b, struct vtn_pointer *ptr,
                       nir_ssa_def **index_out);
 
 struct vtn_ssa_value *
-vtn_local_load(struct vtn_builder *b, nir_deref_instr *src);
+vtn_local_load(struct vtn_builder *b, nir_deref_instr *src,
+               enum gl_access_qualifier access);
 
 void vtn_local_store(struct vtn_builder *b, struct vtn_ssa_value *src,
-                     nir_deref_instr *dest);
+                     nir_deref_instr *dest,
+                     enum gl_access_qualifier access);
 
 struct vtn_ssa_value *
 vtn_variable_load(struct vtn_builder *b, struct vtn_pointer *src);
@@ -759,11 +805,17 @@ nir_op vtn_nir_alu_op_for_spirv_opcode(struct vtn_builder *b,
 void vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
                     const uint32_t *w, unsigned count);
 
+void vtn_handle_bitcast(struct vtn_builder *b, const uint32_t *w,
+                        unsigned count);
+
 void vtn_handle_subgroup(struct vtn_builder *b, SpvOp opcode,
                          const uint32_t *w, unsigned count);
 
 bool vtn_handle_glsl450_instruction(struct vtn_builder *b, SpvOp ext_opcode,
                                     const uint32_t *words, unsigned count);
+
+bool vtn_handle_opencl_instruction(struct vtn_builder *b, uint32_t ext_opcode,
+                                   const uint32_t *words, unsigned count);
 
 struct vtn_builder* vtn_create_builder(const uint32_t *words, size_t word_count,
                                        gl_shader_stage stage, const char *entry_point_name,
@@ -774,6 +826,14 @@ void vtn_handle_entry_point(struct vtn_builder *b, const uint32_t *w,
 
 void vtn_handle_decoration(struct vtn_builder *b, SpvOp opcode,
                            const uint32_t *w, unsigned count);
+
+enum vtn_variable_mode vtn_storage_class_to_mode(struct vtn_builder *b,
+                                                 SpvStorageClass class,
+                                                 struct vtn_type *interface_type,
+                                                 nir_variable_mode *nir_mode_out);
+
+nir_address_format vtn_mode_to_address_format(struct vtn_builder *b,
+                                              enum vtn_variable_mode);
 
 static inline uint32_t
 vtn_align_u32(uint32_t v, uint32_t a)
@@ -790,6 +850,9 @@ vtn_u64_literal(const uint32_t *w)
 
 bool vtn_handle_amd_gcn_shader_instruction(struct vtn_builder *b, SpvOp ext_opcode,
                                            const uint32_t *words, unsigned count);
+
+bool vtn_handle_amd_shader_ballot_instruction(struct vtn_builder *b, SpvOp ext_opcode,
+                                              const uint32_t *w, unsigned count);
 
 bool vtn_handle_amd_shader_trinary_minmax_instruction(struct vtn_builder *b, SpvOp ext_opcode,
 						      const uint32_t *words, unsigned count);

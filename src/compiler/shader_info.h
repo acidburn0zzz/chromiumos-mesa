@@ -35,12 +35,17 @@ extern "C" {
 struct spirv_supported_capabilities {
    bool address;
    bool atomic_storage;
+   bool demote_to_helper_invocation;
+   bool derivative_group;
    bool descriptor_array_dynamic_indexing;
+   bool descriptor_array_non_uniform_indexing;
+   bool descriptor_indexing;
    bool device_group;
    bool draw_parameters;
    bool float64;
+   bool fragment_shader_sample_interlock;
+   bool fragment_shader_pixel_interlock;
    bool geometry_streams;
-   bool gcn_shader;
    bool image_ms_array;
    bool image_read_without_format;
    bool image_write_without_format;
@@ -67,8 +72,11 @@ struct spirv_supported_capabilities {
    bool subgroup_vote;
    bool tessellation;
    bool transform_feedback;
-   bool trinary_minmax;
    bool variable_pointers;
+   bool float16;
+   bool amd_gcn_shader;
+   bool amd_shader_ballot;
+   bool amd_trinary_minmax;
 };
 
 typedef struct shader_info {
@@ -149,6 +157,9 @@ typedef struct shader_info {
       struct {
          /* Which inputs are doubles */
          uint64_t double_inputs;
+
+         /* True if the shader writes position in window space coordinates pre-transform */
+         bool window_space_position;
       } vs;
 
       struct {
@@ -176,6 +187,14 @@ typedef struct shader_info {
 
       struct {
          bool uses_discard;
+
+         /**
+          * True if this fragment shader requires helper invocations.  This
+          * can be caused by the use of ALU derivative ops, texture
+          * instructions which do implicit derivatives, and the use of quad
+          * subgroup operations.
+          */
+         bool needs_helper_invocations;
 
          /**
           * Whether any inputs are declared with the "sample" qualifier.
@@ -240,6 +259,21 @@ typedef struct shader_info {
           * Size of shared variables accessed by the compute shader.
           */
          unsigned shared_size;
+
+
+         /**
+          * pointer size is:
+          *   AddressingModelLogical:    0    (default)
+          *   AddressingModelPhysical32: 32
+          *   AddressingModelPhysical64: 64
+          */
+         unsigned ptr_size;
+
+         /*
+          * Arrangement of invocations used to calculate derivatives in a compute
+          * shader.  From NV_compute_shader_derivatives.
+          */
+         enum gl_derivative_group derivative_group;
       } cs;
 
       /* Applies to both TCS and TES. */

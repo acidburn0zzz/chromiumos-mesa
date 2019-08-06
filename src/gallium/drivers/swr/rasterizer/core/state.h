@@ -201,13 +201,10 @@ struct simdvertex
     simdvector attrib[SWR_VTX_NUM_SLOTS];
 };
 
-#if ENABLE_AVX512_SIMD16
 struct simd16vertex
 {
     simd16vector attrib[SWR_VTX_NUM_SLOTS];
 };
-
-#endif
 
 template <typename SIMD_T>
 struct SIMDVERTEX_T
@@ -429,11 +426,12 @@ struct SWR_CS_CONTEXT
 // enums
 enum SWR_TILE_MODE
 {
-    SWR_TILE_NONE = 0x0,   // Linear mode (no tiling)
-    SWR_TILE_MODE_WMAJOR,  // W major tiling
-    SWR_TILE_MODE_XMAJOR,  // X major tiling
-    SWR_TILE_MODE_YMAJOR,  // Y major tiling
-    SWR_TILE_SWRZ,         // SWR-Z tiling
+    SWR_TILE_NONE = 0x0,     // Linear mode (no tiling)
+    SWR_TILE_MODE_WMAJOR,    // W major tiling
+    SWR_TILE_MODE_XMAJOR,    // X major tiling
+    SWR_TILE_MODE_YMAJOR,    // Y major tiling
+    SWR_TILE_SWRZ,           // SWR-Z tiling
+
 
     SWR_TILE_MODE_COUNT
 };
@@ -536,47 +534,6 @@ enum SWR_AUX_MODE
     AUX_MODE_COLOR,
     AUX_MODE_UAV,
     AUX_MODE_DEPTH,
-};
-
-struct SWR_LOD_OFFSETS
-{
-    uint32_t offsets[2][15];
-};
-
-//////////////////////////////////////////////////////////////////////////
-/// SWR_SURFACE_STATE
-//////////////////////////////////////////////////////////////////////////
-struct SWR_SURFACE_STATE
-{
-    gfxptr_t         xpBaseAddress;
-    SWR_SURFACE_TYPE type;   // @llvm_enum
-    SWR_FORMAT       format; // @llvm_enum
-    uint32_t         width;
-    uint32_t         height;
-    uint32_t         depth;
-    uint32_t         numSamples;
-    uint32_t         samplePattern;
-    uint32_t         pitch;
-    uint32_t         qpitch;
-    uint32_t minLod; // for sampled surfaces, the most detailed LOD that can be accessed by sampler
-    uint32_t maxLod; // for sampled surfaces, the max LOD that can be accessed
-    float    resourceMinLod; // for sampled surfaces, the most detailed fractional mip that can be
-                             // accessed by sampler
-    uint32_t lod;            // for render targets, the lod being rendered to
-    uint32_t arrayIndex; // for render targets, the array index being rendered to for arrayed surfaces
-    SWR_TILE_MODE tileMode; // @llvm_enum
-    uint32_t      halign;
-    uint32_t      valign;
-    uint32_t      xOffset;
-    uint32_t      yOffset;
-
-    uint32_t lodOffsets[2][15]; // lod offsets for sampled surfaces
-
-    gfxptr_t     xpAuxBaseAddress; // Used for compression, append/consume counter, etc.
-    SWR_AUX_MODE auxMode;          // @llvm_enum
-
-
-    bool bInterleavedSamples; // are MSAA samples stored interleaved or planar
 };
 
 // vertex fetch state
@@ -1093,6 +1050,7 @@ struct SWR_RASTSTATE
     uint32_t frontWinding : 1;
     uint32_t scissorEnable : 1;
     uint32_t depthClipEnable : 1;
+    uint32_t clipEnable : 1;
     uint32_t clipHalfZ : 1;
     uint32_t pointParam : 1;
     uint32_t pointSpriteEnable : 1;

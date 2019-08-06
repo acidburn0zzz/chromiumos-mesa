@@ -164,7 +164,7 @@ deserialize_gen_program(struct blob_reader *reader, struct gl_context *ctx,
 
    union brw_any_prog_key prog_key;
    blob_copy_bytes(reader, &prog_key, brw_prog_key_size(stage));
-   brw_prog_key_set_id(&prog_key, stage, brw_program(prog)->id);
+   prog_key.base.program_string_id = brw_program(prog)->id;
 
    enum brw_cache_id cache_id = brw_stage_cache_id(stage);
 
@@ -251,7 +251,7 @@ serialize_gen_part(struct blob *writer, struct gl_context *ctx,
    struct brw_context *brw = brw_context(ctx);
 
    union brw_any_prog_key key;
-   brw_populate_default_key(&brw->screen->devinfo, &key, sh_prog, prog);
+   brw_populate_default_key(brw->screen->compiler, &key, sh_prog, prog);
 
    const gl_shader_stage stage = prog->info.stage;
    uint32_t offset = 0;

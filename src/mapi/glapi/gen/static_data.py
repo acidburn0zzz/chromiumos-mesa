@@ -29,7 +29,7 @@ MAX_OFFSETS = 407
 """Table of functions that have ABI-mandated offsets in the dispatch table.
 
 The first MAX_OFFSETS entries are required by indirect GLX. The rest are
-required to preserve the glapi <> drivers ABI. This is to be addressed shortly.
+required to preserve the glapi <> GL/GLES ABI. This is to be addressed shortly.
 
 This list will never change."""
 offsets = {
@@ -1053,7 +1053,7 @@ offsets = {
     "TextureSubImage3D": 1017,
     "TransformFeedbackBufferBase": 1018,
     "TransformFeedbackBufferRange": 1019,
-    "UnmapNamedBuffer": 1020,
+    "UnmapNamedBufferEXT": 1020,
     "VertexArrayAttribBinding": 1021,
     "VertexArrayAttribFormat": 1022,
     "VertexArrayAttribIFormat": 1023,
@@ -1453,6 +1453,53 @@ offsets = {
     "TexParameterxv": 1417,
     "BlendBarrier": 1418,
     "PrimitiveBoundingBox": 1419,
+    "MaxShaderCompilerThreadsKHR": 1420,
+    "MatrixLoadfEXT": 1421,
+    "MatrixLoaddEXT": 1422,
+    "MatrixMultfEXT": 1423,
+    "MatrixMultdEXT": 1424,
+    "MatrixLoadIdentityEXT": 1425,
+    "MatrixRotatefEXT": 1426,
+    "MatrixRotatedEXT": 1427,
+    "MatrixScalefEXT": 1428,
+    "MatrixScaledEXT": 1429,
+    "MatrixTranslatefEXT": 1430,
+    "MatrixTranslatedEXT": 1431,
+    "MatrixOrthoEXT": 1432,
+    "MatrixFrustumEXT": 1433,
+    "MatrixPushEXT": 1434,
+    "MatrixPopEXT": 1435,
+    "MatrixLoadTransposefEXT": 1436,
+    "MatrixLoadTransposedEXT": 1437,
+    "MatrixMultTransposefEXT": 1438,
+    "MatrixMultTransposedEXT": 1439,
+    "BindMultiTextureEXT": 1440,
+    "NamedBufferDataEXT": 1441,
+    "NamedBufferSubDataEXT": 1442,
+    "NamedBufferStorageEXT": 1443,
+    "MapNamedBufferRangeEXT": 1444,
+    "TextureImage1DEXT": 1445,
+    "TextureImage2DEXT": 1446,
+    "TextureImage3DEXT": 1447,
+    "TextureSubImage1DEXT": 1448,
+    "TextureSubImage2DEXT": 1449,
+    "TextureSubImage3DEXT": 1450,
+    "CopyTextureImage1DEXT": 1451,
+    "CopyTextureImage2DEXT": 1452,
+    "CopyTextureSubImage1DEXT": 1453,
+    "CopyTextureSubImage2DEXT": 1454,
+    "CopyTextureSubImage3DEXT": 1455,
+    "CompressedTextureSubImage2DEXT": 1456,
+    "MapNamedBufferEXT": 1457,
+    "GetTextureParameterivEXT": 1458,
+    "GetTextureParameterfvEXT": 1459,
+    "TextureParameteriEXT": 1460,
+    "TextureParameterivEXT": 1461,
+    "TextureParameterfEXT": 1462,
+    "TextureParameterfvEXT": 1463,
+    "GetTextureImageEXT": 1464,
+    "GetTextureLevelParameterivEXT": 1465,
+    "GetTextureLevelParameterfvEXT": 1466,
 }
 
 functions = [

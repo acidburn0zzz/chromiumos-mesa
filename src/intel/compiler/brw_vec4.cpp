@@ -29,7 +29,7 @@
 #include "brw_vec4_live_variables.h"
 #include "brw_vec4_vs.h"
 #include "brw_dead_control_flow.h"
-#include "common/gen_debug.h"
+#include "dev/gen_debug.h"
 #include "program/prog_parameter.h"
 #include "util/u_math.h"
 
@@ -414,7 +414,7 @@ vec4_visitor::opt_vector_float()
 
       foreach_inst_in_block_safe(vec4_instruction, inst, block) {
          int vf = -1;
-         enum brw_reg_type need_type;
+         enum brw_reg_type need_type = BRW_REGISTER_TYPE_LAST;
 
          /* Look for unconditional MOVs from an immediate with a partial
           * writemask.  Skip type-conversion MOVs other than integer 0,
@@ -1154,6 +1154,12 @@ vec4_instruction::can_reswizzle(const struct gen_device_info *devinfo,
    if (devinfo->gen == 6 && is_math() && swizzle != BRW_SWIZZLE_XYZW)
       return false;
 
+   /* If we write to the flag register changing the swizzle would change
+    * what channels are written to the flag register.
+    */
+   if (writes_flag())
+      return false;
+
    /* We can't swizzle implicit accumulator access.  We'd have to
     * reswizzle the producer of the accumulator value in addition
     * to the consumer (i.e. both MUL and MACH).  Just skip this.
@@ -1198,8 +1204,30 @@ vec4_instruction::reswizzle(int dst_writemask, int swizzle)
        opcode != BRW_OPCODE_DP3 && opcode != BRW_OPCODE_DP2 &&
        opcode != VEC4_OPCODE_PACK_BYTES) {
       for (int i = 0; i < 3; i++) {
-         if (src[i].file == BAD_FILE || src[i].file == IMM)
+         if (src[i].file == BAD_FILE)
             continue;
+
+         if (src[i].file == IMM) {
+            assert(src[i].type != BRW_REGISTER_TYPE_V &&
+                   src[i].type != BRW_REGISTER_TYPE_UV);
+
+            /* Vector immediate types need to be reswizzled. */
+            if (src[i].type == BRW_REGISTER_TYPE_VF) {
+               const unsigned imm[] = {
+                  (src[i].ud >>  0) & 0x0ff,
+                  (src[i].ud >>  8) & 0x0ff,
+                  (src[i].ud >> 16) & 0x0ff,
+                  (src[i].ud >> 24) & 0x0ff,
+               };
+
+               src[i] = brw_imm_vf4(imm[BRW_GET_SWZ(swizzle, 0)],
+                                    imm[BRW_GET_SWZ(swizzle, 1)],
+                                    imm[BRW_GET_SWZ(swizzle, 2)],
+                                    imm[BRW_GET_SWZ(swizzle, 3)]);
+            }
+
+            continue;
+         }
 
          src[i].swizzle = brw_compose_swizzle(swizzle, src[i].swizzle);
       }
@@ -2817,7 +2845,7 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
                char **error_str)
 {
    const bool is_scalar = compiler->scalar_stage[MESA_SHADER_VERTEX];
-   shader = brw_nir_apply_sampler_key(shader, compiler, &key->tex, is_scalar);
+   brw_nir_apply_key(shader, compiler, &key->base, 8, is_scalar);
 
    const unsigned *assembly = NULL;
 
@@ -2841,7 +2869,7 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
 
    brw_nir_lower_vs_inputs(shader, key->gl_attrib_wa_flags);
    brw_nir_lower_vue_outputs(shader);
-   shader = brw_postprocess_nir(shader, compiler, is_scalar);
+   brw_postprocess_nir(shader, compiler, is_scalar);
 
    prog_data->base.clip_distance_mask =
       ((1 << shader->info.clip_distance_array_size) - 1);
@@ -2933,7 +2961,8 @@ brw_compile_vs(const struct brw_compiler *compiler, void *log_data,
    if (is_scalar) {
       prog_data->base.dispatch_mode = DISPATCH_MODE_SIMD8;
 
-      fs_visitor v(compiler, log_data, mem_ctx, key, &prog_data->base.base,
+      fs_visitor v(compiler, log_data, mem_ctx, &key->base,
+                   &prog_data->base.base,
                    NULL, /* prog; Only used for TEXTURE_RECTANGLE on gen < 8 */
                    shader, 8, shader_time_index);
       if (!v.run_vs()) {

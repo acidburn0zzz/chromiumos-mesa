@@ -95,15 +95,14 @@ ir3_get_image_slot(nir_deref_instr *deref)
 
 	while (deref->deref_type != nir_deref_type_var) {
 		assert(deref->deref_type == nir_deref_type_array);
-		nir_const_value *const_index = nir_src_as_const_value(deref->arr.index);
-		assert(const_index);
+		unsigned const_index = nir_src_as_uint(deref->arr.index);
 
 		/* Go to the next instruction */
 		deref = nir_deref_instr_parent(deref);
 
 		assert(glsl_type_is_array(deref->type));
 		const unsigned array_len = glsl_get_length(deref->type);
-		loc += MIN2(const_index->u32[0], array_len - 1) * inner_size;
+		loc += MIN2(const_index, array_len - 1) * inner_size;
 
 		/* Update the inner size */
 		inner_size *= array_len;
@@ -121,34 +120,14 @@ unsigned
 ir3_get_image_coords(const nir_variable *var, unsigned *flagsp)
 {
 	const struct glsl_type *type = glsl_without_array(var->type);
-	unsigned coords, flags = 0;
+	unsigned coords = glsl_get_sampler_coordinate_components(type);
+	unsigned flags = 0;
 
-	switch (glsl_get_sampler_dim(type)) {
-	case GLSL_SAMPLER_DIM_1D:
-	case GLSL_SAMPLER_DIM_BUF:
-		coords = 1;
-		break;
-	case GLSL_SAMPLER_DIM_2D:
-	case GLSL_SAMPLER_DIM_RECT:
-	case GLSL_SAMPLER_DIM_EXTERNAL:
-	case GLSL_SAMPLER_DIM_MS:
-		coords = 2;
-		break;
-	case GLSL_SAMPLER_DIM_3D:
-	case GLSL_SAMPLER_DIM_CUBE:
+	if (coords == 3)
 		flags |= IR3_INSTR_3D;
-		coords = 3;
-		break;
-	default:
-		unreachable("bad sampler dim");
-		return 0;
-	}
 
-	if (glsl_sampler_type_is_array(type)) {
-		/* note: unlike tex_info(), adjust # of coords to include array idx: */
-		coords++;
+	if (glsl_sampler_type_is_array(type))
 		flags |= IR3_INSTR_A;
-	}
 
 	if (flagsp)
 		*flagsp = flags;

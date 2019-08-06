@@ -30,7 +30,7 @@
 #include "brw_nir.h"
 #include "brw_vec4_tcs.h"
 #include "brw_fs.h"
-#include "common/gen_debug.h"
+#include "dev/gen_debug.h"
 
 namespace brw {
 
@@ -42,7 +42,7 @@ vec4_tcs_visitor::vec4_tcs_visitor(const struct brw_compiler *compiler,
                                    void *mem_ctx,
                                    int shader_time_index,
                                    const struct brw_vue_map *input_vue_map)
-   : vec4_visitor(compiler, log_data, &key->tex, &prog_data->base,
+   : vec4_visitor(compiler, log_data, &key->base.tex, &prog_data->base,
                   nir, mem_ctx, false, shader_time_index),
      input_vue_map(input_vue_map), key(key)
 {
@@ -397,19 +397,35 @@ brw_compile_tcs(const struct brw_compiler *compiler,
                             nir->info.outputs_written,
                             nir->info.patch_outputs_written);
 
-   nir = brw_nir_apply_sampler_key(nir, compiler, &key->tex, is_scalar);
+   brw_nir_apply_key(nir, compiler, &key->base, 8, is_scalar);
    brw_nir_lower_vue_inputs(nir, &input_vue_map);
    brw_nir_lower_tcs_outputs(nir, &vue_prog_data->vue_map,
                              key->tes_primitive_mode);
    if (key->quads_workaround)
       brw_nir_apply_tcs_quads_workaround(nir);
 
-   nir = brw_postprocess_nir(nir, compiler, is_scalar);
+   brw_postprocess_nir(nir, compiler, is_scalar);
 
-   if (is_scalar)
-      prog_data->instances = DIV_ROUND_UP(nir->info.tess.tcs_vertices_out, 8);
-   else
-      prog_data->instances = DIV_ROUND_UP(nir->info.tess.tcs_vertices_out, 2);
+   bool has_primitive_id =
+      nir->info.system_values_read & (1 << SYSTEM_VALUE_PRIMITIVE_ID);
+
+   if (compiler->use_tcs_8_patch &&
+       nir->info.tess.tcs_vertices_out <= 16 &&
+       2 + has_primitive_id + key->input_vertices <= 31) {
+      /* 3DSTATE_HS imposes two constraints on using 8_PATCH mode.  First,
+       * the "Instance" field limits the number of output vertices to [1, 16].
+       * Secondly, the "Dispatch GRF Start Register for URB Data" field is
+       * limited to [0, 31] - which imposes a limit on the input vertices.
+       */
+      vue_prog_data->dispatch_mode = DISPATCH_MODE_TCS_8_PATCH;
+      prog_data->instances = nir->info.tess.tcs_vertices_out;
+      prog_data->include_primitive_id = has_primitive_id;
+   } else {
+      unsigned verts_per_thread = is_scalar ? 8 : 2;
+      vue_prog_data->dispatch_mode = DISPATCH_MODE_TCS_SINGLE_PATCH;
+      prog_data->instances =
+         DIV_ROUND_UP(nir->info.tess.tcs_vertices_out, verts_per_thread);
+   }
 
    /* Compute URB entry size.  The maximum allowed URB entry size is 32k.
     * That divides up as follows:
@@ -459,17 +475,16 @@ brw_compile_tcs(const struct brw_compiler *compiler,
    }
 
    if (is_scalar) {
-      fs_visitor v(compiler, log_data, mem_ctx, (void *) key,
+      fs_visitor v(compiler, log_data, mem_ctx, &key->base,
                    &prog_data->base.base, NULL, nir, 8,
                    shader_time_index, &input_vue_map);
-      if (!v.run_tcs_single_patch()) {
+      if (!v.run_tcs()) {
          if (error_str)
             *error_str = ralloc_strdup(mem_ctx, v.fail_msg);
          return NULL;
       }
 
       prog_data->base.base.dispatch_grf_start_reg = v.payload.num_regs;
-      prog_data->base.dispatch_mode = DISPATCH_MODE_SIMD8;
 
       fs_generator g(compiler, log_data, mem_ctx,
                      &prog_data->base.base, v.promoted_constants, false,

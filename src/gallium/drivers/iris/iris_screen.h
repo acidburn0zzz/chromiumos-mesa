@@ -25,6 +25,7 @@
 
 #include "pipe/p_screen.h"
 #include "state_tracker/drm_driver.h"
+#include "util/disk_cache.h"
 #include "util/slab.h"
 #include "util/u_screen.h"
 #include "intel/dev/gen_device_info.h"
@@ -38,6 +39,7 @@ struct iris_bo;
 
 #define IRIS_MAX_TEXTURE_SAMPLERS 32
 #define IRIS_MAX_SOL_BUFFERS 4
+#define IRIS_MAP_BUFFER_ALIGNMENT 64
 
 struct iris_screen {
    struct pipe_screen base;
@@ -51,13 +53,23 @@ struct iris_screen {
    /** PCI ID for our GPU device */
    int pci_id;
 
+   bool no_hw;
+
    /** Global program_string_id counter (see get_program_string_id()) */
    unsigned program_id;
 
    /** Precompile shaders at link time?  (Can be disabled for debugging.) */
    bool precompile;
 
+   /** driconf options and application workarounds */
+   struct {
+      /** Dual color blend by location instead of index (for broken apps) */
+      bool dual_color_blend_by_location;
+   } driconf;
+
    unsigned subslice_total;
+
+   uint64_t aperture_bytes;
 
    struct gen_device_info devinfo;
    struct isl_device isl_dev;
@@ -69,16 +81,21 @@ struct iris_screen {
     * require scratch writes or reads from some unimportant memory.
     */
    struct iris_bo *workaround_bo;
+
+   struct disk_cache *disk_cache;
 };
 
-struct pipe_screen *iris_screen_create(int fd);
+struct pipe_screen *
+iris_screen_create(int fd, const struct pipe_screen_config *config);
 
-boolean
+bool
 iris_is_format_supported(struct pipe_screen *pscreen,
                          enum pipe_format format,
                          enum pipe_texture_target target,
                          unsigned sample_count,
                          unsigned storage_sample_count,
                          unsigned usage);
+
+void iris_disk_cache_init(struct iris_screen *screen);
 
 #endif

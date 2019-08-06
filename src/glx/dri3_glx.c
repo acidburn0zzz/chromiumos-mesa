@@ -259,6 +259,10 @@ dri3_create_context_attribs(struct glx_screen *base,
                                  &reset, &release, error))
       goto error_exit;
 
+   if (!dri2_check_no_error(flags, shareList, major_ver, error)) {
+      goto error_exit;
+   }
+
    /* Check the renderType value */
    if (!validate_renderType_against_config(config_base, render_type))
        goto error_exit;
@@ -303,6 +307,9 @@ dri3_create_context_attribs(struct glx_screen *base,
        * GLX_CONTEXT_*_BIT values.
        */
       ctx_attribs[num_ctx_attribs++] = flags;
+
+      if (flags & __DRI_CTX_FLAG_NO_ERROR)
+         pcp->base.noError = GL_TRUE;
    }
 
    pcp->driContext =
@@ -642,7 +649,6 @@ dri3_set_swap_interval(__GLXDRIdrawable *pdraw, int interval)
       break;
    }
 
-   priv->swap_interval = interval;
    loader_dri3_set_swap_interval(&priv->loader_drawable, interval);
 
    return 0;
@@ -659,7 +665,7 @@ dri3_get_swap_interval(__GLXDRIdrawable *pdraw)
 
    struct dri3_drawable *priv =  (struct dri3_drawable *) pdraw;
 
-  return priv->swap_interval;
+  return priv->loader_drawable.swap_interval;
 }
 
 static void
@@ -779,6 +785,10 @@ dri3_bind_extensions(struct dri3_screen *psc, struct glx_display * priv,
       if (strcmp(extensions[i]->name, __DRI2_ROBUSTNESS) == 0)
          __glXEnableDirectExtension(&psc->base,
                                     "GLX_ARB_create_context_robustness");
+
+      if (strcmp(extensions[i]->name, __DRI2_NO_ERROR) == 0)
+         __glXEnableDirectExtension(&psc->base,
+                                    "GLX_ARB_create_context_no_error");
 
       if (strcmp(extensions[i]->name, __DRI2_RENDERER_QUERY) == 0) {
          psc->rendererQuery = (__DRI2rendererQueryExtension *) extensions[i];
@@ -989,7 +999,7 @@ dri3_create_screen(int screen, struct glx_display * priv)
    return &psc->base;
 
 handle_error:
-   CriticalErrorMessageF("failed to load driver: %s\n", driverName);
+   CriticalErrorMessageF("failed to load driver: %s\n", driverName ? driverName : "(null)");
 
    if (configs)
        glx_config_destroy_list(configs);

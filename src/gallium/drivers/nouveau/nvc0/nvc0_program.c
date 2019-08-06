@@ -22,6 +22,7 @@
 
 #include "pipe/p_defines.h"
 
+#include "compiler/nir/nir.h"
 #include "tgsi/tgsi_ureg.h"
 
 #include "nvc0/nvc0_context.h"
@@ -342,8 +343,6 @@ nvc0_tcp_gen_header(struct nvc0_program *tcp, struct nv50_ir_prog_info *info)
 {
    unsigned opcs = 6; /* output patch constants (at least the TessFactors) */
 
-   tcp->tp.input_patch_size = info->prop.tp.inputPatchSize;
-
    if (info->numPatchConstants)
       opcs = 8 + info->numPatchConstants * 4;
 
@@ -373,8 +372,6 @@ nvc0_tcp_gen_header(struct nvc0_program *tcp, struct nv50_ir_prog_info *info)
 static int
 nvc0_tep_gen_header(struct nvc0_program *tep, struct nv50_ir_prog_info *info)
 {
-   tep->tp.input_patch_size = ~0;
-
    tep->hdr[0] = 0x20061 | (3 << 10);
    tep->hdr[4] = 0xff000;
 
@@ -554,6 +551,7 @@ nvc0_program_dump(struct nvc0_program *prog)
    unsigned pos;
 
    if (prog->type != PIPE_SHADER_COMPUTE) {
+      debug_printf("dumping HDR for type %i\n", prog->type);
       for (pos = 0; pos < ARRAY_SIZE(prog->hdr); ++pos)
          debug_printf("HDR[%02"PRIxPTR"] = 0x%08x\n",
                       pos * sizeof(prog->hdr[0]), prog->hdr[pos]);
@@ -581,8 +579,20 @@ nvc0_program_translate(struct nvc0_program *prog, uint16_t chipset,
 
    info->type = prog->type;
    info->target = chipset;
-   info->bin.sourceRep = PIPE_SHADER_IR_TGSI;
-   info->bin.source = (void *)prog->pipe.tokens;
+
+   info->bin.sourceRep = prog->pipe.type;
+   switch (prog->pipe.type) {
+   case PIPE_SHADER_IR_TGSI:
+      info->bin.source = (void *)prog->pipe.tokens;
+      break;
+   case PIPE_SHADER_IR_NIR:
+      info->bin.source = (void *)nir_shader_clone(NULL, prog->pipe.ir.nir);
+      break;
+   default:
+      assert(!"unsupported IR!");
+      free(info);
+      return false;
+   }
 
 #ifdef DEBUG
    info->target = debug_get_num_option("NV50_PROG_CHIPSET", chipset);
@@ -710,6 +720,8 @@ nvc0_program_translate(struct nvc0_program *prog, uint16_t chipset,
 #endif
 
 out:
+   if (info->bin.sourceRep == PIPE_SHADER_IR_NIR)
+      ralloc_free((void *)info->bin.source);
    FREE(info);
    return !ret;
 }

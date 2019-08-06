@@ -26,32 +26,39 @@ files_panfrost = files(
   'pan_resource.c',
   'pan_resource.h',
 
-  'midgard/midgard_compile.c',
-  'midgard/cppwrap.cpp',
-  'midgard/disassemble.c',
+  'nir/nir_undef_to_zero.c',
+  'nir/nir_lower_blend.c',
+  'nir/nir_lower_framebuffer.c',
+  'nir/nir_clamp_psiz.c',
 
   'pan_context.c',
+  'pan_afbc.c',
+  'pan_bo_cache.c',
+  'pan_blit.c',
   'pan_job.c',
-  'pan_trace.c',
   'pan_drm.c',
   'pan_allocate.c',
   'pan_assemble.c',
   'pan_format.c',
-  'pan_swizzle.c',
   'pan_blending.c',
   'pan_blend_shaders.c',
-  'pan_wallpaper.c',
-  'pan_pretty_print.c',
+  'pan_blend_cso.c',
+  'pan_fragment.c',
+  'pan_invocation.c',
+  'pan_instancing.c',
+  'pan_scoreboard.c',
+  'pan_sfbd.c',
+  'pan_mfbd.c',
+  'pan_tiler.c',
 )
 
-inc_panfrost = [
+panfrost_includes = [
   inc_common,
   inc_gallium,
   inc_gallium_aux,
   inc_include,
   inc_src,
-  include_directories('include'),
-  include_directories('midgard'),
+  inc_panfrost,
 ]
 
 compile_args_panfrost = [
@@ -59,86 +66,19 @@ compile_args_panfrost = [
   '-Wno-pointer-arith'
 ]
 
-overlay = join_paths(meson.source_root(), meson.current_source_dir(), 'nondrm/pan_nondrm.c')
-nondrm_overlay_check = run_command('ls', overlay)
-has_nondrm_overlay = nondrm_overlay_check.returncode() == 0
-
-if has_nondrm_overlay
-  files_panfrost += files('nondrm/pan_nondrm.c')
-  inc_panfrost += include_directories('nondrm/include')
-  compile_args_panfrost += '-DPAN_NONDRM_OVERLAY'
-endif
-
-midgard_nir_algebraic_c = custom_target(
-  'midgard_nir_algebraic.c',
-  input : 'midgard/midgard_nir_algebraic.py',
-  output : 'midgard_nir_algebraic.c',
-  command : [
-    prog_python, '@INPUT@',
-    '-p', join_paths(meson.source_root(), 'src/compiler/nir/'),
-  ],
-  capture : true,
-  depend_files : nir_algebraic_py,
-)
-
 libpanfrost = static_library(
   'panfrost',
-  [files_panfrost, midgard_nir_algebraic_c],
+  files_panfrost,
   dependencies: [
     dep_thread,
     dep_libdrm,
     idep_nir
   ],
-  include_directories : inc_panfrost,
+  include_directories : panfrost_includes,
   c_args : [c_vis_args, c_msvc_compat_args, compile_args_panfrost],
 )
 
 driver_panfrost = declare_dependency(
   compile_args : compile_args_panfrost,
-  link_with : [libpanfrost, libpanfrostwinsys],
-)
-
-files_midgard = files(
-  'midgard/midgard_compile.c',
-  'midgard/cppwrap.cpp',
-  'midgard/disassemble.c',
-  'midgard/cmdline.c',
-)
-
-midgard_compiler = executable(
-  'midgard_compiler',
-  [files_midgard, midgard_nir_algebraic_c],
-  include_directories : inc_panfrost,
-  dependencies : [
-    dep_thread,
-    idep_nir
-  ],
-  link_with : [
-    libgallium,
-    libglsl_standalone,
-    libmesa_util
-  ],
-  build_by_default : true
-)
-
-files_pandecode = files(
-  'pandecode/cmdline.c',
-  'pandecode/decode.c',
-
-  'pan_pretty_print.c',
-
-  'midgard/disassemble.c'
-)
-
-pandecode = executable(
-  'pandecode',
-  files_pandecode,
-  include_directories : inc_panfrost,
-  dependencies : [
-    dep_thread,
-  ],
-  link_with : [
-    libmesa_util
-  ],
-  build_by_default : true
+  link_with : [libpanfrost, libpanfrostwinsys, libpanfrost_shared, libpanfrost_midgard, libpanfrost_bifrost, libpanfrost_decode],
 )

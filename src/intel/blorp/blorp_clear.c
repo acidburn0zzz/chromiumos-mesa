@@ -259,16 +259,21 @@ get_fast_clear_rect(const struct isl_device *dev,
       x_scaledown = x_align / 2;
       y_scaledown = y_align / 2;
 
-      /* From BSpec: 3D-Media-GPGPU Engine > 3D Pipeline > Pixel > Pixel
-       * Backend > MCS Buffer for Render Target(s) [DevIVB+] > Table "Color
-       * Clear of Non-MultiSampled Render Target Restrictions":
-       *
-       *   Clear rectangle must be aligned to two times the number of
-       *   pixels in the table shown below due to 16x16 hashing across the
-       *   slice.
-       */
-      x_align *= 2;
-      y_align *= 2;
+      if (ISL_DEV_IS_HASWELL(dev)) {
+         /* From BSpec: 3D-Media-GPGPU Engine > 3D Pipeline > Pixel > Pixel
+          * Backend > MCS Buffer for Render Target(s) [DevIVB+] > Table "Color
+          * Clear of Non-MultiSampled Render Target Restrictions":
+          *
+          *   Clear rectangle must be aligned to two times the number of
+          *   pixels in the table shown below due to 16x16 hashing across the
+          *   slice.
+          *
+          * This restriction is only documented to exist on HSW GT3 but
+          * empirical evidence suggests that it's also needed GT2.
+          */
+         x_align *= 2;
+         y_align *= 2;
+      }
    } else {
       assert(aux_surf->usage == ISL_SURF_USAGE_MCS_BIT);
 
@@ -361,7 +366,7 @@ blorp_fast_clear(struct blorp_batch *batch,
    batch->blorp->exec(batch, &params);
 }
 
-static union isl_color_value
+union isl_color_value
 swizzle_color_value(union isl_color_value src, struct isl_swizzle swizzle)
 {
    union isl_color_value dst = { .u32 = { 0, } };
@@ -898,7 +903,11 @@ blorp_ccs_resolve(struct blorp_batch *batch,
    params.x1 = ALIGN(params.x1, x_scaledown) / x_scaledown;
    params.y1 = ALIGN(params.y1, y_scaledown) / y_scaledown;
 
-   if (batch->blorp->isl_dev->info->gen >= 9) {
+   if (batch->blorp->isl_dev->info->gen >= 10) {
+      assert(resolve_op == ISL_AUX_OP_FULL_RESOLVE ||
+             resolve_op == ISL_AUX_OP_PARTIAL_RESOLVE ||
+             resolve_op == ISL_AUX_OP_AMBIGUATE);
+   } else if (batch->blorp->isl_dev->info->gen >= 9) {
       assert(resolve_op == ISL_AUX_OP_FULL_RESOLVE ||
              resolve_op == ISL_AUX_OP_PARTIAL_RESOLVE);
    } else {
@@ -993,8 +1002,8 @@ blorp_params_get_mcs_partial_resolve_kernel(struct blorp_batch *batch,
 
    struct brw_wm_prog_key wm_key;
    brw_blorp_init_wm_prog_key(&wm_key);
-   wm_key.tex.compressed_multisample_layout_mask = 1;
-   wm_key.tex.msaa_16 = blorp_key.num_samples == 16;
+   wm_key.base.tex.compressed_multisample_layout_mask = 1;
+   wm_key.base.tex.msaa_16 = blorp_key.num_samples == 16;
    wm_key.multisample_fbo = true;
 
    struct brw_wm_prog_data prog_data;
@@ -1057,6 +1066,12 @@ blorp_ccs_ambiguate(struct blorp_batch *batch,
                     struct blorp_surf *surf,
                     uint32_t level, uint32_t layer)
 {
+   if (ISL_DEV_GEN(batch->blorp->isl_dev) >= 10) {
+      /* On gen10 and above, we have a hardware resolve op for this */
+      return blorp_ccs_resolve(batch, surf, level, layer, 1,
+                               surf->surf->format, ISL_AUX_OP_AMBIGUATE);
+   }
+
    struct blorp_params params;
    blorp_params_init(&params);
 

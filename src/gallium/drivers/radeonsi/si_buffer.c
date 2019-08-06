@@ -155,7 +155,7 @@ void si_init_resource_fields(struct si_screen *sscreen,
 		 * persistent buffers into GTT to prevent VRAM CPU page faults.
 		 */
 		if (!sscreen->info.kernel_flushes_hdp_before_ib ||
-		    sscreen->info.drm_major == 2)
+		    !sscreen->info.is_amdgpu)
 			res->domains = RADEON_DOMAIN_GTT;
 	}
 
@@ -287,11 +287,9 @@ si_invalidate_buffer(struct si_context *sctx,
 	/* Check if mapping this buffer would cause waiting for the GPU. */
 	if (si_rings_is_buffer_referenced(sctx, buf->buf, RADEON_USAGE_READWRITE) ||
 	    !sctx->ws->buffer_wait(buf->buf, 0, RADEON_USAGE_READWRITE)) {
-		uint64_t old_va = buf->gpu_address;
-
 		/* Reallocate the buffer in the same pipe_resource. */
 		si_alloc_resource(sctx->screen, buf);
-		si_rebind_buffer(sctx, &buf->b.b, old_va);
+		si_rebind_buffer(sctx, &buf->b.b);
 	} else {
 		util_range_set_empty(&buf->valid_buffer_range);
 	}
@@ -307,7 +305,6 @@ void si_replace_buffer_storage(struct pipe_context *ctx,
 	struct si_context *sctx = (struct si_context*)ctx;
 	struct si_resource *sdst = si_resource(dst);
 	struct si_resource *ssrc = si_resource(src);
-	uint64_t old_gpu_address = sdst->gpu_address;
 
 	pb_reference(&sdst->buf, ssrc->buf);
 	sdst->gpu_address = ssrc->gpu_address;
@@ -322,7 +319,7 @@ void si_replace_buffer_storage(struct pipe_context *ctx,
 	assert(sdst->bo_alignment == ssrc->bo_alignment);
 	assert(sdst->domains == ssrc->domains);
 
-	si_rebind_buffer(sctx, dst, old_gpu_address);
+	si_rebind_buffer(sctx, dst);
 }
 
 static void si_invalidate_resource(struct pipe_context *ctx,
@@ -640,12 +637,13 @@ static void si_buffer_subdata(struct pipe_context *ctx,
 	struct pipe_box box;
 	uint8_t *map = NULL;
 
+	usage |= PIPE_TRANSFER_WRITE;
+
+	if (!(usage & PIPE_TRANSFER_MAP_DIRECTLY))
+		usage |= PIPE_TRANSFER_DISCARD_RANGE;
+
 	u_box_1d(offset, size, &box);
-	map = si_buffer_transfer_map(ctx, buffer, 0,
-				       PIPE_TRANSFER_WRITE |
-				       PIPE_TRANSFER_DISCARD_RANGE |
-				       usage,
-				       &box, &transfer);
+	map = si_buffer_transfer_map(ctx, buffer, 0, usage, &box, &transfer);
 	if (!map)
 		return;
 

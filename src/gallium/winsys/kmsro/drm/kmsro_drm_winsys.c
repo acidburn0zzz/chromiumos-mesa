@@ -26,16 +26,19 @@
 #include <unistd.h>
 
 #include "kmsro_drm_public.h"
+#include "v3d/drm/v3d_drm_public.h"
 #include "vc4/drm/vc4_drm_public.h"
 #include "etnaviv/drm/etnaviv_drm_public.h"
 #include "freedreno/drm/freedreno_drm_public.h"
 #include "panfrost/drm/panfrost_drm_public.h"
+#include "lima/drm/lima_drm_public.h"
 #include "xf86drm.h"
 
 #include "pipe/p_screen.h"
 #include "renderonly/renderonly.h"
 
-struct pipe_screen *kmsro_drm_screen_create(int fd)
+struct pipe_screen *kmsro_drm_screen_create(int fd,
+                                            const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen = NULL;
    struct renderonly ro = {
@@ -51,7 +54,7 @@ struct pipe_screen *kmsro_drm_screen_create(int fd)
        * flag on allocation will have ensured.
        */
       ro.create_for_resource = renderonly_create_gpu_import_for_resource,
-      screen = vc4_drm_screen_create_renderonly(&ro);
+      screen = vc4_drm_screen_create_renderonly(&ro, config);
       if (!screen)
          close(ro.gpu_fd);
 
@@ -86,18 +89,9 @@ struct pipe_screen *kmsro_drm_screen_create(int fd)
 #if defined(GALLIUM_PANFROST)
    ro.gpu_fd = drmOpenWithType("panfrost", NULL, DRM_NODE_RENDER);
 
-   bool is_drm = true;
-   if (ro.gpu_fd < 0) {
-      /* For compatibility with legacy kernels, fallback on the non-DRM
-       * interface */
-
-      ro.gpu_fd = open("/dev/mali0", O_RDWR | O_CLOEXEC);
-      is_drm = false;
-   }
-
    if (ro.gpu_fd >= 0) {
       ro.create_for_resource = renderonly_create_kms_dumb_buffer_for_resource,
-      screen = panfrost_drm_screen_create_renderonly(&ro, is_drm);
+      screen = panfrost_drm_screen_create_renderonly(&ro);
       if (!screen)
          close(ro.gpu_fd);
 
@@ -105,7 +99,29 @@ struct pipe_screen *kmsro_drm_screen_create(int fd)
    }
 #endif
 
+#if defined(GALLIUM_LIMA)
+   ro.gpu_fd = drmOpenWithType("lima", NULL, DRM_NODE_RENDER);
+   if (ro.gpu_fd >= 0) {
+      ro.create_for_resource = renderonly_create_kms_dumb_buffer_for_resource,
+      screen = lima_drm_screen_create_renderonly(&ro);
+      if (!screen)
+         close(ro.gpu_fd);
 
+      return screen;
+   }
+#endif
+
+#if defined(GALLIUM_V3D)
+   ro.gpu_fd = drmOpenWithType("v3d", NULL, DRM_NODE_RENDER);
+   if (ro.gpu_fd >= 0) {
+      ro.create_for_resource = renderonly_create_kms_dumb_buffer_for_resource,
+      screen = v3d_drm_screen_create_renderonly(&ro, config);
+      if (!screen)
+         close(ro.gpu_fd);
+
+      return screen;
+   }
+#endif
 
    return screen;
 }

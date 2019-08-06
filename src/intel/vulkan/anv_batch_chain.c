@@ -1393,18 +1393,13 @@ setup_execbuf_for_cmd_buffer(struct anv_execbuf *execbuf,
       anv_execbuf_add_bo_set(execbuf, cmd_buffer->surface_relocs.deps, 0,
                              &cmd_buffer->device->alloc);
 
-      /* Add the BOs for all the pinned buffers */
-      if (cmd_buffer->device->pinned_buffers->entries) {
-         struct set *pinned_bos = _mesa_pointer_set_create(NULL);
-         if (pinned_bos == NULL)
-            return vk_error(VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         set_foreach(cmd_buffer->device->pinned_buffers, entry) {
-            const struct anv_buffer *buffer = entry->key;
-            _mesa_set_add(pinned_bos, buffer->address.bo);
-         }
-         anv_execbuf_add_bo_set(execbuf, pinned_bos, 0,
-                                &cmd_buffer->device->alloc);
-         _mesa_set_destroy(pinned_bos, NULL);
+      /* Add the BOs for all memory objects */
+      list_for_each_entry(struct anv_device_memory, mem,
+                          &cmd_buffer->device->memory_objects, link) {
+         result = anv_execbuf_add_bo(execbuf, mem->bo, NULL, 0,
+                                     &cmd_buffer->device->alloc);
+         if (result != VK_SUCCESS)
+            return result;
       }
 
       struct anv_block_pool *pool;
@@ -1599,6 +1594,7 @@ anv_cmd_buffer_execbuf(struct anv_device *device,
                        VkFence _fence)
 {
    ANV_FROM_HANDLE(anv_fence, fence, _fence);
+   UNUSED struct anv_physical_device *pdevice = &device->instance->physicalDevice;
 
    struct anv_execbuf execbuf;
    anv_execbuf_init(&execbuf);
@@ -1613,6 +1609,7 @@ anv_cmd_buffer_execbuf(struct anv_device *device,
 
       switch (impl->type) {
       case ANV_SEMAPHORE_TYPE_BO:
+         assert(!pdevice->has_syncobj);
          result = anv_execbuf_add_bo(&execbuf, impl->bo, NULL,
                                      0, &device->alloc);
          if (result != VK_SUCCESS)
@@ -1620,6 +1617,7 @@ anv_cmd_buffer_execbuf(struct anv_device *device,
          break;
 
       case ANV_SEMAPHORE_TYPE_SYNC_FILE:
+         assert(!pdevice->has_syncobj);
          if (in_fence == -1) {
             in_fence = impl->fd;
          } else {
@@ -1669,6 +1667,7 @@ anv_cmd_buffer_execbuf(struct anv_device *device,
 
       switch (impl->type) {
       case ANV_SEMAPHORE_TYPE_BO:
+         assert(!pdevice->has_syncobj);
          result = anv_execbuf_add_bo(&execbuf, impl->bo, NULL,
                                      EXEC_OBJECT_WRITE, &device->alloc);
          if (result != VK_SUCCESS)
@@ -1676,6 +1675,7 @@ anv_cmd_buffer_execbuf(struct anv_device *device,
          break;
 
       case ANV_SEMAPHORE_TYPE_SYNC_FILE:
+         assert(!pdevice->has_syncobj);
          need_out_fence = true;
          break;
 
@@ -1710,6 +1710,7 @@ anv_cmd_buffer_execbuf(struct anv_device *device,
 
       switch (impl->type) {
       case ANV_FENCE_TYPE_BO:
+         assert(!pdevice->has_syncobj_wait);
          result = anv_execbuf_add_bo(&execbuf, &impl->bo.bo, NULL,
                                      EXEC_OBJECT_WRITE, &device->alloc);
          if (result != VK_SUCCESS)
@@ -1735,7 +1736,7 @@ anv_cmd_buffer_execbuf(struct anv_device *device,
 
          device->cmd_buffer_being_decoded = cmd_buffer;
          gen_print_batch(&device->decoder_ctx, (*bo)->bo.map,
-                         (*bo)->bo.size, (*bo)->bo.offset);
+                         (*bo)->bo.size, (*bo)->bo.offset, false);
          device->cmd_buffer_being_decoded = NULL;
       }
 
@@ -1783,6 +1784,7 @@ anv_cmd_buffer_execbuf(struct anv_device *device,
    }
 
    if (fence && fence->permanent.type == ANV_FENCE_TYPE_BO) {
+      assert(!pdevice->has_syncobj_wait);
       /* BO fences can't be shared, so they can't be temporary. */
       assert(fence->temporary.type == ANV_FENCE_TYPE_NONE);
 
@@ -1800,6 +1802,7 @@ anv_cmd_buffer_execbuf(struct anv_device *device,
    }
 
    if (result == VK_SUCCESS && need_out_fence) {
+      assert(!pdevice->has_syncobj_wait);
       int out_fence = execbuf.execbuf.rsvd2 >> 32;
       for (uint32_t i = 0; i < num_out_semaphores; i++) {
          ANV_FROM_HANDLE(anv_semaphore, semaphore, out_semaphores[i]);

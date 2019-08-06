@@ -59,8 +59,6 @@ struct fd_resource_slice {
 	uint32_t size0;          /* size of first layer in slice */
 };
 
-struct set;
-
 struct fd_resource {
 	struct pipe_resource base;
 	struct fd_bo *bo;
@@ -170,7 +168,20 @@ fd_resource_offset(struct fd_resource *rsc, unsigned level, unsigned layer)
 		offset = slice->offset + (slice->size0 * layer);
 	}
 	debug_assert(offset < fd_bo_size(rsc->bo));
-	return offset;
+	return offset + rsc->offset;
+}
+
+static inline uint32_t
+fd_resource_ubwc_offset(struct fd_resource *rsc, unsigned level, unsigned layer)
+{
+	/* for now this doesn't do anything clever, but when UBWC is enabled
+	 * for multi layer/level images, it will.
+	 */
+	if (rsc->ubwc_size) {
+		debug_assert(level == 0);
+		debug_assert(layer == 0);
+	}
+	return rsc->ubwc_offset;
 }
 
 /* This might be a5xx specific, but higher mipmap levels are always linear: */
@@ -181,6 +192,13 @@ fd_resource_level_linear(struct pipe_resource *prsc, int level)
 	if (w < 16)
 		return true;
 	return false;
+}
+
+static inline bool
+fd_resource_ubwc_enabled(struct fd_resource *rsc, int level)
+{
+	return rsc->ubwc_size && rsc->tile_mode &&
+			!fd_resource_level_linear(&rsc->base, level);
 }
 
 /* access # of samples, with 0 normalized to 1 (which is what we care about
@@ -197,6 +215,7 @@ void fd_resource_context_init(struct pipe_context *pctx);
 
 uint32_t fd_setup_slices(struct fd_resource *rsc);
 void fd_resource_resize(struct pipe_resource *prsc, uint32_t sz);
+void fd_resource_uncompress(struct fd_context *ctx, struct fd_resource *rsc);
 
 bool fd_render_condition_check(struct pipe_context *pctx);
 

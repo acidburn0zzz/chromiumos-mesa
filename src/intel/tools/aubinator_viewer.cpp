@@ -673,11 +673,11 @@ batch_edit_address(void *user_data, uint64_t address, uint32_t len)
 }
 
 static struct gen_batch_decode_bo
-batch_get_bo(void *user_data, uint64_t address)
+batch_get_bo(void *user_data, bool ppgtt, uint64_t address)
 {
    struct batch_window *window = (struct batch_window *) user_data;
 
-   if (window->uses_ppgtt)
+   if (window->uses_ppgtt && ppgtt)
       return aub_mem_get_ppgtt_bo(&window->mem, address);
    else
       return aub_mem_get_ggtt_bo(&window->mem, address);
@@ -702,7 +702,7 @@ display_batch_ring_write(void *user_data, enum drm_i915_gem_engine_class engine,
 
    window->uses_ppgtt = false;
 
-   aub_viewer_render_batch(&window->decode_ctx, data, data_len, 0);
+   aub_viewer_render_batch(&window->decode_ctx, data, data_len, 0, false);
 }
 
 static void
@@ -737,7 +737,7 @@ display_batch_execlist_write(void *user_data,
    window->decode_ctx.engine = engine;
    aub_viewer_render_batch(&window->decode_ctx, commands,
                            MIN2(ring_buffer_tail - ring_buffer_head, ring_buffer_length),
-                           ring_buffer_start + ring_buffer_head);
+                           ring_buffer_start + ring_buffer_head, true);
 }
 
 static void

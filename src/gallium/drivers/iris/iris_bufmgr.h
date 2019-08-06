@@ -191,6 +191,7 @@ struct iris_bo {
 };
 
 #define BO_ALLOC_ZEROED     (1<<0)
+#define BO_ALLOC_COHERENT   (1<<1)
 
 /**
  * Allocate a buffer object.
@@ -218,6 +219,7 @@ struct iris_bo *iris_bo_alloc(struct iris_bufmgr *bufmgr,
 struct iris_bo *iris_bo_alloc_tiled(struct iris_bufmgr *bufmgr,
                                     const char *name,
                                     uint64_t size,
+                                    uint32_t alignment,
                                     enum iris_memory_zone memzone,
                                     uint32_t tiling_mode,
                                     uint32_t pitch,
@@ -249,6 +251,9 @@ void iris_bo_unreference(struct iris_bo *bo);
 /* internal */
 #define MAP_INTERNAL_MASK (0xff << 24)
 #define MAP_RAW           (0x01 << 24)
+
+#define MAP_FLAGS         (MAP_READ | MAP_WRITE | MAP_ASYNC | \
+                           MAP_PERSISTENT | MAP_COHERENT | MAP_INTERNAL_MASK)
 
 /**
  * Maps the buffer into userspace.
@@ -327,6 +332,7 @@ void iris_bufmgr_enable_reuse(struct iris_bufmgr *bufmgr);
 int iris_bo_wait(struct iris_bo *bo, int64_t timeout_ns);
 
 uint32_t iris_create_hw_context(struct iris_bufmgr *bufmgr);
+uint32_t iris_clone_hw_context(struct iris_bufmgr *bufmgr, uint32_t ctx_id);
 
 #define IRIS_CONTEXT_LOW_PRIORITY    ((I915_CONTEXT_MIN_USER_PRIORITY-1)/2)
 #define IRIS_CONTEXT_MEDIUM_PRIORITY (I915_CONTEXT_DEFAULT_PRIORITY)
@@ -362,5 +368,7 @@ iris_bo_offset_from_base_address(struct iris_bo *bo)
    assert(bo->gtt_offset < IRIS_MEMZONE_OTHER_START);
    return bo->gtt_offset;
 }
+
+enum iris_memory_zone iris_memzone_for_address(uint64_t address);
 
 #endif /* IRIS_BUFMGR_H */

@@ -282,6 +282,13 @@ static SIMDINLINE simdscalar InterpolateComponent(simdscalar const& vI,
     const float* pInterpB = &pInterpBuffer[Attrib * 3 * numComponents + numComponents + Comp];
     const float* pInterpC = &pInterpBuffer[Attrib * 3 * numComponents + numComponents * 2 + Comp];
 
+    if ((pInterpA[0] == pInterpB[0]) && (pInterpA[0] == pInterpC[0]))
+    {
+        // Ensure constant attribs are constant.  Required for proper
+        // 3D resource copies.
+        return _simd_broadcast_ss(pInterpA);
+    }
+
     simdscalar vA = _simd_broadcast_ss(pInterpA);
     simdscalar vB = _simd_broadcast_ss(pInterpB);
     simdscalar vC = _simd_broadcast_ss(pInterpC);
@@ -306,6 +313,19 @@ static SIMDINLINE simdscalar InterpolateComponentFlat(const float* pInterpBuffer
 }
 
 //////////////////////////////////////////////////////////////////////////
+/// @brief Interpolates a single component (flat shade).
+/// @param pInterpBuffer - pointer to attribute barycentric coeffs
+template <UINT Attrib, UINT Comp, UINT numComponents = 4>
+static SIMDINLINE simdscalari InterpolateComponentFlatInt(const uint32_t* pInterpBuffer)
+{
+    const uint32_t interpA = pInterpBuffer[Attrib * 3 * numComponents + 0 + Comp];
+
+    simdscalari vA = _simd_set1_epi32(interpA);
+
+    return vA;
+}
+
+//////////////////////////////////////////////////////////////////////////
 /// @brief Interpolates a single component.
 /// @param vI - barycentric I
 /// @param vJ - barycentric J
@@ -318,6 +338,13 @@ static SIMDINLINE simd4scalar InterpolateComponent(simd4scalar const& vI,
     const float* pInterpA = &pInterpBuffer[Attrib * 3 * numComponents + 0 + Comp];
     const float* pInterpB = &pInterpBuffer[Attrib * 3 * numComponents + numComponents + Comp];
     const float* pInterpC = &pInterpBuffer[Attrib * 3 * numComponents + numComponents * 2 + Comp];
+
+    if ((pInterpA[0] == pInterpB[0]) && (pInterpA[0] == pInterpC[0]))
+    {
+        // Ensure constant attribs are constant.  Required for proper
+        // 3D resource copies.
+        return SIMD128::broadcast_ss(pInterpA);
+    }
 
     simd4scalar vA = SIMD128::broadcast_ss(pInterpA);
     simd4scalar vB = SIMD128::broadcast_ss(pInterpB);
@@ -341,8 +368,6 @@ static SIMDINLINE simdscalar _simd_abs_ps(simdscalar const& a)
     return _simd_castsi_ps(_simd_and_si(ai, _simd_set1_epi32(0x7fffffff)));
 }
 
-#if ENABLE_AVX512_SIMD16
 #include "simd16intrin.h"
-#endif // ENABLE_AVX512_SIMD16
 
 #endif //__SWR_SIMDINTRIN_H__

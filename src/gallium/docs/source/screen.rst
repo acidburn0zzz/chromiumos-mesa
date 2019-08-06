@@ -34,8 +34,7 @@ The integer capabilities:
 * ``PIPE_CAP_QUERY_TIME_ELAPSED``: Whether PIPE_QUERY_TIME_ELAPSED queries are available.
 * ``PIPE_CAP_TEXTURE_SWIZZLE``: Whether swizzling through sampler views is
   supported.
-* ``PIPE_CAP_MAX_TEXTURE_2D_LEVELS``: The maximum number of mipmap levels available
-  for a 2D texture.
+* ``PIPE_CAP_MAX_TEXTURE_2D_SIZE``: The maximum size of 2D (and 1D) textures.
 * ``PIPE_CAP_MAX_TEXTURE_3D_LEVELS``: The maximum number of mipmap levels available
   for a 3D texture.
 * ``PIPE_CAP_MAX_TEXTURE_CUBE_LEVELS``: The maximum number of mipmap levels available
@@ -46,8 +45,6 @@ The integer capabilities:
   with clamp or clamp-to-border wrap modes.
 * ``PIPE_CAP_BLEND_EQUATION_SEPARATE``: Whether alpha blend equations may be different
   from color blend equations, in :ref:`Blend` state.
-* ``PIPE_CAP_SM3``: Whether the vertex shader and fragment shader support equivalent
-  opcodes to the Shader Model 3 specification. XXX oh god this is horrible
 * ``PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS``: The maximum number of stream buffers.
 * ``PIPE_CAP_PRIMITIVE_RESTART``: Whether primitive restart is supported.
 * ``PIPE_CAP_INDEP_BLEND_ENABLE``: Whether per-rendertarget blend enabling and channel
@@ -105,6 +102,15 @@ The integer capabilities:
   The only legacy features that Gallium drivers must implement are
   the legacy shader inputs and outputs (colors, texcoords, fog, clipvertex,
   edgeflag).
+* ``PIPE_CAP_ESSL_FEATURE_LEVEL``: An optional cap to allow drivers to
+  report a higher GLSL version for GLES contexts.  This is useful when a
+  driver does not support all the required features for a higher GL version,
+  but does support the required features for a higher GLES version.  A driver
+  is allowed to return ``0`` in which case ``PIPE_CAP_GLSL_FEATURE_LEVEL`` is
+  used.
+  Note that simply returning the same value as the GLSL feature level cap is
+  incorrect.  For example, GLSL version 3.30 does not require ``ARB_gpu_shader5``,
+  but ESSL version 3.20 es does require ``EXT_gpu_shader5``
 * ``PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION``: Whether quads adhere to
   the flatshade_first setting in ``pipe_rasterizer_state``.
 * ``PIPE_CAP_USER_VERTEX_BUFFERS``: Whether the driver supports user vertex
@@ -297,6 +303,8 @@ The integer capabilities:
   TGSI opcodes are supported.
 * ``PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL``: If state trackers should use
   a system value for the POSITION fragment shader input.
+* ``PIPE_CAP_TGSI_FS_POINT_IS_SYSVAL``: If state trackers should use
+  a system value for the POINT fragment shader input.
 * ``PIPE_CAP_TGSI_FS_FACE_IS_INTEGER_SYSVAL``: If state trackers should use
   a system value for the FACE fragment shader input.
   Also, the FACE system value is integer, not float.
@@ -370,8 +378,12 @@ The integer capabilities:
 * ``PIPE_CAP_GLSL_OPTIMIZE_CONSERVATIVELY``: Tell the GLSL compiler to use
   the minimum amount of optimizations just to be able to do all the linking
   and lowering.
-* ``PIPE_CAP_TGSI_FS_FBFETCH``: Whether a fragment shader can use the FBFETCH
-  opcode to retrieve the current value in the framebuffer.
+* ``PIPE_CAP_FBFETCH``: The number of render targets whose value in the
+  current framebuffer can be read in the shader.  0 means framebuffer fetch
+  is not supported.  1 means that only the first render target can be read,
+  and a larger value would mean that multiple render targets are supported.
+* ``PIPE_CAP_FBFETCH_COHERENT``: Whether framebuffer fetches from the fragment
+  shader can be guaranteed to be coherent with framebuffer writes.
 * ``PIPE_CAP_TGSI_MUL_ZERO_WINS``: Whether TGSI shaders support the
   ``TGSI_PROPERTY_MUL_ZERO_WINS`` shader property.
 * ``PIPE_CAP_DOUBLES``: Whether double precision floating-point operations
@@ -447,14 +459,21 @@ The integer capabilities:
   as opposed to padding to vec4s.
 * ``PIPE_CAP_CONSERVATIVE_RASTER_POST_SNAP_TRIANGLES``: Whether the
   ``PIPE_CONSERVATIVE_RASTER_POST_SNAP`` mode is supported for triangles.
+  The post-snap mode means the conservative rasterization occurs after
+  the conversion from floating-point to fixed-point coordinates
+  on the subpixel grid.
 * ``PIPE_CAP_CONSERVATIVE_RASTER_POST_SNAP_POINTS_LINES``: Whether the
   ``PIPE_CONSERVATIVE_RASTER_POST_SNAP`` mode is supported for points and lines.
 * ``PIPE_CAP_CONSERVATIVE_RASTER_PRE_SNAP_TRIANGLES``: Whether the
   ``PIPE_CONSERVATIVE_RASTER_PRE_SNAP`` mode is supported for triangles.
+  The pre-snap mode means the conservative rasterization occurs before
+  the conversion from floating-point to fixed-point coordinates.
 * ``PIPE_CAP_CONSERVATIVE_RASTER_PRE_SNAP_POINTS_LINES``: Whether the
   ``PIPE_CONSERVATIVE_RASTER_PRE_SNAP`` mode is supported for points and lines.
 * ``PIPE_CAP_CONSERVATIVE_RASTER_POST_DEPTH_COVERAGE``: Whether
   ``PIPE_CAP_POST_DEPTH_COVERAGE`` works with conservative rasterization.
+* ``PIPE_CAP_CONSERVATIVE_RASTER_INNER_COVERAGE``: Whether
+  inner_coverage from GL_INTEL_conservative_rasterization is supported.
 * ``PIPE_CAP_MAX_CONSERVATIVE_RASTER_SUBPIXEL_PRECISION_BIAS``: The maximum
   subpixel precision bias in bits during conservative rasterization.
 * ``PIPE_CAP_PROGRAMMABLE_SAMPLE_LOCATIONS``: True is the driver supports
@@ -492,6 +511,35 @@ The integer capabilities:
   varyings. This will generally correspond to
   ``PIPE_SHADER_CAP_MAX_INPUTS`` for the fragment shader, but in some
   cases may be a smaller number.
+* ``PIPE_CAP_COMPUTE_GRID_INFO_LAST_BLOCK``: Whether pipe_grid_info::last_block
+  is implemented by the driver. See struct pipe_grid_info for more details.
+* ``PIPE_CAP_COMPUTE_SHADER_DERIVATIVE``: True if the driver supports derivatives (and texture lookups with implicit derivatives) in compute shaders.
+* ``PIPE_CAP_TGSI_SKIP_SHRINK_IO_ARRAYS``:  Whether the TGSI pass to shrink IO
+  arrays should be skipped and enforce keeping the declared array sizes instead.
+  A driver might rely on the input mapping that was defined with the original
+  GLSL code.
+* ``PIPE_CAP_IMAGE_LOAD_FORMATTED``: True if a format for image loads does not need to be specified in the shader IR
+* ``PIPE_CAP_MAX_FRAMES_IN_FLIGHT``: Maximum number of frames that state
+  trackers should allow to be in flight before throttling pipe_context
+  execution. 0 = throttling is disabled.
+* ``PIPE_CAP_DMABUF``: Whether Linux DMABUF handles are supported by
+  resource_from_handle and resource_get_handle.
+* ``PIPE_CAP_PREFER_COMPUTE_BLIT_FOR_MULTIMEDIA``: Whether VDPAU, VAAPI, and
+  OpenMAX should use a compute-based blit instead of pipe_context::blit.
+* ``PIPE_CAP_FRAGMENT_SHADER_INTERLOCK``: True if fragment shader interlock
+  functionality is supported.
+* ``PIPE_CAP_CS_DERIVED_SYSTEM_VALUES_SUPPORTED``: True if driver handles
+  gl_LocalInvocationIndex and gl_GlobalInvocationID.  Otherwise, state tracker will
+  lower those system values.
+* ``PIPE_CAP_ATOMIC_FLOAT_MINMAX``: Atomic float point minimum,
+  maximum, exchange and compare-and-swap support to buffer and shared variables.
+* ``PIPE_CAP_TGSI_DIV``: Whether opcode DIV is supported
+* ``PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD``: Whether texture lookups with
+  explicit LOD is supported in the fragment shader.
+* ``PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES``: True if the driver supports
+  derivatives in fragment shaders.
+* ``PIPE_CAP_VERTEX_SHADER_SATURATE``: True if the driver supports saturate
+  modifiers in the vertex shader.
 
 .. _pipe_capf:
 

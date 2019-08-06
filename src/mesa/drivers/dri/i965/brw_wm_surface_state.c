@@ -647,6 +647,7 @@ brw_emit_buffer_surface_state(struct brw_context *brw,
                                                     reloc_flags),
                          .size_B = buffer_size,
                          .format = surface_format,
+                         .swizzle = ISL_SWIZZLE_IDENTITY,
                          .stride_B = pitch,
                          .mocs = brw_get_bo_mocs(devinfo, bo));
 }
@@ -1684,6 +1685,11 @@ brw_upload_cs_work_groups_surface(struct brw_context *brw)
                                     ISL_FORMAT_RAW,
                                     3 * sizeof(GLuint), 1,
                                     RELOC_WRITE);
+
+      /* The state buffer now holds a reference to our upload, drop ours. */
+      if (bo != brw->compute.num_work_groups_bo)
+         brw_bo_unreference(bo);
+
       brw->ctx.NewDriverState |= BRW_NEW_SURFACES;
    }
 }

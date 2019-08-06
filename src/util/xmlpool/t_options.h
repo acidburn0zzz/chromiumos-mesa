@@ -35,8 +35,8 @@
  * all the translations. The result (options.h) is included by
  * xmlpool.h which in turn can be included by drivers.
  *
- * The macros used to describe otions in this file are defined in
- * ../xmlpool.h.
+ * The macros used to describe options in this file are defined in
+ * src/util/xmlpool.h.
  */
 
 /* This is needed for xgettext to extract translatable strings.
@@ -324,6 +324,16 @@ DRI_CONF_OPT_BEGIN(csmt_force, int, def) \
         DRI_CONF_DESC(en,gettext("If set to 1, force gallium nine CSMT. If set to 0, disable it. By default (-1) CSMT is enabled on known thread-safe drivers.")) \
 DRI_CONF_OPT_END
 
+#define DRI_CONF_NINE_DYNAMICTEXTUREWORKAROUND(def) \
+DRI_CONF_OPT_BEGIN_B(dynamic_texture_workaround, def) \
+        DRI_CONF_DESC(en,gettext("If set to true, use a ram intermediate buffer for dynamic textures. Increases ram usage, which can cause out of memory issues, but can fix glitches for some games.")) \
+DRI_CONF_OPT_END
+
+#define DRI_CONF_NINE_SHADERINLINECONSTANTS(def) \
+DRI_CONF_OPT_BEGIN_B(shader_inline_constants, def) \
+        DRI_CONF_DESC(en,gettext("If set to true, recompile shaders with integer or boolean constants when the values are known. Can cause stutter, but can increase slightly performance.")) \
+DRI_CONF_OPT_END
+
 /**
  * \brief radeonsi specific configuration options
  */
@@ -343,17 +353,31 @@ DRI_CONF_OPT_BEGIN_B(radeonsi_commutative_blend_add, def) \
         DRI_CONF_DESC(en,gettext("Commutative additive blending optimizations (may cause rendering errors)")) \
 DRI_CONF_OPT_END
 
-#define DRI_CONF_RADEONSI_CLEAR_DB_CACHE_BEFORE_CLEAR(def) \
-DRI_CONF_OPT_BEGIN_B(radeonsi_clear_db_cache_before_clear, def) \
-        DRI_CONF_DESC(en,"Clear DB cache before fast depth clear") \
-DRI_CONF_OPT_END
-
 #define DRI_CONF_RADEONSI_ZERO_ALL_VRAM_ALLOCS(def) \
 DRI_CONF_OPT_BEGIN_B(radeonsi_zerovram, def) \
         DRI_CONF_DESC(en,"Zero all vram allocations") \
 DRI_CONF_OPT_END
 
-#define DRI_CONF_RADEONSI_ENABLE_NIR(def) \
-DRI_CONF_OPT_BEGIN_B(radeonsi_enable_nir, def) \
-        DRI_CONF_DESC(en,gettext("Enable NIR")) \
+#define DRI_CONF_V3D_NONMSAA_TEXTURE_SIZE_LIMIT(def) \
+DRI_CONF_OPT_BEGIN_B(v3d_nonmsaa_texture_size_limit, def) \
+        DRI_CONF_DESC(en,"Report the non-MSAA-only texture size limit") \
+DRI_CONF_OPT_END
+
+/**
+ * \brief virgl specific configuration options
+ */
+
+#define DRI_CONF_GLES_EMULATE_BGRA(def) \
+DRI_CONF_OPT_BEGIN_B(gles_emulate_bgra, def) \
+        DRI_CONF_DESC(en,gettext("On GLES emulate BGRA formats by using a swizzled RGBA format")) \
+DRI_CONF_OPT_END
+
+#define DRI_CONF_GLES_APPLY_BGRA_DEST_SWIZZLE(def) \
+DRI_CONF_OPT_BEGIN_B(gles_apply_bgra_dest_swizzle, def) \
+        DRI_CONF_DESC(en,gettext("When the BGRA formats are emulated by using swizzled RGBA formats on GLES apply the swizzle when writing")) \
+DRI_CONF_OPT_END
+
+#define DRI_CONF_GLES_SAMPLES_PASSED_VALUE(def, minimum, maximum) \
+DRI_CONF_OPT_BEGIN_V(gles_samples_passed_value, def, minimum, maximum) \
+        DRI_CONF_DESC(en,gettext("GL_SAMPLES_PASSED value when emulated by GL_ANY_SAMPLES_PASSED")) \
 DRI_CONF_OPT_END

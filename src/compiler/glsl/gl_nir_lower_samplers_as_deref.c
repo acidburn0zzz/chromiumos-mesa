@@ -104,7 +104,7 @@ remove_struct_derefs_prep(nir_deref_instr **p, char **name,
    }
 
    case nir_deref_type_struct: {
-      *location += glsl_get_record_location_offset(cur->type, next->strct.index);
+      *location += glsl_get_struct_location_offset(cur->type, next->strct.index);
       ralloc_asprintf_append(name, ".%s",
                              glsl_get_struct_elem_name(cur->type, next->strct.index));
 
@@ -177,6 +177,14 @@ lower_deref(nir_builder *b, struct lower_samplers_as_deref_state *state,
    } else {
       var = nir_variable_create(state->shader, nir_var_uniform, type, name);
       var->data.binding = binding;
+
+      /* Don't set var->data.location.  The old structure location could be
+       * used to index into gl_uniform_storage, assuming the full structure
+       * was walked in order.  With the new split variables, this invariant
+       * no longer holds and there's no meaningful way to start from a base
+       * location and access a particular array element.  Just leave it 0.
+       */
+
       _mesa_hash_table_insert_pre_hashed(state->remap_table, hash, name, var);
    }
 

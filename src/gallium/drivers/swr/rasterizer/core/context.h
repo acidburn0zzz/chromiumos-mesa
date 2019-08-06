@@ -230,7 +230,6 @@ typedef void (*PFN_PROCESS_PRIMS)(DRAW_CONTEXT*      pDC,
                                   simdscalari const& viewportIdx,
                                   simdscalari const& rtIdx);
 
-#if ENABLE_AVX512_SIMD16
 // function signature for pipeline stages that execute after primitive assembly
 typedef void(SIMDCALL* PFN_PROCESS_PRIMS_SIMD16)(DRAW_CONTEXT*        pDC,
                                                  PA_STATE&            pa,
@@ -241,7 +240,6 @@ typedef void(SIMDCALL* PFN_PROCESS_PRIMS_SIMD16)(DRAW_CONTEXT*        pDC,
                                                  simd16scalari const& viewportIdx,
                                                  simd16scalari const& rtIdx);
 
-#endif
 OSALIGNLINE(struct) API_STATE
 {
     // Vertex Buffers
@@ -527,7 +525,6 @@ struct SWR_CONTEXT
     // Callback functions, passed in at create context time
     PFN_LOAD_TILE                   pfnLoadTile;
     PFN_STORE_TILE                  pfnStoreTile;
-    PFN_CLEAR_TILE                  pfnClearTile;
     PFN_TRANSLATE_GFXPTR_FOR_READ   pfnTranslateGfxptrForRead;
     PFN_TRANSLATE_GFXPTR_FOR_WRITE  pfnTranslateGfxptrForWrite;
     PFN_MAKE_GFXPTR                 pfnMakeGfxPtr;

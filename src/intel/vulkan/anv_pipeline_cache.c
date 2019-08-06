@@ -154,7 +154,6 @@ anv_shader_bin_write_to_blob(const struct anv_shader_bin *shader,
 
    blob_write_uint32(blob, shader->bind_map.surface_count);
    blob_write_uint32(blob, shader->bind_map.sampler_count);
-   blob_write_uint32(blob, shader->bind_map.image_count);
    blob_write_bytes(blob, shader->bind_map.surface_to_descriptor,
                     shader->bind_map.surface_count *
                     sizeof(*shader->bind_map.surface_to_descriptor));
@@ -194,7 +193,6 @@ anv_shader_bin_create_from_blob(struct anv_device *device,
    struct anv_pipeline_bind_map bind_map;
    bind_map.surface_count = blob_read_uint32(blob);
    bind_map.sampler_count = blob_read_uint32(blob);
-   bind_map.image_count = blob_read_uint32(blob);
    bind_map.surface_to_descriptor = (void *)
       blob_read_bytes(blob, bind_map.surface_count *
                             sizeof(*bind_map.surface_to_descriptor));
@@ -611,14 +609,19 @@ VkResult anv_MergePipelineCaches(
 struct anv_shader_bin *
 anv_device_search_for_kernel(struct anv_device *device,
                              struct anv_pipeline_cache *cache,
-                             const void *key_data, uint32_t key_size)
+                             const void *key_data, uint32_t key_size,
+                             bool *user_cache_hit)
 {
    struct anv_shader_bin *bin;
 
+   *user_cache_hit = false;
+
    if (cache) {
       bin = anv_pipeline_cache_search(cache, key_data, key_size);
-      if (bin)
+      if (bin) {
+         *user_cache_hit = cache != &device->default_pipeline_cache;
          return bin;
+      }
    }
 
 #ifdef ENABLE_SHADER_CACHE
@@ -766,6 +769,7 @@ anv_device_upload_nir(struct anv_device *device,
        */
       entry = _mesa_hash_table_search(cache->nir_cache, sha1_key);
       if (entry) {
+         blob_finish(&blob);
          pthread_mutex_unlock(&cache->mutex);
          return;
       }
@@ -775,6 +779,8 @@ anv_device_upload_nir(struct anv_device *device,
       memcpy(snir->sha1_key, sha1_key, 20);
       snir->size = blob.size;
       memcpy(snir->data, blob.data, blob.size);
+
+      blob_finish(&blob);
 
       _mesa_hash_table_insert(cache->nir_cache, snir->sha1_key, snir);
 

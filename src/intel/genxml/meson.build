@@ -57,3 +57,7 @@ foreach f : gen_xml_files
     capture : true,
   )
 endforeach
+
+gen_pack_header_py = files('gen_pack_header.py')
+
+idep_genxml = declare_dependency(sources : [gen_xml_pack, genX_bits_h, genX_xml_h])

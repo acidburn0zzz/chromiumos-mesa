@@ -59,9 +59,7 @@ get_deref_offset(nir_deref_instr *instr,
 
 	if (var->data.compact) {
 		assert(instr->deref_type == nir_deref_type_array);
-		nir_const_value *v = nir_src_as_const_value(instr->arr.index);
-		assert(v);
-		*const_out = v->u32[0];
+		*const_out = nir_src_as_uint(instr->arr.index);
 		return;
 	}
 
@@ -80,9 +78,8 @@ get_deref_offset(nir_deref_instr *instr,
 			}
 		} else if(path.path[idx_lvl]->deref_type == nir_deref_type_array) {
 			unsigned size = glsl_count_attribute_slots(path.path[idx_lvl]->type, false);
-			nir_const_value *v = nir_src_as_const_value(path.path[idx_lvl]->arr.index);
-			if (v)
-				const_offset += v->u32[0] * size;
+			if (nir_src_is_const(path.path[idx_lvl]->arr.index))
+				const_offset += nir_src_as_uint(path.path[idx_lvl]->arr.index) * size;
 		} else
 			unreachable("Uhandled deref type in get_deref_instr_offset");
 	}
@@ -115,6 +112,15 @@ gather_intrinsic_load_deref_info(const nir_shader *nir,
 	}
 }
 
+static uint32_t
+widen_writemask(uint32_t wrmask)
+{
+	uint32_t new_wrmask = 0;
+	for(unsigned i = 0; i < 4; i++)
+		new_wrmask |= (wrmask & (1 << i) ? 0x3 : 0x0) << (i * 2);
+	return new_wrmask;
+}
+
 static void
 set_output_usage_mask(const nir_shader *nir, const nir_intrinsic_instr *instr,
 		      uint8_t *output_usage_mask)
@@ -122,7 +128,7 @@ set_output_usage_mask(const nir_shader *nir, const nir_intrinsic_instr *instr,
 	nir_deref_instr *deref_instr =
 		nir_instr_as_deref(instr->src[0].ssa->parent_instr);
 	nir_variable *var = nir_deref_instr_get_variable(deref_instr);
-	unsigned attrib_count = glsl_count_attribute_slots(var->type, false);
+	unsigned attrib_count = glsl_count_attribute_slots(deref_instr->type, false);
 	unsigned idx = var->data.location;
 	unsigned comp = var->data.location_frac;
 	unsigned const_offset = 0;
@@ -130,15 +136,19 @@ set_output_usage_mask(const nir_shader *nir, const nir_intrinsic_instr *instr,
 	get_deref_offset(deref_instr, &const_offset);
 
 	if (var->data.compact) {
+		assert(!glsl_type_is_64bit(deref_instr->type));
 		const_offset += comp;
 		output_usage_mask[idx + const_offset / 4] |= 1 << (const_offset % 4);
 		return;
 	}
 
-	for (unsigned i = 0; i < attrib_count; i++) {
+	uint32_t wrmask = nir_intrinsic_write_mask(instr);
+	if (glsl_type_is_64bit(deref_instr->type))
+		wrmask = widen_writemask(wrmask);
+
+	for (unsigned i = 0; i < attrib_count; i++)
 		output_usage_mask[idx + i + const_offset] |=
-			instr->const_index[0] << comp;
-	}
+			((wrmask >> (i * 4)) & 0xf) << comp;
 }
 
 static void
@@ -189,13 +199,12 @@ gather_push_constant_info(const nir_shader *nir,
 			  const nir_intrinsic_instr *instr,
 			  struct radv_shader_info *info)
 {
-	nir_const_value *cval = nir_src_as_const_value(instr->src[0]);
 	int base = nir_intrinsic_base(instr);
 
-	if (!cval) {
+	if (!nir_src_is_const(instr->src[0])) {
 		info->has_indirect_push_constants = true;
 	} else {
-		uint32_t min = base + cval->u32[0];
+		uint32_t min = base + nir_src_as_uint(instr->src[0]);
 		uint32_t max = min + instr->num_components * 4;
 
 		info->max_push_constant_used =
@@ -215,7 +224,7 @@ gather_intrinsic_info(const nir_shader *nir, const nir_intrinsic_instr *instr,
 		      struct radv_shader_info *info)
 {
 	switch (instr->intrinsic) {
-	case nir_intrinsic_interp_deref_at_sample:
+	case nir_intrinsic_load_barycentric_at_sample:
 		info->ps.needs_sample_positions = true;
 		break;
 	case nir_intrinsic_load_draw_id:
@@ -256,6 +265,10 @@ gather_intrinsic_info(const nir_shader *nir, const nir_intrinsic_instr *instr,
 		if (nir->info.stage == MESA_SHADER_FRAGMENT)
 			info->ps.layer_input = true;
 		break;
+	case nir_intrinsic_load_layer_id:
+		if (nir->info.stage == MESA_SHADER_FRAGMENT)
+			info->ps.layer_input = true;
+		break;
 	case nir_intrinsic_load_invocation_id:
 		info->uses_invocation_id = true;
 		break;
@@ -280,14 +293,6 @@ gather_intrinsic_info(const nir_shader *nir, const nir_intrinsic_instr *instr,
 	case nir_intrinsic_image_deref_atomic_comp_swap:
 	case nir_intrinsic_image_deref_size: {
 		nir_variable *var = nir_deref_instr_get_variable(nir_instr_as_deref(instr->src[0].ssa->parent_instr));
-		const struct glsl_type *type = glsl_without_array(var->type);
-
-		enum glsl_sampler_dim dim = glsl_get_sampler_dim(type);
-		if (dim == GLSL_SAMPLER_DIM_SUBPASS ||
-		    dim == GLSL_SAMPLER_DIM_SUBPASS_MS) {
-			info->ps.layer_input = true;
-			info->ps.uses_input_attachments = true;
-		}
 		mark_sampler_desc(var, info);
 
 		if (instr->intrinsic == nir_intrinsic_image_deref_store ||
@@ -367,12 +372,21 @@ gather_info_block(const nir_shader *nir, const nir_block *block,
 
 static void
 gather_info_input_decl_vs(const nir_shader *nir, const nir_variable *var,
-			  struct radv_shader_info *info)
+			  struct radv_shader_info *info,
+			  const struct radv_nir_compiler_options *options)
 {
+	unsigned attrib_count = glsl_count_attribute_slots(var->type, true);
 	int idx = var->data.location;
 
 	if (idx >= VERT_ATTRIB_GENERIC0 && idx <= VERT_ATTRIB_GENERIC15)
 		info->vs.has_vertex_buffers = true;
+
+	for (unsigned i = 0; i < attrib_count; ++i) {
+		unsigned attrib_index = var->data.location + i - VERT_ATTRIB_GENERIC0;
+
+		if (options->key.vs.instance_rate_inputs & (1u << attrib_index))
+			info->vs.needs_instance_id = true;
+	}
 }
 
 static void
@@ -409,11 +423,12 @@ gather_info_input_decl_ps(const nir_shader *nir, const nir_variable *var,
 
 static void
 gather_info_input_decl(const nir_shader *nir, const nir_variable *var,
-		       struct radv_shader_info *info)
+		       struct radv_shader_info *info,
+		       const struct radv_nir_compiler_options *options)
 {
 	switch (nir->info.stage) {
 	case MESA_SHADER_VERTEX:
-		gather_info_input_decl_vs(nir, var, info);
+		gather_info_input_decl_vs(nir, var, info, options);
 		break;
 	case MESA_SHADER_FRAGMENT:
 		gather_info_input_decl_ps(nir, var, info);
@@ -481,7 +496,7 @@ gather_info_output_decl(const nir_shader *nir, const nir_variable *var,
 		gather_info_output_decl_ps(nir, var, info);
 		break;
 	case MESA_SHADER_VERTEX:
-		if (options->key.vs.as_ls)
+		if (options->key.vs_common_out.as_ls)
 			gather_info_output_decl_ls(nir, var, info);
 		break;
 	case MESA_SHADER_GEOMETRY:
@@ -519,7 +534,7 @@ gather_xfb_info(const nir_shader *nir, struct radv_shader_info *info)
 	}
 
 	for (unsigned i = 0; i < NIR_MAX_XFB_BUFFERS; i++) {
-		so->strides[i] = xfb->strides[i] / 4;
+		so->strides[i] = xfb->buffers[i].stride / 4;
 	}
 
 	ralloc_free(xfb);
@@ -548,7 +563,7 @@ radv_nir_shader_info_pass(const struct nir_shader *nir,
 	}
 
 	nir_foreach_variable(variable, &nir->inputs)
-		gather_info_input_decl(nir, variable, info);
+		gather_info_input_decl(nir, variable, info, options);
 
 	nir_foreach_block(block, func->impl) {
 		gather_info_block(nir, block, info);
@@ -561,4 +576,21 @@ radv_nir_shader_info_pass(const struct nir_shader *nir,
 	    nir->info.stage == MESA_SHADER_TESS_EVAL ||
 	    nir->info.stage == MESA_SHADER_GEOMETRY)
 		gather_xfb_info(nir, info);
+
+	/* Make sure to export the LayerID if the fragment shader needs it. */
+	if (options->key.vs_common_out.export_layer_id) {
+		switch (nir->info.stage) {
+		case MESA_SHADER_VERTEX:
+			info->vs.output_usage_mask[VARYING_SLOT_LAYER] |= 0x1;
+			break;
+		case MESA_SHADER_TESS_EVAL:
+			info->tes.output_usage_mask[VARYING_SLOT_LAYER] |= 0x1;
+			break;
+		case MESA_SHADER_GEOMETRY:
+			info->gs.output_usage_mask[VARYING_SLOT_LAYER] |= 0x1;
+			break;
+		default:
+			break;
+		}
+	}
 }

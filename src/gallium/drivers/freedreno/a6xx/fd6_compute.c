@@ -56,7 +56,7 @@ fd6_create_compute_state(struct pipe_context *pctx,
 
 	struct ir3_compiler *compiler = ctx->screen->compiler;
 	struct fd6_compute_stateobj *so = CALLOC_STRUCT(fd6_compute_stateobj);
-	so->shader = ir3_shader_create_compute(compiler, cso, &ctx->debug);
+	so->shader = ir3_shader_create_compute(compiler, cso, &ctx->debug, pctx->screen);
 	return so;
 }
 
@@ -96,7 +96,7 @@ cs_program_emit(struct fd_ringbuffer *ring, struct ir3_shader_variant *v,
 			A6XX_SP_CS_CTRL_REG0_FULLREGFOOTPRINT(i->max_reg + 1) |
 			A6XX_SP_CS_CTRL_REG0_MERGEDREGS |
 			A6XX_SP_CS_CTRL_REG0_BRANCHSTACK(v->branchstack) |
-			COND(v->num_samp > 0, A6XX_SP_CS_CTRL_REG0_PIXLODENABLE));
+			COND(v->need_pixlod, A6XX_SP_CS_CTRL_REG0_PIXLODENABLE));
 
 	OUT_PKT4(ring, REG_A6XX_SP_CS_UNKNOWN_A9B1, 1);
 	OUT_RING(ring, 0x41);
@@ -158,7 +158,7 @@ fd6_launch_grid(struct fd_context *ctx, const struct pipe_grid_info *info)
 	}
 
 	OUT_PKT7(ring, CP_SET_MARKER, 1);
-	OUT_RING(ring, A2XX_CP_SET_MARKER_0_MODE(0x8));
+	OUT_RING(ring, A6XX_CP_SET_MARKER_0_MODE(0x8));
 
 	const unsigned *local_size = info->block; // v->shader->nir->info->cs.local_size;
 	const unsigned *num_groups = info->grid;

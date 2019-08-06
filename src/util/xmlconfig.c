@@ -29,7 +29,10 @@
 
 #include <limits.h>
 #include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <assert.h>
 #include <expat.h>
@@ -42,6 +45,10 @@
 #include "xmlconfig.h"
 #include "u_process.h"
 
+/* For systems like Hurd */
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 /** \brief Find an option in an option cache with the name as key */
 static uint32_t

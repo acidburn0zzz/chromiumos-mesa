@@ -12,17 +12,16 @@
 # main repository, it's recommended to remove the image from the source
 # repository's container registry, so that the image from the main
 # repository's registry will be used there as well.
-#
-# The format of the tag is "%Y-%m-%d-${counter}" where ${counter} stays
-# at "01" unless you have multiple updates on the same day :)
 variables:
-  UBUNTU_TAG: 2019-02-27-01
-  UBUNTU_IMAGE: "$CI_REGISTRY_IMAGE/ubuntu:$UBUNTU_TAG"
-  UBUNTU_IMAGE_MAIN: "registry.freedesktop.org/mesa/mesa/ubuntu:$UBUNTU_TAG"
+  UPSTREAM_REPO: mesa/mesa
+  DEBIAN_TAG: "2019-07-23"
+  DEBIAN_VERSION: stretch-slim
+  DEBIAN_IMAGE: "$CI_REGISTRY_IMAGE/debian/$DEBIAN_VERSION:$DEBIAN_TAG"
 
-cache:
-  paths:
-    - ccache
+include:
+  - project: 'wayland/ci-templates'
+    ref: c73dae8b84697ef18e2dbbf4fed7386d9652b0cd
+    file: '/templates/debian.yml'
 
 stages:
   - containers-build
@@ -30,54 +29,51 @@ stages:
 
 
 # When to automatically run the CI
-.ci-run-policy:
+.ci-run-policy: &ci-run-policy
   only:
-    - master
+    - branches@mesa/mesa
     - merge_requests
     - /^ci([-/].*)?$/
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
 
 
 # CONTAINERS
 
-containers:ubuntu:
-  extends: .ci-run-policy
+debian:
+  extends: .debian@container-ifnot-exists
   stage: containers-build
-  image: docker:stable
-  services:
-    - docker:dind
+  <<: *ci-run-policy
   variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_DRIVER: overlay2
-  script:
-    # Enable experimental features such as `docker manifest inspect`
-    - mkdir -p ~/.docker
-    - "echo '{\"experimental\": \"enabled\"}' > ~/.docker/config.json"
-    - docker login -u gitlab-ci-token -p $CI_JOB_TOKEN $CI_REGISTRY
-    # Check if the image (with the specific tag) already exists
-    - docker manifest inspect $UBUNTU_IMAGE && exit || true
-    # Try to re-use the image from the main repository's registry
-    - docker image pull $UBUNTU_IMAGE_MAIN &&
-      docker image tag $UBUNTU_IMAGE_MAIN $UBUNTU_IMAGE &&
-      docker image push $UBUNTU_IMAGE && exit || true
-    - docker build -t $UBUNTU_IMAGE -f .gitlab-ci/Dockerfile.ubuntu .
-    - docker push $UBUNTU_IMAGE
+    GIT_STRATEGY: none # no need to pull the whole tree for rebuilding the image
+    DEBIAN_EXEC: 'bash .gitlab-ci/debian-install.sh'
 
 
 # BUILD
 
 .build:
-  extends: .ci-run-policy
-  image: $UBUNTU_IMAGE
+  <<: *ci-run-policy
+  image: $DEBIAN_IMAGE
   stage: build+test
+  cache:
+    paths:
+      - ccache
   artifacts:
-    when: on_failure
-    untracked: true
+    when: always
+    paths:
+      - _build/meson-logs/*.txt
+      # scons:
+      - _build/*/config.log
+      - shader-db
+  variables:
+    CCACHE_COMPILERCHECK: "content"
   # Use ccache transparently, and print stats before/after
   before_script:
     - export PATH="/usr/lib/ccache:$PATH"
     - export CCACHE_BASEDIR="$PWD"
     - export CCACHE_DIR="$PWD/ccache"
-    - export CCACHE_COMPILERCHECK=content
     - ccache --zero-stats || true
     - ccache --show-stats || true
   after_script:
@@ -87,52 +83,7 @@ containers:ubuntu:
 .meson-build:
   extends: .build
   script:
-    # We need to control the version of llvm-config we're using, so we'll
-    # generate a native file to do so. This requires meson >=0.49
-    - if test -n "$LLVM_VERSION"; then
-        LLVM_CONFIG="llvm-config-${LLVM_VERSION}";
-        echo -e "[binaries]\nllvm-config = '`which $LLVM_CONFIG`'" > native.file;
-        $LLVM_CONFIG --version;
-      else
-        touch native.file;
-      fi
-    - meson --version
-    - meson _build
-            --native-file=native.file
-            -D build-tests=true
-            -D libunwind=${UNWIND}
-            ${DRI_LOADERS}
-            -D dri-drivers=${DRI_DRIVERS:-[]}
-            ${GALLIUM_ST}
-            -D gallium-drivers=${GALLIUM_DRIVERS:-[]}
-            -D vulkan-drivers=${VULKAN_DRIVERS:-[]}
-    - cd _build
-    - meson configure
-    - ninja -j4
-    - ninja test
-
-.make-build:
-  extends: .build
-  variables:
-    MAKEFLAGS: "-j4"
-  script:
-    - if test -n "$LLVM_VERSION"; then
-        export LLVM_CONFIG="llvm-config-${LLVM_VERSION}";
-      fi
-    - mkdir build
-    - cd build
-    - ../autogen.sh
-        --enable-autotools
-        --enable-debug
-        $LIBUNWIND_FLAGS
-        $DRI_LOADERS
-        --with-dri-drivers=$DRI_DRIVERS
-        $GALLIUM_ST
-        --with-gallium-drivers=$GALLIUM_DRIVERS
-        --with-vulkan-drivers=$VULKAN_DRIVERS
-        --disable-llvm-shared-libs
-    - make
-    - eval $MAKE_CHECK_COMMAND
+    - .gitlab-ci/meson-build.sh
 
 .scons-build:
   extends: .build
@@ -145,7 +96,120 @@ containers:ubuntu:
     - scons $SCONS_TARGET
     - eval $SCONS_CHECK_COMMAND
 
-build:meson-vulkan:
+# NOTE: Building SWR is 2x (yes two) times slower than all the other
+# gallium drivers combined.
+# Start this early so that it doesn't limit the total run time.
+#
+# We also put softpipe (and therefore gallium nine, which requires
+# it) here, since softpipe/llvmpipe can't be built alongside classic
+# swrast.
+#
+# Putting glvnd here is arbitrary, but we want it in one of the builds
+# for coverage.
+meson-swr-glvnd:
+  extends: .meson-build
+  variables:
+    UNWIND: "true"
+    DRI_LOADERS: >
+      -D glvnd=true
+      -D egl=true
+    GALLIUM_ST: >
+      -D dri3=true
+      -D gallium-vdpau=false
+      -D gallium-xvmc=false
+      -D gallium-omx=disabled
+      -D gallium-va=false
+      -D gallium-xa=false
+      -D gallium-nine=true
+      -D gallium-opencl=disabled
+      -D osmesa=gallium
+    GALLIUM_DRIVERS: "swr,swrast,iris"
+    LLVM_VERSION: "6.0"
+
+meson-clang:
+  extends: .meson-build
+  variables:
+    UNWIND: "true"
+    DRI_DRIVERS: "auto"
+    GALLIUM_DRIVERS: "auto"
+    VULKAN_DRIVERS: intel,amd,freedreno
+    CC: "ccache clang-8"
+    CXX: "ccache clang++-8"
+  before_script:
+    - export CCACHE_BASEDIR="$PWD" CCACHE_DIR="$PWD/ccache"
+    - ccache --zero-stats --show-stats || true
+     # clang++ breaks if it picks up the GCC 8 directory without libstdc++.so
+    - apt-get remove -y libgcc-8-dev
+
+scons-swr:
+  extends: .scons-build
+  variables:
+    SCONS_TARGET: "swr=1"
+    SCONS_CHECK_COMMAND: "true"
+    LLVM_VERSION: "6.0"
+
+scons-win64:
+  extends: .scons-build
+  variables:
+    SCONS_TARGET: platform=windows machine=x86_64
+    SCONS_CHECK_COMMAND: "true"
+
+meson-main:
+  extends: .meson-build
+  variables:
+    UNWIND: "true"
+    DRI_LOADERS: >
+      -D glx=dri
+      -D gbm=true
+      -D egl=true
+      -D platforms=x11,wayland,drm,surfaceless
+      -D osmesa=classic
+    DRI_DRIVERS: "i915,i965,r100,r200,swrast,nouveau"
+    GALLIUM_ST: >
+      -D dri3=true
+      -D tools=drm-shim
+      -D gallium-extra-hud=true
+      -D gallium-vdpau=true
+      -D gallium-xvmc=true
+      -D gallium-omx=bellagio
+      -D gallium-va=true
+      -D gallium-xa=true
+      -D gallium-nine=false
+      -D gallium-opencl=disabled
+    GALLIUM_DRIVERS: "iris,nouveau,kmsro,r300,r600,freedreno,svga,v3d,vc4,virgl,etnaviv,panfrost,lima"
+    LLVM_VERSION: "7"
+    EXTRA_OPTION: >
+      -D tools=all
+    MESON_SHADERDB: "true"
+
+meson-clover:
+  extends: .meson-build
+  variables:
+    UNWIND: "true"
+    DRI_LOADERS: >
+      -D glx=disabled
+      -D egl=false
+      -D gbm=false
+    GALLIUM_ST: >
+      -D dri3=false
+      -D gallium-vdpau=false
+      -D gallium-xvmc=false
+      -D gallium-omx=disabled
+      -D gallium-va=false
+      -D gallium-xa=false
+      -D gallium-nine=false
+      -D gallium-opencl=icd
+  script:
+    - export GALLIUM_DRIVERS="r600,radeonsi"
+    - .gitlab-ci/meson-build.sh
+    - LLVM_VERSION=7 .gitlab-ci/meson-build.sh
+    - export GALLIUM_DRIVERS="i915,r600"
+    - LLVM_VERSION=3.9 .gitlab-ci/meson-build.sh
+    - LLVM_VERSION=4.0 .gitlab-ci/meson-build.sh
+    - LLVM_VERSION=5.0 .gitlab-ci/meson-build.sh
+    - LLVM_VERSION=6.0 .gitlab-ci/meson-build.sh
+
+meson-vulkan:
   extends: .meson-build
   variables:
     UNWIND: "false"
@@ -164,60 +228,21 @@ build:meson-vulkan:
       -D gallium-xa=false
       -D gallium-nine=false
       -D gallium-opencl=disabled
-    VULKAN_DRIVERS: intel,amd
+    VULKAN_DRIVERS: intel,amd,freedreno
     LLVM_VERSION: "7"
+    EXTRA_OPTION: >
+      -D vulkan-overlay-layer=true
 
-build:meson-loader-classic-dri:
+.meson-cross:
   extends: .meson-build
   variables:
     UNWIND: "false"
     DRI_LOADERS: >
-      -D glx=dri
-      -D gbm=true
-      -D egl=true
-      -D platforms=x11,wayland,drm,surfaceless
-      -D osmesa=classic
-    DRI_DRIVERS: "i915,i965,r100,r200,swrast,nouveau"
-    GALLIUM_ST: >
-      -D dri3=true
-      -D gallium-vdpau=false
-      -D gallium-xvmc=false
-      -D gallium-omx=disabled
-      -D gallium-va=false
-      -D gallium-xa=false
-      -D gallium-nine=false
-      -D gallium-opencl=disabled
-
-build:meson-glvnd:
-  extends: .meson-build
-  variables:
-    UNWIND: "true"
-    DRI_LOADERS: >
-      -D glvnd=true
-      -D egl=true
-      -D gbm=true
-      -D glx=dri
-    DRI_DRIVERS: "i965"
-    GALLIUM_ST: >
-      -D gallium-vdpau=false
-      -D gallium-xvmc=false
-      -D gallium-omx=disabled
-      -D gallium-va=false
-      -D gallium-xa=false
-      -D gallium-nine=false
-      -D gallium-opencl=disabled
-
-# NOTE: Building SWR is 2x (yes two) times slower than all the other
-# gallium drivers combined.
-# Start this early so that it doesn't hunder the run time.
-build:meson-gallium-swr:
-  extends: .meson-build
-  variables:
-    UNWIND: "true"
-    DRI_LOADERS: >
       -D glx=disabled
-      -D egl=false
       -D gbm=false
+      -D egl=false
+      -D platforms=surfaceless
+      -D osmesa=none
     GALLIUM_ST: >
       -D dri3=false
       -D gallium-vdpau=false
@@ -226,274 +251,63 @@ build:meson-gallium-swr:
       -D gallium-va=false
       -D gallium-xa=false
       -D gallium-nine=false
-      -D gallium-opencl=disabled
-    GALLIUM_DRIVERS: "swr"
-    LLVM_VERSION: "6.0"
+      -D llvm=false
+    CROSS: >
+      --cross /tmp/cross_file.txt
 
-build:meson-gallium-radeonsi:
-  extends: .meson-build
+  script:
+    - /usr/share/meson/debcrossgen --arch ${ARCH} -o /tmp/cross_file.txt
+    # Work around a bug in debcrossgen that should be fixed in the next release
+    - sed -i "s|cpu_family = 'i686'|cpu_family = 'x86'|g" /tmp/cross_file.txt
+    - .gitlab-ci/meson-build.sh
+
+meson-armhf:
+  extends: .meson-cross
   variables:
-    UNWIND: "true"
-    DRI_LOADERS: >
-      -D glx=disabled
-      -D egl=false
-      -D gbm=false
-    GALLIUM_ST: >
-      -D dri3=false
-      -D gallium-vdpau=false
-      -D gallium-xvmc=false
-      -D gallium-omx=disabled
-      -D gallium-va=false
-      -D gallium-xa=false
-      -D gallium-nine=false
-      -D gallium-opencl=disabled
-    GALLIUM_DRIVERS: "radeonsi"
-    LLVM_VERSION: "7"
+    ARCH: armhf
+    VULKAN_DRIVERS: freedreno
+    GALLIUM_DRIVERS: "etnaviv,freedreno,kmsro,lima,nouveau,panfrost,tegra,v3d,vc4"
+    # Disable the tests since we're cross compiling.
+    EXTRA_OPTION: >
+      -D build-tests=false
+      -D I-love-half-baked-turnips=true
+      -D vulkan-overlay-layer=true
 
-build:meson-gallium-drivers-other:
-  extends: .meson-build
+meson-arm64:
+  extends: .meson-cross
   variables:
-    UNWIND: "true"
-    DRI_LOADERS: >
-      -D glx=disabled
-      -D egl=false
-      -D gbm=false
-    GALLIUM_ST: >
-      -D dri3=false
-      -D gallium-vdpau=false
-      -D gallium-xvmc=false
-      -D gallium-omx=disabled
-      -D gallium-va=false
-      -D gallium-xa=false
-      -D gallium-nine=false
-      -D gallium-opencl=disabled
-    GALLIUM_DRIVERS: "i915,iris,nouveau,kmsro,r300,r600,freedreno,svga,swrast,v3d,vc4,virgl,etnaviv"
-    LLVM_VERSION: "5.0"
+    ARCH: arm64
+    VULKAN_DRIVERS: freedreno
+    GALLIUM_DRIVERS: "etnaviv,freedreno,kmsro,lima,nouveau,panfrost,tegra,v3d,vc4"
+    # Disable the tests since we're cross compiling.
+    EXTRA_OPTION: >
+      -D build-tests=false
+      -D I-love-half-baked-turnips=true
+      -D vulkan-overlay-layer=true
 
-build:meson-gallium-clover-llvm5:
-  extends: .meson-build
+meson-i386:
+  extends: .meson-cross
   variables:
-    UNWIND: "true"
-    DRI_LOADERS: >
-      -D glx=disabled
-      -D egl=false
-      -D gbm=false
-    GALLIUM_ST: >
-      -D dri3=false
-      -D gallium-vdpau=false
-      -D gallium-xvmc=false
-      -D gallium-omx=disabled
-      -D gallium-va=false
-      -D gallium-xa=false
-      -D gallium-nine=false
-      -D gallium-opencl=icd
-    GALLIUM_DRIVERS: "r600"
-    LLVM_VERSION: "5.0"
+    ARCH: i386
+    VULKAN_DRIVERS: intel
+    GALLIUM_DRIVERS: "swrast"
+    # Disable i386 tests, because u_format_tests gets precision
+    # failures in dxtn unpacking
+    EXTRA_OPTION: >
+      -D build-tests=false
+      -D vulkan-overlay-layer=true
 
-build:meson-gallium-clover-llvm6:
-  extends: build:meson-gallium-clover-llvm5
-  variables:
-    LLVM_VERSION: "6.0"
-
-build:meson-gallium-clover-llvm7:
-  extends: build:meson-gallium-clover-llvm5
-  variables:
-    GALLIUM_DRIVERS: "r600,radeonsi"
-    LLVM_VERSION: "7"
-
-build:meson-gallium-st-other:
-  extends: .meson-build
-  variables:
-    UNWIND: "true"
-    DRI_LOADERS: >
-      -D glx=disabled
-      -D egl=false
-      -D gbm=false
-    GALLIUM_ST: >
-      -D dri3=true
-      -D gallium-vdpau=true
-      -D gallium-xvmc=true
-      -D gallium-omx=bellagio
-      -D gallium-va=true
-      -D gallium-xa=true
-      -D gallium-nine=true
-      -D gallium-opencl=disabled
-      -D osmesa=gallium
-    GALLIUM_DRIVERS: "nouveau,swrast"
-    LLVM_VERSION: "5.0"
-
-build:make-vulkan:
-  extends: .make-build
-  variables:
-    MAKE_CHECK_COMMAND: "make -C src/gtest check && make -C src/intel check"
-    LLVM_VERSION: "7"
-    DRI_LOADERS: >
-      --disable-glx
-      --disable-gbm
-      --disable-egl
-      --with-platforms=x11,wayland,drm
-    DRI_DRIVERS: ""
-    GALLIUM_ST: >
-      --enable-dri
-      --enable-dri3
-      --disable-opencl
-      --disable-xa
-      --disable-nine
-      --disable-xvmc
-      --disable-vdpau
-      --disable-va
-      --disable-omx-bellagio
-      --disable-gallium-osmesa
-    VULKAN_DRIVERS: intel,radeon
-    LIBUNWIND_FLAGS: --disable-libunwind
-
-build:make-loader-classic-dri:
-  extends: .make-build
-  variables:
-    MAKE_CHECK_COMMAND: "make check"
-    DRI_LOADERS: >
-      --enable-glx
-      --enable-gbm
-      --enable-egl
-      --with-platforms=x11,wayland,drm,surfaceless
-      --enable-osmesa
-    DRI_DRIVERS: "i915,i965,radeon,r200,swrast,nouveau"
-    GALLIUM_ST: >
-      --enable-dri
-      --disable-opencl
-      --disable-xa
-      --disable-nine
-      --disable-xvmc
-      --disable-vdpau
-      --disable-va
-      --disable-omx-bellagio
-      --disable-gallium-osmesa
-    LIBUNWIND_FLAGS: --disable-libunwind
-
-# NOTE: Building SWR is 2x (yes two) times slower than all the other
-# gallium drivers combined.
-# Start this early so that it doesn't hunder the run time.
-build:make-gallium-drivers-swr:
-  extends: .make-build
-  variables:
-    MAKE_CHECK_COMMAND: "true"
-    LLVM_VERSION: "6.0"
-    DRI_LOADERS: >
-      --disable-glx
-      --disable-gbm
-      --disable-egl
-    GALLIUM_ST: >
-      --enable-dri
-      --disable-opencl
-      --disable-xa
-      --disable-nine
-      --disable-xvmc
-      --disable-vdpau
-      --disable-va
-      --disable-omx-bellagio
-      --disable-gallium-osmesa
-    GALLIUM_DRIVERS: "swr"
-    LIBUNWIND_FLAGS: --enable-libunwind
-
-build:make-gallium-drivers-radeonsi:
-  extends: build:make-gallium-drivers-swr
-  variables:
-    LLVM_VERSION: "7"
-    GALLIUM_DRIVERS: "radeonsi"
-
-build:make-gallium-drivers-other:
-  extends: build:make-gallium-drivers-swr
-  variables:
-    LLVM_VERSION: "3.9"
-    GALLIUM_DRIVERS: "i915,nouveau,kmsro,r300,r600,freedreno,svga,swrast,v3d,vc4,virgl,etnaviv"
-
-build:make-gallium-st-clover-llvm-39:
-  extends: .make-build
-  variables:
-    MAKE_CHECK_COMMAND: "true"
-    LLVM_VERSION: "3.9"
-    DRI_LOADERS: >
-      --disable-glx
-      --disable-gbm
-      --disable-egl
-    GALLIUM_ST: >
-      --disable-dri
-      --enable-opencl
-      --enable-opencl-icd
-      --enable-llvm
-      --disable-xa
-      --disable-nine
-      --disable-xvmc
-      --disable-vdpau
-      --disable-va
-      --disable-omx-bellagio
-      --disable-gallium-osmesa
-    GALLIUM_DRIVERS: "r600"
-    LIBUNWIND_FLAGS: --enable-libunwind
-
-build:make-gallium-st-clover-llvm-4:
-  extends: build:make-gallium-st-clover-llvm-39
-  variables:
-    LLVM_VERSION: "4.0"
-
-build:make-gallium-st-clover-llvm-5:
-  extends: build:make-gallium-st-clover-llvm-39
-  variables:
-    LLVM_VERSION: "5.0"
-
-build:make-gallium-st-clover-llvm-6:
-  extends: build:make-gallium-st-clover-llvm-39
-  variables:
-    LLVM_VERSION: "6.0"
-
-build:make-gallium-st-clover-llvm-7:
-  extends: build:make-gallium-st-clover-llvm-39
-  variables:
-    LLVM_VERSION: "7"
-    GALLIUM_DRIVERS: "r600,radeonsi"
-
-build:make-gallium-st-other:
-  extends: .make-build
-  variables:
-    MAKE_CHECK_COMMAND: "true"
-    # We should be testing 3.3, but 3.9 is the oldest that still exists in ubuntu
-    LLVM_VERSION: "3.9"
-    DRI_LOADERS: >
-      --disable-glx
-      --disable-gbm
-      --disable-egl
-    GALLIUM_ST: >
-      --enable-dri
-      --disable-opencl
-      --enable-xa
-      --enable-nine
-      --enable-xvmc
-      --enable-vdpau
-      --enable-va
-      --enable-omx-bellagio
-      --enable-gallium-osmesa
-    # We need swrast for osmesa and nine.
-    # i915 most likely doesn't work with most ST.
-    # Regardless - we're doing a quick build test here.
-    GALLIUM_DRIVERS: "i915,swrast"
-    LIBUNWIND_FLAGS: --enable-libunwind
-
-build:scons-nollvm:
+scons-nollvm:
   extends: .scons-build
   variables:
     SCONS_TARGET: "llvm=0"
     SCONS_CHECK_COMMAND: "scons llvm=0 check"
 
-build:scons-llvm:
+scons-llvm:
   extends: .scons-build
   variables:
     SCONS_TARGET: "llvm=1"
     SCONS_CHECK_COMMAND: "scons llvm=1 check"
-    LLVM_VERSION: "3.9"
-
-build:scons-swr:
-  extends: .scons-build
-  variables:
-    SCONS_TARGET: "swr=1"
-    SCONS_CHECK_COMMAND: "true"
-    LLVM_VERSION: "6.0"
+    LLVM_VERSION: "3.4"
+    # LLVM 3.4 packages were built with an old libstdc++ ABI
+    CXX: "g++ -D_GLIBCXX_USE_CXX11_ABI=0"

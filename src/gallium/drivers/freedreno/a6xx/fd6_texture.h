@@ -54,8 +54,7 @@ struct fd6_pipe_sampler_view {
 	struct pipe_sampler_view base;
 	uint32_t texconst0, texconst1, texconst2, texconst3, texconst5;
 	uint32_t texconst6, texconst7, texconst8, texconst9, texconst10, texconst11;
-	uint32_t offset;
-	bool astc_srgb;
+	uint32_t offset, ubwc_offset;
 	uint16_t seqno;
 	bool ubwc_enabled;
 };
@@ -92,7 +91,7 @@ fd6_tex_type(unsigned target)
 }
 
 static inline unsigned
-fd6_border_color_offset(struct fd_context *ctx, enum a6xx_state_block sb,
+fd6_border_color_offset(struct fd_context *ctx, enum pipe_shader_type type,
 		struct fd_texture_stateobj *tex)
 {
 	/* Currently we put the FS border-color state after VS.  Possibly
@@ -100,7 +99,7 @@ fd6_border_color_offset(struct fd_context *ctx, enum a6xx_state_block sb,
 	 *
 	 * This will need update for HS/DS/GS
 	 */
-	if (sb != SB6_FS_TEX)
+	if (type != PIPE_SHADER_FRAGMENT)
 		return 0;
 
 	unsigned needs_border = false;
@@ -143,6 +142,7 @@ struct fd6_texture_key {
 	struct {
 		uint16_t seqno;
 	} samp[16];
+	uint8_t type;
 	uint8_t bcolor_offset;
 };
 
@@ -153,6 +153,6 @@ struct fd6_texture_state {
 };
 
 struct fd6_texture_state * fd6_texture_state(struct fd_context *ctx,
-		enum a6xx_state_block sb, struct fd_texture_stateobj *tex);
+		enum pipe_shader_type type, struct fd_texture_stateobj *tex);
 
 #endif /* FD6_TEXTURE_H_ */

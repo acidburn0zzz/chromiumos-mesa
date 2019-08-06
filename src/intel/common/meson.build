@@ -23,13 +23,12 @@
 files_libintel_common = files(
   'gen_clflush.h',
   'gen_batch_decoder.c',
-  'gen_debug.c',
-  'gen_debug.h',
   'gen_decoder.c',
   'gen_decoder.h',
   'gen_disasm.c',
   'gen_disasm.h',
   'gen_gem.h',
+  'gen_guardband.h',
   'gen_l3_config.c',
   'gen_l3_config.h',
   'gen_urb_config.c',
@@ -43,5 +42,55 @@ libintel_common = static_library(
   include_directories : [inc_common, inc_intel],
   c_args : [c_vis_args, no_override_init_args],
   link_with : [libisl],
-  dependencies : [dep_expat, dep_libdrm, dep_thread],
+  dependencies : [dep_expat, dep_libdrm, dep_thread, idep_genxml],
 )
+
+install_intel_gpu_tests = get_option('install-intel-gpu-tests')
+
+if install_intel_gpu_tests
+  foreach g : [['70', 'gen7'], ['75', 'hsw'], ['80', 'gen8'],
+               ['90', 'gen9'], ['110', 'gen11']]
+    executable(
+      'intel_@0@_mi_builder_test'.format(g[1]),
+      files('tests/gen_mi_builder_test.cpp'),
+      cpp_args : [
+        cpp_vis_args, cpp_msvc_compat_args,
+        '-DGEN_VERSIONx10=@0@'.format(g[0])
+      ],
+      include_directories : [inc_common, inc_intel],
+      link_with : [libintel_dev, libmesa_util],
+      dependencies : [dep_libdrm, dep_thread, idep_gtest, idep_genxml],
+      install : install_intel_gpu_tests,
+    )
+  endforeach
+endif
+
+if with_tests
+  gentest_xml = files('tests/gentest.xml')
+  _name = 'gentest_pack.h'
+  gentest_pack = custom_target(
+    _name,
+    input : [gen_pack_header_py, gentest_xml],
+    output : _name,
+    command : [prog_python, '@INPUT@'],
+    capture : true,
+  )
+
+  genxml_path = join_paths(meson.source_root(),
+                           '@0@'.format(gentest_xml[0]))
+
+  test(
+    'genxml_test',
+    executable(
+      'genxml_test',
+      ['tests/genxml_test.c', gentest_pack],
+      include_directories : [inc_common, inc_intel],
+      link_with : [libintel_common, libmesa_util],
+      c_args : [
+        '-DGENXML_PATH="@0@"'.format(genxml_path)
+      ],
+    ),
+    args : ['-quiet'],
+    suite : ['intel'],
+  )
+endif

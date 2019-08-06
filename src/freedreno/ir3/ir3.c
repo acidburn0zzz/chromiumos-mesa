@@ -35,6 +35,7 @@
 #include "util/u_math.h"
 
 #include "instr-a3xx.h"
+#include "ir3_compiler.h"
 
 /* simple allocator to carve allocations out of an up-front allocated heap,
  * so that we can free everything easily in one shot.
@@ -45,11 +46,12 @@ void * ir3_alloc(struct ir3 *shader, int sz)
 }
 
 struct ir3 * ir3_create(struct ir3_compiler *compiler,
-		unsigned nin, unsigned nout)
+		gl_shader_stage type, unsigned nin, unsigned nout)
 {
 	struct ir3 *shader = rzalloc(compiler, struct ir3);
 
 	shader->compiler = compiler;
+	shader->type = type;
 	shader->ninputs = nin;
 	shader->inputs = ir3_alloc(shader, sizeof(shader->inputs[0]) * nin);
 
@@ -102,28 +104,28 @@ static uint32_t reg(struct ir3_register *reg, struct ir3_info *info,
 		if (reg->flags & IR3_REG_RELATIV) {
 			components = reg->size;
 			val.idummy10 = reg->array.offset;
-			max = (reg->array.offset + repeat + components - 1) >> 2;
+			max = (reg->array.offset + repeat + components - 1);
 		} else {
 			components = util_last_bit(reg->wrmask);
 			val.comp = reg->num & 0x3;
 			val.num  = reg->num >> 2;
-			max = (reg->num + repeat + components - 1) >> 2;
+			max = (reg->num + repeat + components - 1);
 		}
 
 		if (reg->flags & IR3_REG_CONST) {
-			info->max_const = MAX2(info->max_const, max);
+			info->max_const = MAX2(info->max_const, max >> 2);
 		} else if (val.num == 63) {
 			/* ignore writes to dummy register r63.x */
-		} else if (max < 48) {
+		} else if (max < regid(48, 0)) {
 			if (reg->flags & IR3_REG_HALF) {
 				if (info->gpu_id >= 600) {
 					/* starting w/ a6xx, half regs conflict with full regs: */
-					info->max_reg = MAX2(info->max_reg, (max+1)/2);
+					info->max_reg = MAX2(info->max_reg, max >> 3);
 				} else {
-					info->max_half_reg = MAX2(info->max_half_reg, max);
+					info->max_half_reg = MAX2(info->max_half_reg, max >> 2);
 				}
 			} else {
-				info->max_reg = MAX2(info->max_reg, max);
+				info->max_reg = MAX2(info->max_reg, max >> 2);
 			}
 		}
 	}
@@ -446,15 +448,35 @@ static int emit_cat5(struct ir3_instruction *instr, void *ptr,
 		struct ir3_info *info)
 {
 	struct ir3_register *dst = instr->regs[0];
-	struct ir3_register *src1 = instr->regs[1];
-	struct ir3_register *src2 = instr->regs[2];
-	struct ir3_register *src3 = instr->regs[3];
+	/* To simplify things when there could be zero, one, or two args other
+	 * than tex/sampler idx, we use the first src reg in the ir to hold
+	 * samp_tex hvec2:
+	 */
+	struct ir3_register *src1;
+	struct ir3_register *src2;
 	instr_cat5_t *cat5 = ptr;
 
-	iassert_type(dst, type_size(instr->cat5.type) == 32)
+	iassert((instr->regs_count == 2) ||
+			(instr->regs_count == 3) || (instr->regs_count == 4));
+
+	switch (instr->opc) {
+	case OPC_DSX:
+	case OPC_DSXPP_1:
+	case OPC_DSY:
+	case OPC_DSYPP_1:
+	case OPC_RGETPOS:
+	case OPC_RGETINFO:
+		iassert((instr->flags & IR3_INSTR_S2EN) == 0);
+		src1 = instr->regs[1];
+		src2 = instr->regs_count > 2 ? instr->regs[2] : NULL;
+		break;
+	default:
+		src1 = instr->regs[2];
+		src2 = instr->regs_count > 3 ? instr->regs[3] : NULL;
+		break;
+	}
 
 	assume(src1 || !src2);
-	assume(src2 || !src3);
 
 	if (src1) {
 		cat5->full = ! (src1->flags & IR3_REG_HALF);
@@ -462,17 +484,15 @@ static int emit_cat5(struct ir3_instruction *instr, void *ptr,
 	}
 
 	if (instr->flags & IR3_INSTR_S2EN) {
+		struct ir3_register *samp_tex = instr->regs[1];
 		if (src2) {
 			iassert(!((src1->flags ^ src2->flags) & IR3_REG_HALF));
 			cat5->s2en.src2 = reg(src2, info, instr->repeat, IR3_REG_HALF);
 		}
-		if (src3) {
-			iassert(src3->flags & IR3_REG_HALF);
-			cat5->s2en.src3 = reg(src3, info, instr->repeat, IR3_REG_HALF);
-		}
+		iassert(samp_tex->flags & IR3_REG_HALF);
+		cat5->s2en.src3 = reg(samp_tex, info, instr->repeat, IR3_REG_HALF);
 		iassert(!(instr->cat5.samp | instr->cat5.tex));
 	} else {
-		iassert(!src3);
 		if (src2) {
 			iassert(!((src1->flags ^ src2->flags) & IR3_REG_HALF));
 			cat5->norm.src2 = reg(src2, info, instr->repeat, IR3_REG_HALF);
@@ -899,6 +919,8 @@ static struct ir3_register * reg_create(struct ir3 *shader,
 	reg->wrmask = 1;
 	reg->flags = flags;
 	reg->num = num;
+	if (shader->compiler->gpu_id >= 600)
+		reg->merged = true;
 	return reg;
 }
 

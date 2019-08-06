@@ -25,6 +25,7 @@
 #include "st_cb_bitmap.h"
 #include "st_cb_drawtex.h"
 #include "st_nir.h"
+#include "st_util.h"
 
 #include "pipe/p_context.h"
 #include "pipe/p_defines.h"
@@ -91,7 +92,7 @@ semantic_to_varying_slot(unsigned semantic)
 static void *
 lookup_shader(struct st_context *st,
               uint num_attribs,
-              const uint *semantic_names,
+              const enum tgsi_semantic *semantic_names,
               const uint *semantic_indexes)
 {
    struct pipe_context *pipe = st->pipe;
@@ -126,7 +127,7 @@ lookup_shader(struct st_context *st,
    }
 
    enum pipe_shader_ir preferred_ir =
-      screen->get_shader_param(screen, MESA_SHADER_VERTEX,
+      screen->get_shader_param(screen, PIPE_SHADER_VERTEX,
                                PIPE_SHADER_CAP_PREFERRED_IR);
 
    if (preferred_ir == PIPE_SHADER_IR_NIR) {
@@ -167,7 +168,7 @@ st_DrawTex(struct gl_context *ctx, GLfloat x, GLfloat y, GLfloat z,
    struct pipe_resource *vbuffer = NULL;
    GLuint i, numTexCoords, numAttribs;
    GLboolean emitColor;
-   uint semantic_names[2 + MAX_TEXTURE_UNITS];
+   enum tgsi_semantic semantic_names[2 + MAX_TEXTURE_UNITS];
    uint semantic_indexes[2 + MAX_TEXTURE_UNITS];
    struct pipe_vertex_element velements[2 + MAX_TEXTURE_UNITS];
    unsigned offset;

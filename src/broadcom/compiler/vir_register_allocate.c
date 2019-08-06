@@ -29,18 +29,25 @@
 #define QPU_R(i) { .magic = false, .index = i }
 
 #define ACC_INDEX     0
-#define ACC_COUNT     5
+#define ACC_COUNT     6
 #define PHYS_INDEX    (ACC_INDEX + ACC_COUNT)
 #define PHYS_COUNT    64
+
+static inline bool
+qinst_writes_tmu(struct qinst *inst)
+{
+        return (inst->dst.file == QFILE_MAGIC &&
+                v3d_qpu_magic_waddr_is_tmu(inst->dst.index));
+}
 
 static bool
 is_last_ldtmu(struct qinst *inst, struct qblock *block)
 {
-        list_for_each_entry_from(struct qinst, scan_inst, inst,
+        list_for_each_entry_from(struct qinst, scan_inst, inst->link.next,
                                  &block->instructions, link) {
-                if (inst->qpu.sig.ldtmu)
+                if (scan_inst->qpu.sig.ldtmu)
                         return false;
-                if (v3d_qpu_writes_tmu(&inst->qpu))
+                if (qinst_writes_tmu(scan_inst))
                         return true;
         }
 
@@ -52,9 +59,7 @@ vir_is_mov_uniform(struct v3d_compile *c, int temp)
 {
         struct qinst *def = c->defs[temp];
 
-        return (def &&
-                vir_is_raw_mov(def) &&
-                def->src[0].file == QFILE_UNIF);
+        return def && def->qpu.sig.ldunif;
 }
 
 static int
@@ -140,7 +145,7 @@ v3d_choose_spill_node(struct v3d_compile *c, struct ra_graph *g,
                             inst->qpu.alu.add.op == V3D_QPU_A_TMUWT)
                                 in_tmu_operation = false;
 
-                        if (v3d_qpu_writes_tmu(&inst->qpu))
+                        if (qinst_writes_tmu(inst))
                                 in_tmu_operation = true;
                 }
         }
@@ -158,7 +163,7 @@ v3d_choose_spill_node(struct v3d_compile *c, struct ra_graph *g,
 /* The spill offset for this thread takes a bit of setup, so do it once at
  * program start.
  */
-static void
+void
 v3d_setup_spill_base(struct v3d_compile *c)
 {
         c->cursor = vir_before_block(vir_entry_block(c));
@@ -187,6 +192,8 @@ v3d_setup_spill_base(struct v3d_compile *c)
         /* Make sure that we don't spill the spilling setup instructions. */
         for (int i = start_num_temps; i < c->num_temps; i++)
                 BITSET_CLEAR(c->spillable, i);
+
+        c->cursor = vir_after_block(c->cur_block);
 }
 
 static void
@@ -207,7 +214,7 @@ v3d_spill_reg(struct v3d_compile *c, int spill_temp)
 
         if (!is_uniform) {
                 uint32_t spill_offset = c->spill_size;
-                c->spill_size += 16 * sizeof(uint32_t);
+                c->spill_size += V3D_CHANNELS * sizeof(uint32_t);
 
                 if (spill_offset == 0)
                         v3d_setup_spill_base(c);
@@ -218,9 +225,11 @@ v3d_spill_reg(struct v3d_compile *c, int spill_temp)
 
         int start_num_temps = c->num_temps;
 
-        struct qreg uniform_src = c->undef;
-        if (is_uniform)
-                uniform_src = c->defs[spill_temp]->src[0];
+        int uniform_index = ~0;
+        if (is_uniform) {
+                struct qinst *orig_unif = c->defs[spill_temp];
+                uniform_index = orig_unif->uniform;
+        }
 
         vir_for_each_inst_inorder_safe(inst, c) {
                 for (int i = 0; i < vir_get_nsrc(inst); i++) {
@@ -232,7 +241,11 @@ v3d_spill_reg(struct v3d_compile *c, int spill_temp)
                         c->cursor = vir_before_inst(inst);
 
                         if (is_uniform) {
-                                inst->src[i] = vir_MOV(c, uniform_src);
+                                struct qreg unif =
+                                        vir_uniform(c,
+                                                    c->uniform_contents[uniform_index],
+                                                    c->uniform_data[uniform_index]);
+                                inst->src[i] = unif;
                         } else {
                                 v3d_emit_spill_tmua(c, spill_offset);
                                 vir_emit_thrsw(c);
@@ -298,6 +311,14 @@ static unsigned int
 v3d_ra_select_callback(struct ra_graph *g, BITSET_WORD *regs, void *data)
 {
         struct v3d_ra_select_callback_data *v3d_ra = data;
+        int r5 = ACC_INDEX + 5;
+
+        /* Choose r5 for our ldunifs if possible (nobody else can load to that
+         * reg, and it keeps the QPU cond field free from being occupied by
+         * ldunifrf).
+         */
+        if (BITSET_TEST(regs, r5))
+                return r5;
 
         /* Choose an accumulator if possible (I think it's lower power than
          * phys regs), but round-robin through them to give post-RA
@@ -340,6 +361,10 @@ vir_init_reg_sets(struct v3d_compiler *compiler)
                 return false;
 
         for (int threads = 0; threads < max_thread_index; threads++) {
+                compiler->reg_class_any[threads] =
+                        ra_alloc_reg_class(compiler->regs);
+                compiler->reg_class_r5[threads] =
+                        ra_alloc_reg_class(compiler->regs);
                 compiler->reg_class_phys_or_acc[threads] =
                         ra_alloc_reg_class(compiler->regs);
                 compiler->reg_class_phys[threads] =
@@ -351,12 +376,25 @@ vir_init_reg_sets(struct v3d_compiler *compiler)
                                          compiler->reg_class_phys_or_acc[threads], i);
                         ra_class_add_reg(compiler->regs,
                                          compiler->reg_class_phys[threads], i);
+                        ra_class_add_reg(compiler->regs,
+                                         compiler->reg_class_any[threads], i);
                 }
 
-                for (int i = ACC_INDEX + 0; i < ACC_INDEX + ACC_COUNT; i++) {
+                for (int i = ACC_INDEX + 0; i < ACC_INDEX + ACC_COUNT - 1; i++) {
                         ra_class_add_reg(compiler->regs,
                                          compiler->reg_class_phys_or_acc[threads], i);
+                        ra_class_add_reg(compiler->regs,
+                                         compiler->reg_class_any[threads], i);
                 }
+                /* r5 can only store a single 32-bit value, so not much can
+                 * use it.
+                 */
+                ra_class_add_reg(compiler->regs,
+                                 compiler->reg_class_r5[threads],
+                                 ACC_INDEX + 5);
+                ra_class_add_reg(compiler->regs,
+                                 compiler->reg_class_any[threads],
+                                 ACC_INDEX + 5);
         }
 
         ra_set_finalize(compiler->regs, NULL);
@@ -379,9 +417,11 @@ node_to_temp_priority(const void *in_a, const void *in_b)
 }
 
 #define CLASS_BIT_PHYS			(1 << 0)
-#define CLASS_BIT_R0_R2			(1 << 1)
-#define CLASS_BIT_R3			(1 << 2)
-#define CLASS_BIT_R4			(1 << 3)
+#define CLASS_BIT_ACC			(1 << 1)
+#define CLASS_BIT_R5			(1 << 4)
+#define CLASS_BITS_ANY			(CLASS_BIT_PHYS | \
+                                         CLASS_BIT_ACC | \
+                                         CLASS_BIT_R5)
 
 /**
  * Returns a mapping from QFILE_TEMP indices to struct qpu_regs.
@@ -394,8 +434,6 @@ v3d_register_allocate(struct v3d_compile *c, bool *spilled)
         struct node_to_temp_map map[c->num_temps];
         uint32_t temp_to_node[c->num_temps];
         uint8_t class_bits[c->num_temps];
-        struct qpu_reg *temp_registers = calloc(c->num_temps,
-                                                sizeof(*temp_registers));
         int acc_nodes[ACC_COUNT];
         struct v3d_ra_select_callback_data callback_data = {
                 .next_acc = 0,
@@ -449,9 +487,7 @@ v3d_register_allocate(struct v3d_compile *c, bool *spilled)
          * start with any temp being able to be in any file, then instructions
          * incrementally remove bits that the temp definitely can't be in.
          */
-        memset(class_bits,
-               CLASS_BIT_PHYS | CLASS_BIT_R0_R2 | CLASS_BIT_R3 | CLASS_BIT_R4,
-               sizeof(class_bits));
+        memset(class_bits, CLASS_BITS_ANY, sizeof(class_bits));
 
         int ip = 0;
         vir_for_each_inst_inorder(inst, c) {
@@ -534,6 +570,24 @@ v3d_register_allocate(struct v3d_compile *c, bool *spilled)
                         }
                 }
 
+                if (inst->dst.file == QFILE_TEMP) {
+                        /* Only a ldunif gets to write to R5, which only has a
+                         * single 32-bit channel of storage.
+                         */
+                        if (!inst->qpu.sig.ldunif) {
+                                class_bits[inst->dst.index] &= ~CLASS_BIT_R5;
+                        } else {
+                                /* Until V3D 4.x, we could only load a uniform
+                                 * to r5, so we'll need to spill if uniform
+                                 * loads interfere with each other.
+                                 */
+                                if (c->devinfo->ver < 40) {
+                                        class_bits[inst->dst.index] &=
+                                                CLASS_BIT_R5;
+                                }
+                        }
+                }
+
                 if (inst->qpu.sig.thrsw) {
                         /* All accumulators are invalidated across a thread
                          * switch.
@@ -551,13 +605,16 @@ v3d_register_allocate(struct v3d_compile *c, bool *spilled)
                 if (class_bits[i] == CLASS_BIT_PHYS) {
                         ra_set_node_class(g, temp_to_node[i],
                                           c->compiler->reg_class_phys[thread_index]);
-                } else {
-                        assert(class_bits[i] == (CLASS_BIT_PHYS |
-                                                 CLASS_BIT_R0_R2 |
-                                                 CLASS_BIT_R3 |
-                                                 CLASS_BIT_R4));
+                } else if (class_bits[i] == (CLASS_BIT_R5)) {
+                        ra_set_node_class(g, temp_to_node[i],
+                                          c->compiler->reg_class_r5[thread_index]);
+                } else if (class_bits[i] == (CLASS_BIT_PHYS | CLASS_BIT_ACC)) {
                         ra_set_node_class(g, temp_to_node[i],
                                           c->compiler->reg_class_phys_or_acc[thread_index]);
+                } else {
+                        assert(class_bits[i] == CLASS_BITS_ANY);
+                        ra_set_node_class(g, temp_to_node[i],
+                                          c->compiler->reg_class_any[thread_index]);
                 }
         }
 
@@ -576,7 +633,8 @@ v3d_register_allocate(struct v3d_compile *c, bool *spilled)
          * conformance tests to make sure that spilling works.
          */
         int force_register_spills = 0;
-        if (c->spill_size < 16 * sizeof(uint32_t) * force_register_spills) {
+        if (c->spill_size <
+            V3D_CHANNELS * sizeof(uint32_t) * force_register_spills) {
                 int node = v3d_choose_spill_node(c, g, temp_to_node);
                 if (node != -1) {
                         v3d_spill_reg(c, map[node].temp);
@@ -588,23 +646,26 @@ v3d_register_allocate(struct v3d_compile *c, bool *spilled)
 
         bool ok = ra_allocate(g);
         if (!ok) {
-                /* Try to spill, if we can't reduce threading first. */
-                if (thread_index == 0) {
-                        int node = v3d_choose_spill_node(c, g, temp_to_node);
+                int node = v3d_choose_spill_node(c, g, temp_to_node);
 
-                        if (node != -1) {
-                                v3d_spill_reg(c, map[node].temp);
-                                ralloc_free(g);
+                /* Don't emit spills using the TMU until we've dropped thread
+                 * conut first.
+                 */
+                if (node != -1 &&
+                    (vir_is_mov_uniform(c, map[node].temp) ||
+                     thread_index == 0)) {
+                        v3d_spill_reg(c, map[node].temp);
 
-                                /* Ask the outer loop to call back in. */
-                                *spilled = true;
-                                return NULL;
-                        }
+                        /* Ask the outer loop to call back in. */
+                        *spilled = true;
                 }
 
-                free(temp_registers);
+                ralloc_free(g);
                 return NULL;
         }
+
+        struct qpu_reg *temp_registers = calloc(c->num_temps,
+                                                sizeof(*temp_registers));
 
         for (uint32_t i = 0; i < c->num_temps; i++) {
                 int ra_reg = ra_get_node_reg(g, temp_to_node[i]);
@@ -627,18 +688,6 @@ v3d_register_allocate(struct v3d_compile *c, bool *spilled)
         }
 
         ralloc_free(g);
-
-        if (V3D_DEBUG & V3D_DEBUG_SHADERDB) {
-                fprintf(stderr, "SHADER-DB: %s prog %d/%d: %d spills\n",
-                        vir_get_stage_name(c),
-                        c->program_id, c->variant_id,
-                        c->spills);
-
-                fprintf(stderr, "SHADER-DB: %s prog %d/%d: %d fills\n",
-                        vir_get_stage_name(c),
-                        c->program_id, c->variant_id,
-                        c->fills);
-        }
 
         return temp_registers;
 }

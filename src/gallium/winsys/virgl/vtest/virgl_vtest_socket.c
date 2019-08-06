@@ -72,6 +72,49 @@ static int virgl_block_read(int fd, void *buf, int size)
    return size;
 }
 
+static int virgl_vtest_receive_fd(int socket_fd)
+{
+    struct cmsghdr *cmsgh;
+    struct msghdr msgh = { 0 };
+    char buf[CMSG_SPACE(sizeof(int))], c;
+    struct iovec iovec;
+
+    iovec.iov_base = &c;
+    iovec.iov_len = sizeof(char);
+
+    msgh.msg_name = NULL;
+    msgh.msg_namelen = 0;
+    msgh.msg_iov = &iovec;
+    msgh.msg_iovlen = 1;
+    msgh.msg_control = buf;
+    msgh.msg_controllen = sizeof(buf);
+    msgh.msg_flags = 0;
+
+    int size = recvmsg(socket_fd, &msgh, 0);
+    if (size < 0) {
+      fprintf(stderr, "Failed with %s\n", strerror(errno));
+      return -1;
+    }
+
+    cmsgh = CMSG_FIRSTHDR(&msgh);
+    if (!cmsgh) {
+      fprintf(stderr, "No headers available\n");
+      return -1;
+    }
+
+    if (cmsgh->cmsg_level != SOL_SOCKET) {
+      fprintf(stderr, "invalid cmsg_level %d\n", cmsgh->cmsg_level);
+      return -1;
+    }
+
+    if (cmsgh->cmsg_type != SCM_RIGHTS) {
+      fprintf(stderr, "invalid cmsg_type %d\n", cmsgh->cmsg_type);
+      return -1;
+    }
+
+    return *((int *) CMSG_DATA(cmsgh));
+}
+
 static int virgl_vtest_send_init(struct virgl_vtest_winsys *vws)
 {
    uint32_t buf[VTEST_HDR_SIZE];
@@ -235,7 +278,8 @@ static int virgl_vtest_send_resource_create2(struct virgl_vtest_winsys *vws,
                                              uint32_t array_size,
                                              uint32_t last_level,
                                              uint32_t nr_samples,
-                                             uint32_t size)
+                                             uint32_t size,
+                                             int *out_fd)
 {
    uint32_t res_create_buf[VCMD_RES_CREATE2_SIZE], vtest_hdr[VTEST_HDR_SIZE];
 
@@ -257,6 +301,16 @@ static int virgl_vtest_send_resource_create2(struct virgl_vtest_winsys *vws,
    virgl_block_write(vws->sock_fd, &vtest_hdr, sizeof(vtest_hdr));
    virgl_block_write(vws->sock_fd, &res_create_buf, sizeof(res_create_buf));
 
+   /* Multi-sampled textures have no backing store attached. */
+   if (size == 0)
+      return 0;
+
+   *out_fd = virgl_vtest_receive_fd(vws->sock_fd);
+   if (*out_fd < 0) {
+      fprintf(stderr, "failed to get fd\n");
+      return -1;
+   }
+
    return 0;
 }
 
@@ -271,7 +325,8 @@ int virgl_vtest_send_resource_create(struct virgl_vtest_winsys *vws,
                                      uint32_t array_size,
                                      uint32_t last_level,
                                      uint32_t nr_samples,
-                                     uint32_t size)
+                                     uint32_t size,
+                                     int *out_fd)
 {
    uint32_t res_create_buf[VCMD_RES_CREATE_SIZE], vtest_hdr[VTEST_HDR_SIZE];
 
@@ -279,7 +334,7 @@ int virgl_vtest_send_resource_create(struct virgl_vtest_winsys *vws,
       return virgl_vtest_send_resource_create2(vws, handle, target, format,
                                                bind, width, height, depth,
                                                array_size, last_level,
-                                               nr_samples, size);
+                                               nr_samples, size, out_fd);
 
    vtest_hdr[VTEST_CMD_LEN] = VCMD_RES_CREATE_SIZE;
    vtest_hdr[VTEST_CMD_ID] = VCMD_RESOURCE_CREATE;

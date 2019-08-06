@@ -98,11 +98,13 @@ struct ir3_register {
 
 	} flags;
 
+	bool merged : 1;    /* half-regs conflict with full regs (ie >= a6xx) */
+
 	/* normal registers:
 	 * the component is in the low two bits of the reg #, so
 	 * rN.x becomes: (N << 2) | x
 	 */
-	int   num;
+	uint16_t num;
 	union {
 		/* immediate: */
 		int32_t  iim_val;
@@ -290,6 +292,11 @@ struct ir3_instruction {
 	};
 
 	/* used for per-pass extra instruction data.
+	 *
+	 * TODO we should remove the per-pass data like this and 'use_count'
+	 * and do something similar to what RA does w/ ir3_ra_instr_data..
+	 * ie. use the ir3_count_instructions pass, and then use instr->ip
+	 * to index into a table of pass-private data.
 	 */
 	void *data;
 
@@ -406,6 +413,7 @@ static inline int ir3_neighbor_count(struct ir3_instruction *instr)
 
 struct ir3 {
 	struct ir3_compiler *compiler;
+	gl_shader_stage type;
 
 	unsigned ninputs, noutputs;
 	struct ir3_instruction **inputs;
@@ -521,7 +529,7 @@ block_id(struct ir3_block *block)
 }
 
 struct ir3 * ir3_create(struct ir3_compiler *compiler,
-		unsigned nin, unsigned nout);
+		gl_shader_stage type, unsigned nin, unsigned nout);
 void ir3_destroy(struct ir3 *shader);
 void * ir3_assemble(struct ir3 *shader,
 		struct ir3_info *info, uint32_t gpu_id);
@@ -606,6 +614,18 @@ static inline bool is_nop(struct ir3_instruction *instr)
 	return instr->opc == OPC_NOP;
 }
 
+static inline bool is_same_type_reg(struct ir3_register *reg1,
+		struct ir3_register *reg2)
+{
+	unsigned type_reg1 = (reg1->flags & (IR3_REG_HIGH | IR3_REG_HALF));
+	unsigned type_reg2 = (reg2->flags & (IR3_REG_HIGH | IR3_REG_HALF));
+
+	if (type_reg1 ^ type_reg2)
+		return false;
+	else
+		return true;
+}
+
 /* Is it a non-transformative (ie. not type changing) mov?  This can
  * also include absneg.s/absneg.f, which for the most part can be
  * treated as a mov (single src argument).
@@ -622,6 +642,10 @@ static inline bool is_same_type_mov(struct ir3_instruction *instr)
 	case OPC_ABSNEG_F:
 	case OPC_ABSNEG_S:
 		if (instr->flags & IR3_INSTR_SAT)
+			return false;
+		/* If the type of dest reg and src reg are different,
+		 * it shouldn't be considered as same type mov */
+		if (!is_same_type_reg(instr->regs[0], instr->regs[1]))
 			return false;
 		break;
 	default:
@@ -853,6 +877,41 @@ static inline bool ir3_cat2_int(opc_t opc)
 	}
 }
 
+static inline bool ir3_cat2_float(opc_t opc)
+{
+	switch (opc) {
+	case OPC_ADD_F:
+	case OPC_MIN_F:
+	case OPC_MAX_F:
+	case OPC_MUL_F:
+	case OPC_SIGN_F:
+	case OPC_CMPS_F:
+	case OPC_ABSNEG_F:
+	case OPC_CMPV_F:
+	case OPC_FLOOR_F:
+	case OPC_CEIL_F:
+	case OPC_RNDNE_F:
+	case OPC_RNDAZ_F:
+	case OPC_TRUNC_F:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
+static inline bool ir3_cat3_float(opc_t opc)
+{
+	switch (opc) {
+	case OPC_MAD_F16:
+	case OPC_MAD_F32:
+	case OPC_SEL_F16:
+	case OPC_SEL_F32:
+		return true;
+	default:
+		return false;
+	}
+}
 
 /* map cat2 instruction to valid abs/neg flags: */
 static inline unsigned ir3_cat2_absneg(opc_t opc)
@@ -1026,7 +1085,7 @@ int ir3_ra(struct ir3 *ir3, gl_shader_stage type,
 		bool frag_coord, bool frag_face);
 
 /* legalize: */
-void ir3_legalize(struct ir3 *ir, int *num_samp, bool *has_ssbo, int *max_bary);
+void ir3_legalize(struct ir3 *ir, bool *has_ssbo, bool *need_pixlod, int *max_bary);
 
 /* ************************************************************************* */
 /* instruction helpers */
@@ -1053,18 +1112,24 @@ create_immed(struct ir3_block *block, uint32_t val)
 }
 
 static inline struct ir3_instruction *
-create_uniform(struct ir3_block *block, unsigned n)
+create_uniform_typed(struct ir3_block *block, unsigned n, type_t type)
 {
 	struct ir3_instruction *mov;
+	unsigned flags = (type_size(type) < 32) ? IR3_REG_HALF : 0;
 
 	mov = ir3_instr_create(block, OPC_MOV);
-	/* TODO get types right? */
-	mov->cat1.src_type = TYPE_F32;
-	mov->cat1.dst_type = TYPE_F32;
-	ir3_reg_create(mov, 0, 0);
-	ir3_reg_create(mov, n, IR3_REG_CONST);
+	mov->cat1.src_type = type;
+	mov->cat1.dst_type = type;
+	ir3_reg_create(mov, 0, flags);
+	ir3_reg_create(mov, n, IR3_REG_CONST | flags);
 
 	return mov;
+}
+
+static inline struct ir3_instruction *
+create_uniform(struct ir3_block *block, unsigned n)
+{
+	return create_uniform_typed(block, n, TYPE_F32);
 }
 
 static inline struct ir3_instruction *
@@ -1138,42 +1203,53 @@ ir3_NOP(struct ir3_block *block)
 	return ir3_instr_create(block, OPC_NOP);
 }
 
-#define INSTR0(name)                                                     \
+#define IR3_INSTR_0 0
+
+#define __INSTR0(flag, name, opc)                                        \
 static inline struct ir3_instruction *                                   \
 ir3_##name(struct ir3_block *block)                                      \
 {                                                                        \
 	struct ir3_instruction *instr =                                      \
-		ir3_instr_create(block, OPC_##name);                             \
+		ir3_instr_create(block, opc);                                    \
+	instr->flags |= flag;                                                \
 	return instr;                                                        \
 }
+#define INSTR0F(f, name)    __INSTR0(IR3_INSTR_##f, name##_##f, OPC_##name)
+#define INSTR0(name)        __INSTR0(0, name, OPC_##name)
 
-#define INSTR1(name)                                                     \
+#define __INSTR1(flag, name, opc)                                        \
 static inline struct ir3_instruction *                                   \
 ir3_##name(struct ir3_block *block,                                      \
 		struct ir3_instruction *a, unsigned aflags)                      \
 {                                                                        \
 	struct ir3_instruction *instr =                                      \
-		ir3_instr_create(block, OPC_##name);                             \
+		ir3_instr_create(block, opc);                                    \
 	ir3_reg_create(instr, 0, 0);   /* dst */                             \
 	__ssa_src(instr, a, aflags);                                         \
+	instr->flags |= flag;                                                \
 	return instr;                                                        \
 }
+#define INSTR1F(f, name)    __INSTR1(IR3_INSTR_##f, name##_##f, OPC_##name)
+#define INSTR1(name)        __INSTR1(0, name, OPC_##name)
 
-#define INSTR2(name)                                                     \
+#define __INSTR2(flag, name, opc)                                        \
 static inline struct ir3_instruction *                                   \
 ir3_##name(struct ir3_block *block,                                      \
 		struct ir3_instruction *a, unsigned aflags,                      \
 		struct ir3_instruction *b, unsigned bflags)                      \
 {                                                                        \
 	struct ir3_instruction *instr =                                      \
-		ir3_instr_create(block, OPC_##name);                             \
+		ir3_instr_create(block, opc);                                    \
 	ir3_reg_create(instr, 0, 0);   /* dst */                             \
 	__ssa_src(instr, a, aflags);                                         \
 	__ssa_src(instr, b, bflags);                                         \
+	instr->flags |= flag;                                                \
 	return instr;                                                        \
 }
+#define INSTR2F(f, name)    __INSTR2(IR3_INSTR_##f, name##_##f, OPC_##name)
+#define INSTR2(name)        __INSTR2(0, name, OPC_##name)
 
-#define INSTR3(name)                                                     \
+#define __INSTR3(flag, name, opc)                                        \
 static inline struct ir3_instruction *                                   \
 ir3_##name(struct ir3_block *block,                                      \
 		struct ir3_instruction *a, unsigned aflags,                      \
@@ -1181,32 +1257,18 @@ ir3_##name(struct ir3_block *block,                                      \
 		struct ir3_instruction *c, unsigned cflags)                      \
 {                                                                        \
 	struct ir3_instruction *instr =                                      \
-		ir3_instr_create(block, OPC_##name);                             \
+		ir3_instr_create2(block, opc, 4);                                \
 	ir3_reg_create(instr, 0, 0);   /* dst */                             \
 	__ssa_src(instr, a, aflags);                                         \
 	__ssa_src(instr, b, bflags);                                         \
 	__ssa_src(instr, c, cflags);                                         \
+	instr->flags |= flag;                                                \
 	return instr;                                                        \
 }
+#define INSTR3F(f, name)    __INSTR3(IR3_INSTR_##f, name##_##f, OPC_##name)
+#define INSTR3(name)        __INSTR3(0, name, OPC_##name)
 
-#define INSTR3F(f, name)                                                 \
-static inline struct ir3_instruction *                                   \
-ir3_##name##_##f(struct ir3_block *block,                                \
-		struct ir3_instruction *a, unsigned aflags,                      \
-		struct ir3_instruction *b, unsigned bflags,                      \
-		struct ir3_instruction *c, unsigned cflags)                      \
-{                                                                        \
-	struct ir3_instruction *instr =                                      \
-		ir3_instr_create2(block, OPC_##name, 5);                         \
-	ir3_reg_create(instr, 0, 0);   /* dst */                             \
-	__ssa_src(instr, a, aflags);                                         \
-	__ssa_src(instr, b, bflags);                                         \
-	__ssa_src(instr, c, cflags);                                         \
-	instr->flags |= IR3_INSTR_##f;                                       \
-	return instr;                                                        \
-}
-
-#define INSTR4(name)                                                     \
+#define __INSTR4(flag, name, opc)                                        \
 static inline struct ir3_instruction *                                   \
 ir3_##name(struct ir3_block *block,                                      \
 		struct ir3_instruction *a, unsigned aflags,                      \
@@ -1215,33 +1277,17 @@ ir3_##name(struct ir3_block *block,                                      \
 		struct ir3_instruction *d, unsigned dflags)                      \
 {                                                                        \
 	struct ir3_instruction *instr =                                      \
-		ir3_instr_create2(block, OPC_##name, 5);                         \
+		ir3_instr_create2(block, opc, 5);                                \
 	ir3_reg_create(instr, 0, 0);   /* dst */                             \
 	__ssa_src(instr, a, aflags);                                         \
 	__ssa_src(instr, b, bflags);                                         \
 	__ssa_src(instr, c, cflags);                                         \
 	__ssa_src(instr, d, dflags);                                         \
+	instr->flags |= flag;                                                \
 	return instr;                                                        \
 }
-
-#define INSTR4F(f, name)                                                 \
-static inline struct ir3_instruction *                                   \
-ir3_##name##_##f(struct ir3_block *block,                                \
-		struct ir3_instruction *a, unsigned aflags,                      \
-		struct ir3_instruction *b, unsigned bflags,                      \
-		struct ir3_instruction *c, unsigned cflags,                      \
-		struct ir3_instruction *d, unsigned dflags)                      \
-{                                                                        \
-	struct ir3_instruction *instr =                                      \
-		ir3_instr_create2(block, OPC_##name, 5);                         \
-	ir3_reg_create(instr, 0, 0);   /* dst */                             \
-	__ssa_src(instr, a, aflags);                                         \
-	__ssa_src(instr, b, bflags);                                         \
-	__ssa_src(instr, c, cflags);                                         \
-	__ssa_src(instr, d, dflags);                                         \
-	instr->flags |= IR3_INSTR_##f;                                       \
-	return instr;                                                        \
-}
+#define INSTR4F(f, name)    __INSTR4(IR3_INSTR_##f, name##_##f, OPC_##name)
+#define INSTR4(name)        __INSTR4(0, name, OPC_##name)
 
 /* cat0 instructions: */
 INSTR0(BR)
@@ -1327,18 +1373,22 @@ INSTR1(SQRT)
 /* cat5 instructions: */
 INSTR1(DSX)
 INSTR1(DSY)
+INSTR1F(3D, DSX)
+INSTR1F(3D, DSY)
+INSTR1(RGETPOS)
 
 static inline struct ir3_instruction *
 ir3_SAM(struct ir3_block *block, opc_t opc, type_t type,
-		unsigned wrmask, unsigned flags, unsigned samp, unsigned tex,
+		unsigned wrmask, unsigned flags, struct ir3_instruction *samp_tex,
 		struct ir3_instruction *src0, struct ir3_instruction *src1)
 {
 	struct ir3_instruction *sam;
 	struct ir3_register *reg;
 
 	sam = ir3_instr_create(block, opc);
-	sam->flags |= flags;
+	sam->flags |= flags | IR3_INSTR_S2EN;
 	ir3_reg_create(sam, 0, 0)->wrmask = wrmask;
+	__ssa_src(sam, samp_tex, IR3_REG_HALF);
 	if (src0) {
 		reg = ir3_reg_create(sam, 0, IR3_REG_SSA);
 		reg->wrmask = (1 << (src0->regs_count - 1)) - 1;
@@ -1349,8 +1399,6 @@ ir3_SAM(struct ir3_block *block, opc_t opc, type_t type,
 		reg->instr = src1;
 		reg->wrmask = (1 << (src1->regs_count - 1)) - 1;
 	}
-	sam->cat5.samp = samp;
-	sam->cat5.tex  = tex;
 	sam->cat5.type  = type;
 
 	return sam;
@@ -1423,8 +1471,13 @@ static inline unsigned regmask_idx(struct ir3_register *reg)
 {
 	unsigned num = (reg->flags & IR3_REG_RELATIV) ? reg->array.offset : reg->num;
 	debug_assert(num < MAX_REG);
-	if (reg->flags & IR3_REG_HALF)
-		num += MAX_REG;
+	if (reg->flags & IR3_REG_HALF) {
+		if (reg->merged) {
+			num /= 2;
+		} else {
+			num += MAX_REG;
+		}
+	}
 	return num;
 }
 

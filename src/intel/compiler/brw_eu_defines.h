@@ -210,7 +210,9 @@ enum opcode {
    BRW_OPCODE_SMOV =	10,  /**< Gen8+       */ /* Reused */
    /* Reserved - 11 */
    BRW_OPCODE_ASR =	12,
-   /* Reserved - 13-15 */
+   /* Reserved - 13 */
+   BRW_OPCODE_ROR =	14,  /**< Gen11+ */
+   BRW_OPCODE_ROL =	15,  /**< Gen11+ */
    BRW_OPCODE_CMP =	16,
    BRW_OPCODE_CMPN =	17,
    BRW_OPCODE_CSEL =	18,  /**< Gen8+ */
@@ -323,6 +325,14 @@ enum opcode {
    SHADER_OPCODE_SEND,
 
    /**
+    * An "undefined" write which does nothing but indicates to liveness that
+    * we don't care about any values in the register which predate this
+    * instruction.  Used to prevent partial writes from causing issues with
+    * live ranges.
+    */
+   SHADER_OPCODE_UNDEF,
+
+   /**
     * Texture sampling opcodes.
     *
     * LOGICAL opcodes are eventually translated to the matching non-LOGICAL
@@ -423,6 +433,7 @@ enum opcode {
    SHADER_OPCODE_A64_BYTE_SCATTERED_READ_LOGICAL,
    SHADER_OPCODE_A64_BYTE_SCATTERED_WRITE_LOGICAL,
    SHADER_OPCODE_A64_UNTYPED_ATOMIC_LOGICAL,
+   SHADER_OPCODE_A64_UNTYPED_ATOMIC_INT64_LOGICAL,
    SHADER_OPCODE_A64_UNTYPED_ATOMIC_FLOAT_LOGICAL,
 
    SHADER_OPCODE_TYPED_ATOMIC_LOGICAL,
@@ -441,6 +452,17 @@ enum opcode {
    SHADER_OPCODE_BYTE_SCATTERED_READ_LOGICAL,
    SHADER_OPCODE_BYTE_SCATTERED_WRITE_LOGICAL,
 
+   /**
+    * Memory fence messages.
+    *
+    * Source 0: Must be register g0, used as header.
+    * Source 1: Immediate bool to indicate whether or not we need to stall
+    *           until memory transactions prior to the fence are completed.
+    * Source 2: Immediate byte indicating which memory to fence.  Zero means
+    *           global memory; GEN7_BTI_SLM means SLM (for Gen11+ only).
+    *
+    * Vec4 backend only uses Source 0.
+    */
    SHADER_OPCODE_MEMORY_FENCE,
 
    SHADER_OPCODE_GEN4_SCRATCH_READ,
@@ -834,6 +856,10 @@ enum tex_logical_srcs {
    TEX_LOGICAL_SRC_SURFACE,
    /** Texture sampler index */
    TEX_LOGICAL_SRC_SAMPLER,
+   /** Texture surface bindless handle */
+   TEX_LOGICAL_SRC_SURFACE_HANDLE,
+   /** Texture sampler bindless handle */
+   TEX_LOGICAL_SRC_SAMPLER_HANDLE,
    /** Texel offset for gathers */
    TEX_LOGICAL_SRC_TG4_OFFSET,
    /** REQUIRED: Number of coordinate components (as UD immediate) */
@@ -847,6 +873,8 @@ enum tex_logical_srcs {
 enum surface_logical_srcs {
    /** Surface binding table index */
    SURFACE_LOGICAL_SRC_SURFACE,
+   /** Surface bindless handle */
+   SURFACE_LOGICAL_SRC_SURFACE_HANDLE,
    /** Surface address; could be multi-dimensional for typed opcodes */
    SURFACE_LOGICAL_SRC_ADDRESS,
    /** Data to be written or used in an atomic op */
@@ -1223,6 +1251,7 @@ enum brw_message_target {
  */
 #define GEN8_BTI_STATELESS_IA_COHERENT   255
 #define GEN8_BTI_STATELESS_NON_COHERENT  253
+#define GEN9_BTI_BINDLESS                252
 
 /* Dataport atomic operations for Untyped Atomic Integer Operation message
  * (and others).

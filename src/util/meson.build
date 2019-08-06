@@ -31,6 +31,7 @@ files_mesa_util = files(
   'build_id.h',
   'crc32.c',
   'crc32.h',
+  'dag.c',
   'debug.c',
   'debug.h',
   'disk_cache.c',
@@ -51,6 +52,7 @@ files_mesa_util = files(
   'mesa-sha1.h',
   'os_time.c',
   'os_time.h',
+  'os_file.c',
   'os_misc.c',
   'os_misc.h',
   'u_process.c',
@@ -156,6 +158,13 @@ libxmlconfig = static_library(
   build_by_default : false,
 )
 
+idep_xmlconfig = declare_dependency(
+  sources : xmlpool_options_h,
+  include_directories : inc_util,
+  link_with : libxmlconfig,
+  dependencies : dep_expat,
+)
+
 if with_tests
   test(
     'u_atomic',
@@ -193,7 +202,20 @@ if with_tests
     suite : ['util'],
   )
 
+  test(
+    'bitset',
+    executable(
+       'bitset_test',
+       files('bitset_test.cpp'),
+       include_directories : inc_common,
+       dependencies : [dep_thread, dep_dl, idep_gtest],
+       link_with : libmesa_util,
+     ),
+     suite : ['util'],
+  )
+
   subdir('tests/fast_idiv_by_const')
+  subdir('tests/fast_urem_by_const')
   subdir('tests/hash_table')
   subdir('tests/string_buffer')
   subdir('tests/vma')

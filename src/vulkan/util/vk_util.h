@@ -23,6 +23,10 @@
 #ifndef VK_UTIL_H
 #define VK_UTIL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* common inlines and macros for vulkan drivers */
 
 #include <vulkan/vulkan.h>
@@ -122,7 +126,7 @@ __vk_outarray_next(struct __vk_outarray *a, size_t elem_size)
       return NULL;
 
    if (a->data != NULL)
-      p = a->data + (*a->filled_len) * elem_size;
+      p = (uint8_t *)a->data + (*a->filled_len) * elem_size;
 
    *a->filled_len += 1;
 
@@ -192,6 +196,18 @@ __vk_find_struct(void *start, VkStructureType sType)
 #define vk_find_struct_const(__start, __sType) \
    (const void *)__vk_find_struct((void *)(__start), VK_STRUCTURE_TYPE_##__sType)
 
+static inline void
+__vk_append_struct(void *start, void *element)
+{
+   vk_foreach_struct(s, start) {
+      if (s->pNext)
+         continue;
+
+      s->pNext = (struct VkBaseOutStructure *) element;
+      break;
+   }
+}
+
 uint32_t vk_get_driver_version(void);
 
 uint32_t vk_get_version_override(void);
@@ -201,5 +217,9 @@ uint32_t vk_get_version_override(void);
    ((__enum) >= VK_EXT_OFFSET ? ((((__enum) - VK_EXT_OFFSET) / 1000UL) + 1) : 0)
 #define VK_ENUM_OFFSET(__enum) \
    ((__enum) >= VK_EXT_OFFSET ? ((__enum) % 1000) : (__enum))
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* VK_UTIL_H */

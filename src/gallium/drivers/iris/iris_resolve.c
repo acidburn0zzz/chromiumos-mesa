@@ -83,10 +83,11 @@ static void
 resolve_sampler_views(struct iris_context *ice,
                       struct iris_batch *batch,
                       struct iris_shader_state *shs,
+                      const struct shader_info *info,
                       bool *draw_aux_buffer_disabled,
                       bool consider_framebuffer)
 {
-   uint32_t views = shs->bound_sampler_views;
+   uint32_t views = info ? (shs->bound_sampler_views & info->textures_used) : 0;
 
    unsigned astc5x5_wa_bits = 0; // XXX: actual tracking
 
@@ -120,11 +121,12 @@ resolve_image_views(struct iris_context *ice,
                     bool *draw_aux_buffer_disabled,
                     bool consider_framebuffer)
 {
+   /* TODO: Consider images used by program */
    uint32_t views = shs->bound_image_views;
 
    while (views) {
       const int i = u_bit_scan(&views);
-      struct iris_resource *res = (void *) shs->image[i].res;
+      struct iris_resource *res = (void *) shs->image[i].base.resource;
 
       if (res->base.target != PIPE_BUFFER) {
          if (consider_framebuffer) {
@@ -149,12 +151,22 @@ resolve_image_views(struct iris_context *ice,
 void
 iris_predraw_resolve_inputs(struct iris_context *ice,
                             struct iris_batch *batch,
-                            struct iris_shader_state *shs,
                             bool *draw_aux_buffer_disabled,
+                            gl_shader_stage stage,
                             bool consider_framebuffer)
 {
-   resolve_sampler_views(ice, batch, shs, draw_aux_buffer_disabled, consider_framebuffer);
-   resolve_image_views(ice, batch, shs, draw_aux_buffer_disabled, consider_framebuffer);
+   struct iris_shader_state *shs = &ice->state.shaders[stage];
+   const struct shader_info *info = iris_get_shader_info(ice, stage);
+
+   uint64_t dirty = (IRIS_DIRTY_BINDINGS_VS << stage) |
+                    (consider_framebuffer ? IRIS_DIRTY_BINDINGS_FS : 0);
+
+   if (ice->state.dirty & dirty) {
+      resolve_sampler_views(ice, batch, shs, info, draw_aux_buffer_disabled,
+                            consider_framebuffer);
+      resolve_image_views(ice, batch, shs, draw_aux_buffer_disabled,
+                          consider_framebuffer);
+   }
 
    // XXX: ASTC hacks
 }
@@ -165,45 +177,57 @@ iris_predraw_resolve_framebuffer(struct iris_context *ice,
                                  bool *draw_aux_buffer_disabled)
 {
    struct pipe_framebuffer_state *cso_fb = &ice->state.framebuffer;
-   struct pipe_surface *zs_surf = cso_fb->zsbuf;
 
-   if (zs_surf) {
-      struct iris_resource *z_res, *s_res;
-      iris_get_depth_stencil_resources(zs_surf->texture, &z_res, &s_res);
-      unsigned num_layers =
-         zs_surf->u.tex.last_layer - zs_surf->u.tex.first_layer + 1;
+   if (ice->state.dirty & IRIS_DIRTY_DEPTH_BUFFER) {
+      struct pipe_surface *zs_surf = cso_fb->zsbuf;
 
-      if (z_res) {
-         iris_resource_prepare_depth(ice, batch, z_res, zs_surf->u.tex.level,
-                                     zs_surf->u.tex.first_layer, num_layers);
+      if (zs_surf) {
+         struct iris_resource *z_res, *s_res;
+         iris_get_depth_stencil_resources(zs_surf->texture, &z_res, &s_res);
+         unsigned num_layers =
+            zs_surf->u.tex.last_layer - zs_surf->u.tex.first_layer + 1;
+
+         if (z_res) {
+            iris_resource_prepare_depth(ice, batch, z_res,
+                                        zs_surf->u.tex.level,
+                                        zs_surf->u.tex.first_layer,
+                                        num_layers);
+            iris_cache_flush_for_depth(batch, z_res->bo);
+         }
+
+         if (s_res) {
+            iris_cache_flush_for_depth(batch, s_res->bo);
+         }
       }
    }
 
-   for (unsigned i = 0; i < cso_fb->nr_cbufs; i++) {
-      struct iris_surface *surf = (void *) cso_fb->cbufs[i];
-      if (!surf)
-         continue;
+   if (ice->state.dirty & (IRIS_DIRTY_BINDINGS_FS | IRIS_DIRTY_BLEND_STATE)) {
+      for (unsigned i = 0; i < cso_fb->nr_cbufs; i++) {
+         struct iris_surface *surf = (void *) cso_fb->cbufs[i];
+         if (!surf)
+            continue;
 
-      struct iris_resource *res = (void *) surf->base.texture;
+         struct iris_resource *res = (void *) surf->base.texture;
 
-      enum isl_aux_usage aux_usage =
-         iris_resource_render_aux_usage(ice, res, surf->view.format,
-                                        ice->state.blend_enables & (1u << i),
-                                        draw_aux_buffer_disabled[i]);
+         enum isl_aux_usage aux_usage =
+            iris_resource_render_aux_usage(ice, res, surf->view.format,
+                                           ice->state.blend_enables & (1u << i),
+                                           draw_aux_buffer_disabled[i]);
 
-      if (ice->state.draw_aux_usage[i] != aux_usage) {
-         ice->state.draw_aux_usage[i] = aux_usage;
-         /* XXX: Need to track which bindings to make dirty */
-         ice->state.dirty |= IRIS_ALL_DIRTY_BINDINGS;
+         if (ice->state.draw_aux_usage[i] != aux_usage) {
+            ice->state.draw_aux_usage[i] = aux_usage;
+            /* XXX: Need to track which bindings to make dirty */
+            ice->state.dirty |= IRIS_ALL_DIRTY_BINDINGS;
+         }
+
+         iris_resource_prepare_render(ice, batch, res, surf->view.base_level,
+                                      surf->view.base_array_layer,
+                                      surf->view.array_len,
+                                      aux_usage);
+
+         iris_cache_flush_for_render(batch, res->bo, surf->view.format,
+                                     aux_usage);
       }
-
-      iris_resource_prepare_render(ice, batch, res, surf->view.base_level,
-                                   surf->view.base_array_layer,
-                                   surf->view.array_len,
-                                   aux_usage);
-
-      iris_cache_flush_for_render(batch, res->bo, surf->view.format,
-                                  aux_usage);
    }
 }
 
@@ -224,10 +248,14 @@ iris_postdraw_update_resolve_tracking(struct iris_context *ice,
                                       struct iris_batch *batch)
 {
    struct pipe_framebuffer_state *cso_fb = &ice->state.framebuffer;
-   struct pipe_surface *zs_surf = cso_fb->zsbuf;
 
    // XXX: front buffer drawing?
 
+   bool may_have_resolved_depth =
+      ice->state.dirty & (IRIS_DIRTY_DEPTH_BUFFER |
+                          IRIS_DIRTY_WM_DEPTH_STENCIL);
+
+   struct pipe_surface *zs_surf = cso_fb->zsbuf;
    if (zs_surf) {
       struct iris_resource *z_res, *s_res;
       iris_get_depth_stencil_resources(zs_surf->texture, &z_res, &s_res);
@@ -235,23 +263,30 @@ iris_postdraw_update_resolve_tracking(struct iris_context *ice,
          zs_surf->u.tex.last_layer - zs_surf->u.tex.first_layer + 1;
 
       if (z_res) {
-         iris_resource_finish_depth(ice, z_res, zs_surf->u.tex.level,
-                                    zs_surf->u.tex.first_layer, num_layers,
-                                    ice->state.depth_writes_enabled);
+         if (may_have_resolved_depth) {
+            iris_resource_finish_depth(ice, z_res, zs_surf->u.tex.level,
+                                       zs_surf->u.tex.first_layer, num_layers,
+                                       ice->state.depth_writes_enabled);
+         }
 
          if (ice->state.depth_writes_enabled)
             iris_depth_cache_add_bo(batch, z_res->bo);
       }
 
       if (s_res) {
-         iris_resource_finish_write(ice, s_res, zs_surf->u.tex.level,
-                                    zs_surf->u.tex.first_layer, num_layers,
-                                    ISL_AUX_USAGE_NONE);
+         if (may_have_resolved_depth) {
+            iris_resource_finish_write(ice, s_res, zs_surf->u.tex.level,
+                                       zs_surf->u.tex.first_layer, num_layers,
+                                       ISL_AUX_USAGE_NONE);
+         }
 
          if (ice->state.stencil_writes_enabled)
             iris_depth_cache_add_bo(batch, s_res->bo);
       }
    }
+
+   bool may_have_resolved_color =
+      ice->state.dirty & (IRIS_DIRTY_BINDINGS_FS | IRIS_DIRTY_BLEND_STATE);
 
    for (unsigned i = 0; i < cso_fb->nr_cbufs; i++) {
       struct iris_surface *surf = (void *) cso_fb->cbufs[i];
@@ -259,15 +294,19 @@ iris_postdraw_update_resolve_tracking(struct iris_context *ice,
          continue;
 
       struct iris_resource *res = (void *) surf->base.texture;
-      union pipe_surface_desc *desc = &surf->base.u;
-      unsigned num_layers = desc->tex.last_layer - desc->tex.first_layer + 1;
       enum isl_aux_usage aux_usage = ice->state.draw_aux_usage[i];
 
-      iris_render_cache_add_bo(batch, res->bo, surf->view.format, aux_usage);
+      iris_render_cache_add_bo(batch, res->bo, surf->view.format,
+                               aux_usage);
 
-      iris_resource_finish_render(ice, res, desc->tex.level,
-                                  desc->tex.first_layer, num_layers,
-                                  aux_usage);
+      if (may_have_resolved_color) {
+         union pipe_surface_desc *desc = &surf->base.u;
+         unsigned num_layers =
+            desc->tex.last_layer - desc->tex.first_layer + 1;
+         iris_resource_finish_render(ice, res, desc->tex.level,
+                                     desc->tex.first_layer, num_layers,
+                                     aux_usage);
+      }
    }
 }
 
@@ -300,11 +339,13 @@ void
 iris_flush_depth_and_render_caches(struct iris_batch *batch)
 {
    iris_emit_pipe_control_flush(batch,
+                                "cache tracker: render-to-texture",
                                 PIPE_CONTROL_DEPTH_CACHE_FLUSH |
                                 PIPE_CONTROL_RENDER_TARGET_FLUSH |
                                 PIPE_CONTROL_CS_STALL);
 
    iris_emit_pipe_control_flush(batch,
+                                "cache tracker: render-to-texture",
                                 PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE |
                                 PIPE_CONTROL_CONST_CACHE_INVALIDATE);
 
@@ -409,8 +450,8 @@ iris_resolve_color(struct iris_context *ice,
    //DBG("%s to mt %p level %u layer %u\n", __FUNCTION__, mt, level, layer);
 
    struct blorp_surf surf;
-   iris_blorp_surf_for_resource(&surf, &res->base, res->aux.usage, level,
-                                true);
+   iris_blorp_surf_for_resource(&ice->vtbl, &surf, &res->base, res->aux.usage,
+                                level, true);
 
    iris_batch_maybe_flush(batch, 1500);
 
@@ -426,7 +467,8 @@ iris_resolve_color(struct iris_context *ice,
     * and again afterwards to ensure that the resolve is complete before we
     * do any more regular drawing.
     */
-   iris_emit_end_of_pipe_sync(batch, PIPE_CONTROL_RENDER_TARGET_FLUSH);
+   iris_emit_end_of_pipe_sync(batch, "color resolve: pre-flush",
+                              PIPE_CONTROL_RENDER_TARGET_FLUSH);
 
    struct blorp_batch blorp_batch;
    blorp_batch_init(&ice->blorp, &blorp_batch, batch, 0);
@@ -436,7 +478,8 @@ iris_resolve_color(struct iris_context *ice,
    blorp_batch_finish(&blorp_batch);
 
    /* See comment above */
-   iris_emit_end_of_pipe_sync(batch, PIPE_CONTROL_RENDER_TARGET_FLUSH);
+   iris_emit_end_of_pipe_sync(batch, "color resolve: post-flush",
+                              PIPE_CONTROL_RENDER_TARGET_FLUSH);
 }
 
 static void
@@ -452,11 +495,13 @@ iris_mcs_partial_resolve(struct iris_context *ice,
    assert(res->aux.usage == ISL_AUX_USAGE_MCS);
 
    struct blorp_surf surf;
-   iris_blorp_surf_for_resource(&surf, &res->base, res->aux.usage, 0, true);
+   iris_blorp_surf_for_resource(&ice->vtbl, &surf, &res->base, res->aux.usage,
+                                0, true);
 
    struct blorp_batch blorp_batch;
    blorp_batch_init(&ice->blorp, &blorp_batch, batch, 0);
-   blorp_mcs_partial_resolve(&blorp_batch, &surf, res->surf.format,
+   blorp_mcs_partial_resolve(&blorp_batch, &surf,
+                             isl_format_srgb_to_linear(res->surf.format),
                              start_layer, num_layers);
    blorp_batch_finish(&blorp_batch);
 }
@@ -526,16 +571,17 @@ sample_with_hiz(const struct gen_device_info *devinfo,
  *   - 7.5.3.2 Depth Buffer Resolve
  *   - 7.5.3.3 Hierarchical Depth Buffer Resolve
  */
-static void
+void
 iris_hiz_exec(struct iris_context *ice,
               struct iris_batch *batch,
               struct iris_resource *res,
               unsigned int level, unsigned int start_layer,
-              unsigned int num_layers, enum isl_aux_op op)
+              unsigned int num_layers, enum isl_aux_op op,
+              bool update_clear_depth)
 {
    assert(iris_resource_level_has_hiz(res, level));
    assert(op != ISL_AUX_OP_NONE);
-   const char *name = NULL;
+   UNUSED const char *name = NULL;
 
    switch (op) {
    case ISL_AUX_OP_FULL_RESOLVE:
@@ -580,22 +626,25 @@ iris_hiz_exec(struct iris_context *ice,
     * another for depth stall.
     */
    iris_emit_pipe_control_flush(batch,
+                                "hiz op: pre-flushes (1/2)",
                                 PIPE_CONTROL_DEPTH_CACHE_FLUSH |
                                 PIPE_CONTROL_CS_STALL);
 
-   iris_emit_pipe_control_flush(batch, PIPE_CONTROL_DEPTH_STALL);
+   iris_emit_pipe_control_flush(batch, "hiz op: pre-flushes (2/2)",
+                                PIPE_CONTROL_DEPTH_STALL);
 
    assert(res->aux.usage == ISL_AUX_USAGE_HIZ && res->aux.bo);
 
    iris_batch_maybe_flush(batch, 1500);
 
    struct blorp_surf surf;
-   iris_blorp_surf_for_resource(&surf, &res->base, ISL_AUX_USAGE_HIZ,
-                                level, true);
+   iris_blorp_surf_for_resource(&ice->vtbl, &surf, &res->base,
+                                ISL_AUX_USAGE_HIZ, level, true);
 
    struct blorp_batch blorp_batch;
-   blorp_batch_init(&ice->blorp, &blorp_batch, batch,
-                    BLORP_BATCH_NO_UPDATE_CLEAR_COLOR);
+   enum blorp_batch_flags flags = 0;
+   flags |= update_clear_depth ? 0 : BLORP_BATCH_NO_UPDATE_CLEAR_COLOR;
+   blorp_batch_init(&ice->blorp, &blorp_batch, batch, flags);
    blorp_hiz_op(&blorp_batch, &surf, level, start_layer, num_layers, op);
    blorp_batch_finish(&blorp_batch);
 
@@ -616,6 +665,7 @@ iris_hiz_exec(struct iris_context *ice,
     * TODO: Such as the spec says, this could be conditional.
     */
    iris_emit_pipe_control_flush(batch,
+                                "hiz op: post flush",
                                 PIPE_CONTROL_DEPTH_CACHE_FLUSH |
                                 PIPE_CONTROL_DEPTH_STALL);
 }
@@ -672,10 +722,10 @@ miptree_layer_range_length(const struct iris_resource *res, uint32_t level,
    return num_layers;
 }
 
-static bool
-has_color_unresolved(const struct iris_resource *res,
-                     unsigned start_level, unsigned num_levels,
-                     unsigned start_layer, unsigned num_layers)
+bool
+iris_has_color_unresolved(const struct iris_resource *res,
+                          unsigned start_level, unsigned num_levels,
+                          unsigned start_layer, unsigned num_layers)
 {
    if (!res->aux.bo)
       return false;
@@ -706,9 +756,8 @@ get_ccs_d_resolve_op(enum isl_aux_state aux_state,
 {
    assert(aux_usage == ISL_AUX_USAGE_NONE || aux_usage == ISL_AUX_USAGE_CCS_D);
 
-   const bool ccs_supported = aux_usage == ISL_AUX_USAGE_CCS_D;
-
-   assert(ccs_supported == fast_clear_supported);
+   const bool ccs_supported =
+      (aux_usage == ISL_AUX_USAGE_CCS_D) && fast_clear_supported;
 
    switch (aux_state) {
    case ISL_AUX_STATE_CLEAR:
@@ -740,9 +789,6 @@ get_ccs_e_resolve_op(enum isl_aux_state aux_state,
    assert(aux_usage == ISL_AUX_USAGE_NONE ||
           aux_usage == ISL_AUX_USAGE_CCS_D ||
           aux_usage == ISL_AUX_USAGE_CCS_E);
-
-   if (aux_usage == ISL_AUX_USAGE_CCS_D)
-      assert(fast_clear_supported);
 
    switch (aux_state) {
    case ISL_AUX_STATE_CLEAR:
@@ -991,7 +1037,7 @@ iris_resource_prepare_hiz_access(struct iris_context *ice,
    }
 
    if (hiz_op != ISL_AUX_OP_NONE) {
-      iris_hiz_exec(ice, batch, res, level, layer, 1, hiz_op);
+      iris_hiz_exec(ice, batch, res, level, layer, 1, hiz_op, false);
 
       switch (hiz_op) {
       case ISL_AUX_OP_FULL_RESOLVE:
@@ -1273,8 +1319,8 @@ iris_resource_texture_aux_usage(struct iris_context *ice,
        * ISL_AUX_USAGE_NONE.  This way, texturing won't even look at the
        * aux surface and we can save some bandwidth.
        */
-      if (!has_color_unresolved(res, 0, INTEL_REMAINING_LEVELS,
-                                0, INTEL_REMAINING_LAYERS))
+      if (!iris_has_color_unresolved(res, 0, INTEL_REMAINING_LEVELS,
+                                     0, INTEL_REMAINING_LAYERS))
          return ISL_AUX_USAGE_NONE;
 
       if (can_texture_with_ccs(devinfo, &ice->dbg, res, view_format))
@@ -1365,12 +1411,10 @@ iris_resource_render_aux_usage(struct iris_context *ice,
        * formats.  However, there are issues with blending where it doesn't
        * properly apply the sRGB curve to the clear color when blending.
        */
-      /* XXX:
       if (devinfo->gen >= 9 && blend_enabled &&
           isl_format_is_srgb(render_format) &&
-          !isl_color_value_is_zero_one(res->fast_clear_color, render_format))
+          !isl_color_value_is_zero_one(res->aux.clear_color, render_format))
          return ISL_AUX_USAGE_NONE;
-         */
 
       if (res->aux.usage == ISL_AUX_USAGE_CCS_E &&
           format_ccs_e_compat_with_resource(devinfo, res, render_format))

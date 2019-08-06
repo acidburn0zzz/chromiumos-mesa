@@ -55,7 +55,9 @@
  * given generation.
  */
 void
-iris_emit_pipe_control_flush(struct iris_batch *batch, uint32_t flags)
+iris_emit_pipe_control_flush(struct iris_batch *batch,
+                             const char *reason,
+                             uint32_t flags)
 {
    if ((flags & PIPE_CONTROL_CACHE_FLUSH_BITS) &&
        (flags & PIPE_CONTROL_CACHE_INVALIDATE_BITS)) {
@@ -70,11 +72,12 @@ iris_emit_pipe_control_flush(struct iris_batch *batch, uint32_t flags)
        * with any write cache flush, so this shouldn't be a concern.  In order
        * to ensure a full stall, we do an end-of-pipe sync.
        */
-      iris_emit_end_of_pipe_sync(batch, flags & PIPE_CONTROL_CACHE_FLUSH_BITS);
+      iris_emit_end_of_pipe_sync(batch, reason,
+                                 flags & PIPE_CONTROL_CACHE_FLUSH_BITS);
       flags &= ~(PIPE_CONTROL_CACHE_FLUSH_BITS | PIPE_CONTROL_CS_STALL);
    }
 
-   batch->vtbl->emit_raw_pipe_control(batch, flags, NULL, 0, 0);
+   batch->vtbl->emit_raw_pipe_control(batch, reason, flags, NULL, 0, 0);
 }
 
 /**
@@ -86,11 +89,12 @@ iris_emit_pipe_control_flush(struct iris_batch *batch, uint32_t flags)
  *  - PIPE_CONTROL_WRITE_DEPTH_COUNT
  */
 void
-iris_emit_pipe_control_write(struct iris_batch *batch, uint32_t flags,
+iris_emit_pipe_control_write(struct iris_batch *batch,
+                             const char *reason, uint32_t flags,
                              struct iris_bo *bo, uint32_t offset,
                              uint64_t imm)
 {
-   batch->vtbl->emit_raw_pipe_control(batch, flags, bo, offset, imm);
+   batch->vtbl->emit_raw_pipe_control(batch, reason, flags, bo, offset, imm);
 }
 
 /*
@@ -116,7 +120,8 @@ iris_emit_pipe_control_write(struct iris_batch *batch, uint32_t flags,
  *  Data" in the PIPE_CONTROL command.
  */
 void
-iris_emit_end_of_pipe_sync(struct iris_batch *batch, uint32_t flags)
+iris_emit_end_of_pipe_sync(struct iris_batch *batch,
+                           const char *reason, uint32_t flags)
 {
    /* From Sandybridge PRM, volume 2, "1.7.3.1 Writing a Value to Memory":
     *
@@ -140,7 +145,8 @@ iris_emit_end_of_pipe_sync(struct iris_batch *batch, uint32_t flags)
     *         Data, Required Write Cache Flush bits set)
     *       - Workload-2 (Can use the data produce or output by Workload-1)
     */
-   iris_emit_pipe_control_write(batch, flags | PIPE_CONTROL_CS_STALL |
+   iris_emit_pipe_control_write(batch, reason,
+                                flags | PIPE_CONTROL_CS_STALL |
                                 PIPE_CONTROL_WRITE_IMMEDIATE,
                                 batch->screen->workaround_bo, 0, 0);
 }
@@ -149,20 +155,30 @@ static void
 iris_texture_barrier(struct pipe_context *ctx, unsigned flags)
 {
    struct iris_context *ice = (void *) ctx;
+   struct iris_batch *render_batch = &ice->batches[IRIS_BATCH_RENDER];
+   struct iris_batch *compute_batch = &ice->batches[IRIS_BATCH_COMPUTE];
 
-   if (ice->batches[IRIS_BATCH_RENDER].contains_draw) {
-      iris_emit_pipe_control_flush(&ice->batches[IRIS_BATCH_RENDER],
+   if (render_batch->contains_draw ||
+       render_batch->cache.render->entries ||
+       render_batch->cache.depth->entries) {
+      iris_batch_maybe_flush(render_batch, 48);
+      iris_emit_pipe_control_flush(render_batch,
+                                   "API: texture barrier (1/2)",
                                    PIPE_CONTROL_DEPTH_CACHE_FLUSH |
                                    PIPE_CONTROL_RENDER_TARGET_FLUSH |
                                    PIPE_CONTROL_CS_STALL);
-      iris_emit_pipe_control_flush(&ice->batches[IRIS_BATCH_RENDER],
+      iris_emit_pipe_control_flush(render_batch,
+                                   "API: texture barrier (2/2)",
                                    PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE);
    }
 
-   if (ice->batches[IRIS_BATCH_COMPUTE].contains_draw) {
-      iris_emit_pipe_control_flush(&ice->batches[IRIS_BATCH_COMPUTE],
+   if (compute_batch->contains_draw) {
+      iris_batch_maybe_flush(compute_batch, 48);
+      iris_emit_pipe_control_flush(compute_batch,
+                                   "API: texture barrier (1/2)",
                                    PIPE_CONTROL_CS_STALL);
-      iris_emit_pipe_control_flush(&ice->batches[IRIS_BATCH_COMPUTE],
+      iris_emit_pipe_control_flush(compute_batch,
+                                   "API: texture barrier (2/2)",
                                    PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE);
    }
 }
@@ -189,12 +205,13 @@ iris_memory_barrier(struct pipe_context *ctx, unsigned flags)
               PIPE_CONTROL_RENDER_TARGET_FLUSH;
    }
 
-   // XXX: don't unconditionally emit flushes in both engines, we don't
-   // even know if we're even using e.g. the compute engine...
-
    for (int i = 0; i < IRIS_BATCH_COUNT; i++) {
-      if (ice->batches[i].contains_draw)
-         iris_emit_pipe_control_flush(&ice->batches[i], bits);
+      if (ice->batches[i].contains_draw ||
+          ice->batches[i].cache.render->entries) {
+         iris_batch_maybe_flush(&ice->batches[i], 24);
+         iris_emit_pipe_control_flush(&ice->batches[i], "API: memory barrier",
+                                      bits);
+      }
    }
 }
 

@@ -411,6 +411,9 @@ scan_instruction(struct tgsi_shader_info *info,
             info->uses_bindless_image_store = true;
       }
       break;
+   case TGSI_OPCODE_FBFETCH:
+      info->uses_fbfetch = true;
+      break;
    default:
       break;
    }
@@ -682,6 +685,9 @@ scan_declaration(struct tgsi_shader_info *info,
             break;
          case TGSI_SEMANTIC_BASEVERTEX:
             info->uses_basevertex = TRUE;
+            break;
+         case TGSI_SEMANTIC_DRAWID:
+            info->uses_drawid = TRUE;
             break;
          case TGSI_SEMANTIC_PRIMID:
             info->uses_primid = TRUE;

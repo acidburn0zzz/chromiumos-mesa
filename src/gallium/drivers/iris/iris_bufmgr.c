@@ -55,7 +55,7 @@
 #define ETIME ETIMEDOUT
 #endif
 #include "common/gen_clflush.h"
-#include "common/gen_debug.h"
+#include "dev/gen_debug.h"
 #include "common/gen_gem.h"
 #include "dev/gen_device_info.h"
 #include "main/macros.h"
@@ -117,31 +117,20 @@ atomic_add_unless(int *v, int add, int unless)
    return c == unless;
 }
 
-/**
- * Iris fixed-size bucketing VMA allocator.
- *
- * The BO cache maintains "cache buckets" for buffers of various sizes.
- * All buffers in a given bucket are identically sized - when allocating,
- * we always round up to the bucket size.  This means that virtually all
- * allocations are fixed-size; only buffers which are too large to fit in
- * a bucket can be variably-sized.
- *
- * We create an allocator for each bucket.  Each contains a free-list, where
- * each node contains a <starting address, 64-bit bitmap> pair.  Each bit
- * represents a bucket-sized block of memory.  (At the first level, each
- * bit corresponds to a page.  For the second bucket, bits correspond to
- * two pages, and so on.)  1 means a block is free, and 0 means it's in-use.
- * The lowest bit in the bitmap is for the first block.
- *
- * This makes allocations cheap - any bit of any node will do.  We can pick
- * the head of the list and use ffs() to find a free block.  If there are
- * none, we allocate 64 blocks from a larger allocator - either a bigger
- * bucketing allocator, or a fallback top-level allocator for large objects.
- */
-struct vma_bucket_node {
-   uint64_t start_address;
-   uint64_t bitmap;
-};
+static const char *
+memzone_name(enum iris_memory_zone memzone)
+{
+   const char *names[] = {
+      [IRIS_MEMZONE_SHADER]  = "shader",
+      [IRIS_MEMZONE_BINDER]  = "binder",
+      [IRIS_MEMZONE_SURFACE] = "surface",
+      [IRIS_MEMZONE_DYNAMIC] = "dynamic",
+      [IRIS_MEMZONE_OTHER]   = "other",
+      [IRIS_MEMZONE_BORDER_COLOR_POOL] = "bordercolor",
+   };
+   assert(memzone < ARRAY_SIZE(names));
+   return names[memzone];
+}
 
 struct bo_cache_bucket {
    /** List of cached BOs. */
@@ -149,9 +138,6 @@ struct bo_cache_bucket {
 
    /** Size of this bucket, in bytes. */
    uint64_t size;
-
-   /** List of vma_bucket_nodes. */
-   struct util_dynarray vma_list[IRIS_MEMZONE_COUNT];
 };
 
 struct iris_bufmgr {
@@ -166,6 +152,12 @@ struct iris_bufmgr {
 
    struct hash_table *name_table;
    struct hash_table *handle_table;
+
+   /**
+    * List of BOs which we've effectively freed, but are hanging on to
+    * until they're idle before closing and returning the VMA.
+    */
+   struct list_head zombie_list;
 
    struct util_vma_heap vma_allocator[IRIS_MEMZONE_COUNT];
 
@@ -241,8 +233,8 @@ bucket_for_size(struct iris_bufmgr *bufmgr, uint64_t size)
           &bufmgr->cache_bucket[index] : NULL;
 }
 
-static enum iris_memory_zone
-memzone_for_address(uint64_t address)
+enum iris_memory_zone
+iris_memzone_for_address(uint64_t address)
 {
    STATIC_ASSERT(IRIS_MEMZONE_OTHER_START   > IRIS_MEMZONE_DYNAMIC_START);
    STATIC_ASSERT(IRIS_MEMZONE_DYNAMIC_START > IRIS_MEMZONE_SURFACE_START);
@@ -268,121 +260,6 @@ memzone_for_address(uint64_t address)
    return IRIS_MEMZONE_SHADER;
 }
 
-static uint64_t
-bucket_vma_alloc(struct iris_bufmgr *bufmgr,
-                 struct bo_cache_bucket *bucket,
-                 enum iris_memory_zone memzone)
-{
-   struct util_dynarray *vma_list = &bucket->vma_list[memzone];
-   struct vma_bucket_node *node;
-
-   if (vma_list->size == 0) {
-      /* This bucket allocator is out of space - allocate a new block of
-       * memory for 64 blocks from a larger allocator (either a larger
-       * bucket or util_vma).
-       *
-       * We align the address to the node size (64 blocks) so that
-       * bucket_vma_free can easily compute the starting address of this
-       * block by rounding any address we return down to the node size.
-       *
-       * Set the first bit used, and return the start address.
-       */
-      const uint64_t node_size = 64ull * bucket->size;
-      node = util_dynarray_grow(vma_list, sizeof(struct vma_bucket_node));
-
-      if (unlikely(!node))
-         return 0ull;
-
-      uint64_t addr = vma_alloc(bufmgr, memzone, node_size, node_size);
-      node->start_address = gen_48b_address(addr);
-      node->bitmap = ~1ull;
-      return node->start_address;
-   }
-
-   /* Pick any bit from any node - they're all the right size and free. */
-   node = util_dynarray_top_ptr(vma_list, struct vma_bucket_node);
-   int bit = ffsll(node->bitmap) - 1;
-   assert(bit >= 0 && bit <= 63);
-
-   /* Reserve the memory by clearing the bit. */
-   assert((node->bitmap & (1ull << bit)) != 0ull);
-   node->bitmap &= ~(1ull << bit);
-
-   uint64_t addr = node->start_address + bit * bucket->size;
-
-   /* If this node is now completely full, remove it from the free list. */
-   if (node->bitmap == 0ull) {
-      (void) util_dynarray_pop(vma_list, struct vma_bucket_node);
-   }
-
-   return addr;
-}
-
-static void
-bucket_vma_free(struct bo_cache_bucket *bucket, uint64_t address)
-{
-   enum iris_memory_zone memzone = memzone_for_address(address);
-   struct util_dynarray *vma_list = &bucket->vma_list[memzone];
-   const uint64_t node_bytes = 64ull * bucket->size;
-   struct vma_bucket_node *node = NULL;
-
-   /* bucket_vma_alloc allocates 64 blocks at a time, and aligns it to
-    * that 64 block size.  So, we can round down to get the starting address.
-    */
-   uint64_t start = (address / node_bytes) * node_bytes;
-
-   /* Dividing the offset from start by bucket size gives us the bit index. */
-   int bit = (address - start) / bucket->size;
-
-   assert(start + bit * bucket->size == address);
-
-   util_dynarray_foreach(vma_list, struct vma_bucket_node, cur) {
-      if (cur->start_address == start) {
-         node = cur;
-         break;
-      }
-   }
-
-   if (!node) {
-      /* No node - the whole group of 64 blocks must have been in-use. */
-      node = util_dynarray_grow(vma_list, sizeof(struct vma_bucket_node));
-
-      if (unlikely(!node))
-         return; /* bogus, leaks some GPU VMA, but nothing we can do... */
-
-      node->start_address = start;
-      node->bitmap = 0ull;
-   }
-
-   /* Set the bit to return the memory. */
-   assert((node->bitmap & (1ull << bit)) == 0ull);
-   node->bitmap |= 1ull << bit;
-
-   /* The block might be entirely free now, and if so, we could return it
-    * to the larger allocator.  But we may as well hang on to it, in case
-    * we get more allocations at this block size.
-    */
-}
-
-static struct bo_cache_bucket *
-get_bucket_allocator(struct iris_bufmgr *bufmgr,
-                     enum iris_memory_zone memzone,
-                     uint64_t size)
-{
-   /* Skip using the bucket allocator for very large sizes, as it allocates
-    * 64 of them and this can balloon rather quickly.
-    */
-   if (size > 1024 * PAGE_SIZE)
-      return NULL;
-
-   struct bo_cache_bucket *bucket = bucket_for_size(bufmgr, size);
-
-   if (bucket && bucket->size == size)
-      return bucket;
-
-   return NULL;
-}
-
 /**
  * Allocate a section of virtual memory for a buffer, assigning an address.
  *
@@ -395,6 +272,9 @@ vma_alloc(struct iris_bufmgr *bufmgr,
           uint64_t size,
           uint64_t alignment)
 {
+   /* Force alignment to be some number of pages */
+   alignment = ALIGN(alignment, PAGE_SIZE);
+
    if (memzone == IRIS_MEMZONE_BORDER_COLOR_POOL)
       return IRIS_BORDER_COLOR_POOL_ADDRESS;
 
@@ -402,16 +282,8 @@ vma_alloc(struct iris_bufmgr *bufmgr,
    if (memzone == IRIS_MEMZONE_BINDER)
       return IRIS_MEMZONE_BINDER_START;
 
-   struct bo_cache_bucket *bucket =
-      get_bucket_allocator(bufmgr, memzone, size);
-   uint64_t addr;
-
-   if (bucket) {
-      addr = bucket_vma_alloc(bufmgr, bucket, memzone);
-   } else {
-      addr = util_vma_heap_alloc(&bufmgr->vma_allocator[memzone], size,
-                                 alignment);
-   }
+   uint64_t addr =
+      util_vma_heap_alloc(&bufmgr->vma_allocator[memzone], size, alignment);
 
    assert((addr >> 48ull) == 0);
    assert((addr % alignment) == 0);
@@ -433,20 +305,13 @@ vma_free(struct iris_bufmgr *bufmgr,
    if (address == 0ull)
       return;
 
-   enum iris_memory_zone memzone = memzone_for_address(address);
+   enum iris_memory_zone memzone = iris_memzone_for_address(address);
 
    /* The binder handles its own allocations. */
    if (memzone == IRIS_MEMZONE_BINDER)
       return;
 
-   struct bo_cache_bucket *bucket =
-      get_bucket_allocator(bufmgr, memzone, size);
-
-   if (bucket) {
-      bucket_vma_free(bucket, address);
-   } else {
-      util_vma_heap_free(&bufmgr->vma_allocator[memzone], address, size);
-   }
+   util_vma_heap_free(&bufmgr->vma_allocator[memzone], address, size);
 }
 
 int
@@ -477,20 +342,6 @@ iris_bo_madvise(struct iris_bo *bo, int state)
    return madv.retained;
 }
 
-/* drop the oldest entries that have been purged by the kernel */
-static void
-iris_bo_cache_purge_bucket(struct iris_bufmgr *bufmgr,
-                          struct bo_cache_bucket *bucket)
-{
-   list_for_each_entry_safe(struct iris_bo, bo, &bucket->head, head) {
-      if (iris_bo_madvise(bo, I915_MADV_DONTNEED))
-         break;
-
-      list_del(&bo->head);
-      bo_free(bo);
-   }
-}
-
 static struct iris_bo *
 bo_calloc(void)
 {
@@ -502,9 +353,118 @@ bo_calloc(void)
 }
 
 static struct iris_bo *
+alloc_bo_from_cache(struct iris_bufmgr *bufmgr,
+                    struct bo_cache_bucket *bucket,
+                    uint32_t alignment,
+                    enum iris_memory_zone memzone,
+                    unsigned flags,
+                    bool match_zone)
+{
+   if (!bucket)
+      return NULL;
+
+   struct iris_bo *bo = NULL;
+
+   list_for_each_entry_safe(struct iris_bo, cur, &bucket->head, head) {
+      /* Try a little harder to find one that's already in the right memzone */
+      if (match_zone && memzone != iris_memzone_for_address(cur->gtt_offset))
+         continue;
+
+      /* If the last BO in the cache is busy, there are no idle BOs.  Bail,
+       * either falling back to a non-matching memzone, or if that fails,
+       * allocating a fresh buffer.
+       */
+      if (iris_bo_busy(cur))
+         return NULL;
+
+      list_del(&cur->head);
+
+      /* Tell the kernel we need this BO.  If it still exists, we're done! */
+      if (iris_bo_madvise(cur, I915_MADV_WILLNEED)) {
+         bo = cur;
+         break;
+      }
+
+      /* This BO was purged, throw it out and keep looking. */
+      bo_free(cur);
+   }
+
+   if (!bo)
+      return NULL;
+
+   /* If the cached BO isn't in the right memory zone, or the alignment
+    * isn't sufficient, free the old memory and assign it a new address.
+    */
+   if (memzone != iris_memzone_for_address(bo->gtt_offset) ||
+       bo->gtt_offset % alignment != 0) {
+      vma_free(bufmgr, bo->gtt_offset, bo->size);
+      bo->gtt_offset = 0ull;
+   }
+
+   /* Zero the contents if necessary.  If this fails, fall back to
+    * allocating a fresh BO, which will always be zeroed by the kernel.
+    */
+   if (flags & BO_ALLOC_ZEROED) {
+      void *map = iris_bo_map(NULL, bo, MAP_WRITE | MAP_RAW);
+      if (map) {
+         memset(map, 0, bo->size);
+      } else {
+         bo_free(bo);
+         return NULL;
+      }
+   }
+
+   return bo;
+}
+
+static struct iris_bo *
+alloc_fresh_bo(struct iris_bufmgr *bufmgr, uint64_t bo_size)
+{
+   struct iris_bo *bo = bo_calloc();
+   if (!bo)
+      return NULL;
+
+   struct drm_i915_gem_create create = { .size = bo_size };
+
+   /* All new BOs we get from the kernel are zeroed, so we don't need to
+    * worry about that here.
+    */
+   if (drm_ioctl(bufmgr->fd, DRM_IOCTL_I915_GEM_CREATE, &create) != 0) {
+      free(bo);
+      return NULL;
+   }
+
+   bo->gem_handle = create.handle;
+   bo->bufmgr = bufmgr;
+   bo->size = bo_size;
+   bo->idle = true;
+   bo->tiling_mode = I915_TILING_NONE;
+   bo->swizzle_mode = I915_BIT_6_SWIZZLE_NONE;
+   bo->stride = 0;
+
+   /* Calling set_domain() will allocate pages for the BO outside of the
+    * struct mutex lock in the kernel, which is more efficient than waiting
+    * to create them during the first execbuf that uses the BO.
+    */
+   struct drm_i915_gem_set_domain sd = {
+      .handle = bo->gem_handle,
+      .read_domains = I915_GEM_DOMAIN_CPU,
+      .write_domain = 0,
+   };
+
+   if (drm_ioctl(bo->bufmgr->fd, DRM_IOCTL_I915_GEM_SET_DOMAIN, &sd) != 0) {
+      bo_free(bo);
+      return NULL;
+   }
+
+   return bo;
+}
+
+static struct iris_bo *
 bo_alloc_internal(struct iris_bufmgr *bufmgr,
                   const char *name,
                   uint64_t size,
+                  uint32_t alignment,
                   enum iris_memory_zone memzone,
                   unsigned flags,
                   uint32_t tiling_mode,
@@ -512,115 +472,46 @@ bo_alloc_internal(struct iris_bufmgr *bufmgr,
 {
    struct iris_bo *bo;
    unsigned int page_size = getpagesize();
-   int ret;
-   struct bo_cache_bucket *bucket;
-   bool alloc_from_cache;
-   uint64_t bo_size;
-   bool zeroed = false;
+   struct bo_cache_bucket *bucket = bucket_for_size(bufmgr, size);
 
-   if (flags & BO_ALLOC_ZEROED)
-      zeroed = true;
-
-   /* Round the allocated size up to a power of two number of pages. */
-   bucket = bucket_for_size(bufmgr, size);
-
-   /* If we don't have caching at this size, don't actually round the
-    * allocation up.
+   /* Round the size up to the bucket size, or if we don't have caching
+    * at this size, a multiple of the page size.
     */
-   if (bucket == NULL) {
-      bo_size = MAX2(ALIGN(size, page_size), page_size);
-   } else {
-      bo_size = bucket->size;
-   }
+   uint64_t bo_size =
+      bucket ? bucket->size : MAX2(ALIGN(size, page_size), page_size);
 
    mtx_lock(&bufmgr->lock);
-   /* Get a buffer out of the cache if available */
-retry:
-   alloc_from_cache = false;
-   if (bucket != NULL && !list_empty(&bucket->head)) {
-      /* If the last BO in the cache is idle, then reuse it.  Otherwise,
-       * allocate a fresh buffer to avoid stalling.
-       */
-      bo = LIST_ENTRY(struct iris_bo, bucket->head.next, head);
-      if (!iris_bo_busy(bo)) {
-         alloc_from_cache = true;
-         list_del(&bo->head);
-      }
 
-      if (alloc_from_cache) {
-         if (!iris_bo_madvise(bo, I915_MADV_WILLNEED)) {
-            bo_free(bo);
-            iris_bo_cache_purge_bucket(bufmgr, bucket);
-            goto retry;
-         }
+   /* Get a buffer out of the cache if available.  First, we try to find
+    * one with a matching memory zone so we can avoid reallocating VMA.
+    */
+   bo = alloc_bo_from_cache(bufmgr, bucket, alignment, memzone, flags, true);
 
-         if (bo_set_tiling_internal(bo, tiling_mode, stride)) {
-            bo_free(bo);
-            goto retry;
-         }
-
-         if (zeroed) {
-            void *map = iris_bo_map(NULL, bo, MAP_WRITE | MAP_RAW);
-            if (!map) {
-               bo_free(bo);
-               goto retry;
-            }
-            memset(map, 0, bo_size);
-         }
-      }
+   /* If that fails, we try for any cached BO, without matching memzone. */
+   if (!bo) {
+      bo = alloc_bo_from_cache(bufmgr, bucket, alignment, memzone, flags,
+                               false);
    }
 
-   if (alloc_from_cache) {
-      /* If the cached BO isn't in the right memory zone, free the old
-       * memory and assign it a new address.
-       */
-      if (memzone != memzone_for_address(bo->gtt_offset)) {
-         vma_free(bufmgr, bo->gtt_offset, bo->size);
-         bo->gtt_offset = 0ull;
-      }
-   } else {
-      bo = bo_calloc();
+   mtx_unlock(&bufmgr->lock);
+
+   if (!bo) {
+      bo = alloc_fresh_bo(bufmgr, bo_size);
       if (!bo)
-         goto err;
+         return NULL;
+   }
 
-      bo->size = bo_size;
-      bo->idle = true;
+   if (bo->gtt_offset == 0ull) {
+      mtx_lock(&bufmgr->lock);
+      bo->gtt_offset = vma_alloc(bufmgr, memzone, bo->size, alignment);
+      mtx_unlock(&bufmgr->lock);
 
-      struct drm_i915_gem_create create = { .size = bo_size };
-
-      /* All new BOs we get from the kernel are zeroed, so we don't need to
-       * worry about that here.
-       */
-      ret = drm_ioctl(bufmgr->fd, DRM_IOCTL_I915_GEM_CREATE, &create);
-      if (ret != 0) {
-         free(bo);
-         goto err;
-      }
-
-      bo->gem_handle = create.handle;
-
-      bo->bufmgr = bufmgr;
-
-      bo->tiling_mode = I915_TILING_NONE;
-      bo->swizzle_mode = I915_BIT_6_SWIZZLE_NONE;
-      bo->stride = 0;
-
-      if (bo_set_tiling_internal(bo, tiling_mode, stride))
-         goto err_free;
-
-      /* Calling set_domain() will allocate pages for the BO outside of the
-       * struct mutex lock in the kernel, which is more efficient than waiting
-       * to create them during the first execbuf that uses the BO.
-       */
-      struct drm_i915_gem_set_domain sd = {
-         .handle = bo->gem_handle,
-         .read_domains = I915_GEM_DOMAIN_CPU,
-         .write_domain = 0,
-      };
-
-      if (drm_ioctl(bo->bufmgr->fd, DRM_IOCTL_I915_GEM_SET_DOMAIN, &sd) != 0)
+      if (bo->gtt_offset == 0ull)
          goto err_free;
    }
+
+   if (bo_set_tiling_internal(bo, tiling_mode, stride))
+      goto err_free;
 
    bo->name = name;
    p_atomic_set(&bo->refcount, 1);
@@ -635,24 +526,24 @@ retry:
    if (memzone < IRIS_MEMZONE_OTHER)
       bo->kflags |= EXEC_OBJECT_CAPTURE;
 
-   if (bo->gtt_offset == 0ull) {
-      bo->gtt_offset = vma_alloc(bufmgr, memzone, bo->size, 1);
-
-      if (bo->gtt_offset == 0ull)
-         goto err_free;
+   if ((flags & BO_ALLOC_COHERENT) && !bo->cache_coherent) {
+      struct drm_i915_gem_caching arg = {
+         .handle = bo->gem_handle,
+         .caching = 1,
+      };
+      if (drm_ioctl(bufmgr->fd, DRM_IOCTL_I915_GEM_SET_CACHING, &arg) == 0) {
+         bo->cache_coherent = true;
+         bo->reusable = false;
+      }
    }
 
-   mtx_unlock(&bufmgr->lock);
-
-   DBG("bo_create: buf %d (%s) %llub\n", bo->gem_handle, bo->name,
-       (unsigned long long) size);
+   DBG("bo_create: buf %d (%s) (%s memzone) %llub\n", bo->gem_handle,
+       bo->name, memzone_name(memzone), (unsigned long long) size);
 
    return bo;
 
 err_free:
    bo_free(bo);
-err:
-   mtx_unlock(&bufmgr->lock);
    return NULL;
 }
 
@@ -662,16 +553,17 @@ iris_bo_alloc(struct iris_bufmgr *bufmgr,
               uint64_t size,
               enum iris_memory_zone memzone)
 {
-   return bo_alloc_internal(bufmgr, name, size, memzone,
+   return bo_alloc_internal(bufmgr, name, size, 1, memzone,
                             0, I915_TILING_NONE, 0);
 }
 
 struct iris_bo *
 iris_bo_alloc_tiled(struct iris_bufmgr *bufmgr, const char *name,
-                    uint64_t size, enum iris_memory_zone memzone,
+                    uint64_t size, uint32_t alignment,
+                    enum iris_memory_zone memzone,
                     uint32_t tiling_mode, uint32_t pitch, unsigned flags)
 {
-   return bo_alloc_internal(bufmgr, name, size, memzone,
+   return bo_alloc_internal(bufmgr, name, size, alignment, memzone,
                             flags, tiling_mode, pitch);
 }
 
@@ -708,7 +600,11 @@ iris_bo_create_userptr(struct iris_bufmgr *bufmgr, const char *name,
 
    bo->bufmgr = bufmgr;
    bo->kflags = EXEC_OBJECT_SUPPORTS_48B_ADDRESS | EXEC_OBJECT_PINNED;
+
+   mtx_lock(&bufmgr->lock);
    bo->gtt_offset = vma_alloc(bufmgr, memzone, size, 1);
+   mtx_unlock(&bufmgr->lock);
+
    if (bo->gtt_offset == 0ull)
       goto err_close;
 
@@ -811,6 +707,25 @@ err_unref:
 }
 
 static void
+bo_close(struct iris_bo *bo)
+{
+   struct iris_bufmgr *bufmgr = bo->bufmgr;
+
+   /* Close this object */
+   struct drm_gem_close close = { .handle = bo->gem_handle };
+   int ret = drm_ioctl(bufmgr->fd, DRM_IOCTL_GEM_CLOSE, &close);
+   if (ret != 0) {
+      DBG("DRM_IOCTL_GEM_CLOSE %d failed (%s): %s\n",
+          bo->gem_handle, bo->name, strerror(errno));
+   }
+
+   /* Return the VMA for reuse */
+   vma_free(bo->bufmgr, bo->gtt_offset, bo->size);
+
+   free(bo);
+}
+
+static void
 bo_free(struct iris_bo *bo)
 {
    struct iris_bufmgr *bufmgr = bo->bufmgr;
@@ -840,17 +755,14 @@ bo_free(struct iris_bo *bo)
       _mesa_hash_table_remove(bufmgr->handle_table, entry);
    }
 
-   /* Close this object */
-   struct drm_gem_close close = { .handle = bo->gem_handle };
-   int ret = drm_ioctl(bufmgr->fd, DRM_IOCTL_GEM_CLOSE, &close);
-   if (ret != 0) {
-      DBG("DRM_IOCTL_GEM_CLOSE %d failed (%s): %s\n",
-          bo->gem_handle, bo->name, strerror(errno));
+   if (bo->idle) {
+      bo_close(bo);
+   } else {
+      /* Defer closing the GEM BO and returning the VMA for reuse until the
+       * BO is idle.  Just move it to the dead list for now.
+       */
+      list_addtail(&bo->head, &bufmgr->zombie_list);
    }
-
-   vma_free(bo->bufmgr, bo->gtt_offset, bo->size);
-
-   free(bo);
 }
 
 /** Frees all cached buffers significantly older than @time. */
@@ -873,6 +785,17 @@ cleanup_bo_cache(struct iris_bufmgr *bufmgr, time_t time)
 
          bo_free(bo);
       }
+   }
+
+   list_for_each_entry_safe(struct iris_bo, bo, &bufmgr->zombie_list, head) {
+      /* Stop once we reach a busy BO - all others past this point were
+       * freed more recently so are likely also busy.
+       */
+      if (!bo->idle && iris_bo_busy(bo))
+         break;
+
+      list_del(&bo->head);
+      bo_close(bo);
    }
 
    bufmgr->time = time;
@@ -1168,8 +1091,11 @@ can_map_cpu(struct iris_bo *bo, unsigned flags)
     * most drawing while non-persistent mappings are active, we may still use
     * the GPU for blits or other operations, causing batches to happen at
     * inconvenient times.
+    *
+    * If RAW is set, we expect the caller to be able to handle a WC buffer
+    * more efficiently than the involuntary clflushes.
     */
-   if (flags & (MAP_PERSISTENT | MAP_COHERENT | MAP_ASYNC))
+   if (flags & (MAP_PERSISTENT | MAP_COHERENT | MAP_ASYNC | MAP_RAW))
       return false;
 
    return !(flags & MAP_WRITE);
@@ -1282,9 +1208,12 @@ iris_bufmgr_destroy(struct iris_bufmgr *bufmgr)
 
          bo_free(bo);
       }
+   }
 
-      for (int z = 0; z < IRIS_MEMZONE_COUNT; z++)
-         util_dynarray_fini(&bucket->vma_list[z]);
+   /* Close any buffer objects on the dead list. */
+   list_for_each_entry_safe(struct iris_bo, bo, &bufmgr->zombie_list, head) {
+      list_del(&bo->head);
+      bo_close(bo);
    }
 
    _mesa_hash_table_destroy(bufmgr->name_table, NULL);
@@ -1490,8 +1419,6 @@ add_bucket(struct iris_bufmgr *bufmgr, int size)
    assert(i < ARRAY_SIZE(bufmgr->cache_bucket));
 
    list_inithead(&bufmgr->cache_bucket[i].head);
-   for (int z = 0; z < IRIS_MEMZONE_COUNT; z++)
-      util_dynarray_init(&bufmgr->cache_bucket[i].vma_list[z], NULL);
    bufmgr->cache_bucket[i].size = size;
    bufmgr->num_buckets++;
 
@@ -1537,7 +1464,40 @@ iris_create_hw_context(struct iris_bufmgr *bufmgr)
       return 0;
    }
 
+   /* Upon declaring a GPU hang, the kernel will zap the guilty context
+    * back to the default logical HW state and attempt to continue on to
+    * our next submitted batchbuffer.  However, our render batches assume
+    * the previous GPU state is preserved, and only emit commands needed
+    * to incrementally change that state.  In particular, we inherit the
+    * STATE_BASE_ADDRESS and PIPELINE_SELECT settings, which are critical.
+    * With default base addresses, our next batches will almost certainly
+    * cause more GPU hangs, leading to repeated hangs until we're banned
+    * or the machine is dead.
+    *
+    * Here we tell the kernel not to attempt to recover our context but
+    * immediately (on the next batchbuffer submission) report that the
+    * context is lost, and we will do the recovery ourselves.  Ideally,
+    * we'll have two lost batches instead of a continual stream of hangs.
+    */
+   struct drm_i915_gem_context_param p = {
+      .ctx_id = create.ctx_id,
+      .param = I915_CONTEXT_PARAM_RECOVERABLE,
+      .value = false,
+   };
+   drmIoctl(bufmgr->fd, DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM, &p);
+
    return create.ctx_id;
+}
+
+static int
+iris_hw_context_get_priority(struct iris_bufmgr *bufmgr, uint32_t ctx_id)
+{
+   struct drm_i915_gem_context_param p = {
+      .ctx_id = ctx_id,
+      .param = I915_CONTEXT_PARAM_PRIORITY,
+   };
+   drmIoctl(bufmgr->fd, DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM, &p);
+   return p.value; /* on error, return 0 i.e. default priority */
 }
 
 int
@@ -1557,6 +1517,19 @@ iris_hw_context_set_priority(struct iris_bufmgr *bufmgr,
       err = -errno;
 
    return err;
+}
+
+uint32_t
+iris_clone_hw_context(struct iris_bufmgr *bufmgr, uint32_t ctx_id)
+{
+   uint32_t new_ctx = iris_create_hw_context(bufmgr);
+
+   if (new_ctx) {
+      int priority = iris_hw_context_get_priority(bufmgr, ctx_id);
+      iris_hw_context_set_priority(bufmgr, new_ctx, priority);
+   }
+
+   return new_ctx;
 }
 
 void
@@ -1581,6 +1554,21 @@ iris_reg_read(struct iris_bufmgr *bufmgr, uint32_t offset, uint64_t *result)
    return ret;
 }
 
+static uint64_t
+iris_gtt_size(int fd)
+{
+   /* We use the default (already allocated) context to determine
+    * the default configuration of the virtual address space.
+    */
+   struct drm_i915_gem_context_param p = {
+      .param = I915_CONTEXT_PARAM_GTT_SIZE,
+   };
+   if (!drm_ioctl(fd, DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM, &p))
+      return p.value;
+
+   return 0;
+}
+
 /**
  * Initializes the GEM buffer manager, which uses the kernel to allocate, map,
  * and manage map buffer objections.
@@ -1590,6 +1578,10 @@ iris_reg_read(struct iris_bufmgr *bufmgr, uint32_t offset, uint64_t *result)
 struct iris_bufmgr *
 iris_bufmgr_init(struct gen_device_info *devinfo, int fd)
 {
+   uint64_t gtt_size = iris_gtt_size(fd);
+   if (gtt_size <= IRIS_MEMZONE_OTHER_START)
+      return NULL;
+
    struct iris_bufmgr *bufmgr = calloc(1, sizeof(*bufmgr));
    if (bufmgr == NULL)
       return NULL;
@@ -1610,22 +1602,31 @@ iris_bufmgr_init(struct gen_device_info *devinfo, int fd)
       return NULL;
    }
 
+   list_inithead(&bufmgr->zombie_list);
+
    bufmgr->has_llc = devinfo->has_llc;
 
    STATIC_ASSERT(IRIS_MEMZONE_SHADER_START == 0ull);
    const uint64_t _4GB = 1ull << 32;
 
+   /* The STATE_BASE_ADDRESS size field can only hold 1 page shy of 4GB */
+   const uint64_t _4GB_minus_1 = _4GB - PAGE_SIZE;
+
    util_vma_heap_init(&bufmgr->vma_allocator[IRIS_MEMZONE_SHADER],
-                      PAGE_SIZE, _4GB);
+                      PAGE_SIZE, _4GB_minus_1 - PAGE_SIZE);
    util_vma_heap_init(&bufmgr->vma_allocator[IRIS_MEMZONE_SURFACE],
                       IRIS_MEMZONE_SURFACE_START,
-                      _4GB - IRIS_MAX_BINDERS * IRIS_BINDER_SIZE);
+                      _4GB_minus_1 - IRIS_MAX_BINDERS * IRIS_BINDER_SIZE);
    util_vma_heap_init(&bufmgr->vma_allocator[IRIS_MEMZONE_DYNAMIC],
                       IRIS_MEMZONE_DYNAMIC_START + IRIS_BORDER_COLOR_POOL_SIZE,
-                      _4GB - IRIS_BORDER_COLOR_POOL_SIZE);
+                      _4GB_minus_1 - IRIS_BORDER_COLOR_POOL_SIZE);
+
+   /* Leave the last 4GB out of the high vma range, so that no state
+    * base address + size can overflow 48 bits.
+    */
    util_vma_heap_init(&bufmgr->vma_allocator[IRIS_MEMZONE_OTHER],
                       IRIS_MEMZONE_OTHER_START,
-                      (1ull << 48) - IRIS_MEMZONE_OTHER_START);
+                      (gtt_size - _4GB) - IRIS_MEMZONE_OTHER_START);
 
    // XXX: driconf
    bufmgr->bo_reuse = env_var_as_boolean("bo_reuse", true);

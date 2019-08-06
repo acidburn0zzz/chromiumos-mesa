@@ -42,8 +42,20 @@ LOCAL_LDFLAGS := \
 LOCAL_SHARED_LIBRARIES := \
 	libdl \
 	libglapi \
-	libexpat \
 	libz
+
+# If Android version >=8 MESA should static link libexpat else should dynamic link
+ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 27; echo $$?), 0)
+LOCAL_STATIC_LIBRARIES := \
+	libexpat
+else
+LOCAL_SHARED_LIBRARIES += \
+	libexpat
+endif
+
+LOCAL_STATIC_LIBRARIES += \
+	libfreedreno_drm \
+	libfreedreno_ir3
 
 ifeq ($(USE_LIBBACKTRACE),true)
 	LOCAL_SHARED_LIBRARIES += libbacktrace

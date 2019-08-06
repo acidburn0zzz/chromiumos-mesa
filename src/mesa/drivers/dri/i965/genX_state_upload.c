@@ -26,12 +26,15 @@
 #include "dev/gen_device_info.h"
 #include "common/gen_sample_positions.h"
 #include "genxml/gen_macros.h"
+#include "common/gen_guardband.h"
 
 #include "main/bufferobj.h"
 #include "main/context.h"
 #include "main/enums.h"
 #include "main/macros.h"
 #include "main/state.h"
+
+#include "genX_boilerplate.h"
 
 #include "brw_context.h"
 #include "brw_draw.h"
@@ -56,100 +59,6 @@
 #include "main/viewport.h"
 #include "util/half_float.h"
 
-UNUSED static void *
-emit_dwords(struct brw_context *brw, unsigned n)
-{
-   intel_batchbuffer_begin(brw, n);
-   uint32_t *map = brw->batch.map_next;
-   brw->batch.map_next += n;
-   intel_batchbuffer_advance(brw);
-   return map;
-}
-
-struct brw_address {
-   struct brw_bo *bo;
-   unsigned reloc_flags;
-   uint32_t offset;
-};
-
-#define __gen_address_type struct brw_address
-#define __gen_user_data struct brw_context
-
-static uint64_t
-__gen_combine_address(struct brw_context *brw, void *location,
-                      struct brw_address address, uint32_t delta)
-{
-   struct intel_batchbuffer *batch = &brw->batch;
-   uint32_t offset;
-
-   if (address.bo == NULL) {
-      return address.offset + delta;
-   } else {
-      if (GEN_GEN < 6 && brw_ptr_in_state_buffer(batch, location)) {
-         offset = (char *) location - (char *) brw->batch.state.map;
-         return brw_state_reloc(batch, offset, address.bo,
-                                address.offset + delta,
-                                address.reloc_flags);
-      }
-
-      assert(!brw_ptr_in_state_buffer(batch, location));
-
-      offset = (char *) location - (char *) brw->batch.batch.map;
-      return brw_batch_reloc(batch, offset, address.bo,
-                             address.offset + delta,
-                             address.reloc_flags);
-   }
-}
-
-UNUSED static struct brw_address
-rw_bo(struct brw_bo *bo, uint32_t offset)
-{
-   return (struct brw_address) {
-            .bo = bo,
-            .offset = offset,
-            .reloc_flags = RELOC_WRITE,
-   };
-}
-
-static struct brw_address
-ro_bo(struct brw_bo *bo, uint32_t offset)
-{
-   return (struct brw_address) {
-            .bo = bo,
-            .offset = offset,
-   };
-}
-
-static struct brw_address
-rw_32_bo(struct brw_bo *bo, uint32_t offset)
-{
-   return (struct brw_address) {
-            .bo = bo,
-            .offset = offset,
-            .reloc_flags = RELOC_WRITE | RELOC_32BIT,
-   };
-}
-
-static struct brw_address
-ro_32_bo(struct brw_bo *bo, uint32_t offset)
-{
-   return (struct brw_address) {
-            .bo = bo,
-            .offset = offset,
-            .reloc_flags = RELOC_32BIT,
-   };
-}
-
-UNUSED static struct brw_address
-ggtt_bo(struct brw_bo *bo, uint32_t offset)
-{
-   return (struct brw_address) {
-            .bo = bo,
-            .offset = offset,
-            .reloc_flags = RELOC_WRITE | RELOC_NEEDS_GGTT,
-   };
-}
-
 #if GEN_GEN == 4
 static struct brw_address
 KSP(struct brw_context *brw, uint32_t offset)
@@ -163,39 +72,6 @@ KSP(UNUSED struct brw_context *brw, uint32_t offset)
    return offset;
 }
 #endif
-
-#include "genxml/genX_pack.h"
-
-#define _brw_cmd_length(cmd) cmd ## _length
-#define _brw_cmd_length_bias(cmd) cmd ## _length_bias
-#define _brw_cmd_header(cmd) cmd ## _header
-#define _brw_cmd_pack(cmd) cmd ## _pack
-
-#define brw_batch_emit(brw, cmd, name)                  \
-   for (struct cmd name = { _brw_cmd_header(cmd) },     \
-        *_dst = emit_dwords(brw, _brw_cmd_length(cmd)); \
-        __builtin_expect(_dst != NULL, 1);              \
-        _brw_cmd_pack(cmd)(brw, (void *)_dst, &name),   \
-        _dst = NULL)
-
-#define brw_batch_emitn(brw, cmd, n, ...) ({           \
-      uint32_t *_dw = emit_dwords(brw, n);             \
-      struct cmd template = {                          \
-         _brw_cmd_header(cmd),                         \
-         .DWordLength = n - _brw_cmd_length_bias(cmd), \
-         __VA_ARGS__                                   \
-      };                                               \
-      _brw_cmd_pack(cmd)(brw, _dw, &template);         \
-      _dw + 1; /* Array starts at dw[1] */             \
-   })
-
-#define brw_state_emit(brw, cmd, align, offset, name)              \
-   for (struct cmd name = {},                                      \
-        *_dst = brw_state_batch(brw, _brw_cmd_length(cmd) * 4,     \
-                                align, offset);                    \
-        __builtin_expect(_dst != NULL, 1);                         \
-        _brw_cmd_pack(cmd)(brw, (void *)_dst, &name),              \
-        _dst = NULL)
 
 #if GEN_GEN >= 7
 MAYBE_UNUSED static void
@@ -1052,6 +928,22 @@ const struct brw_tracked_state genX(cut_index) = {
    .emit = genX(upload_cut_index),
 };
 #endif
+
+static void
+genX(upload_vf_statistics)(struct brw_context *brw)
+{
+   brw_batch_emit(brw, GENX(3DSTATE_VF_STATISTICS), vf) {
+      vf.StatisticsEnable = true;
+   }
+}
+
+const struct brw_tracked_state genX(vf_statistics) = {
+   .dirty = {
+      .mesa  = 0,
+      .brw   = BRW_NEW_BLORP | BRW_NEW_CONTEXT,
+   },
+   .emit = genX(upload_vf_statistics),
+};
 
 #if GEN_GEN >= 6
 /**
@@ -2051,8 +1943,7 @@ genX(upload_wm)(struct brw_context *brw)
       if (wm_prog_data->base.use_alt_mode)
          wm.FloatingPointMode = FLOATING_POINT_MODE_Alternate;
 
-      /* WA_1606682166 */
-      wm.SamplerCount = (GEN_GEN == 5 || GEN_GEN == 11) ?
+      wm.SamplerCount = GEN_GEN == 5 ?
          0 : DIV_ROUND_UP(stage_state->sampler_count, 4);
 
       wm.BindingTableEntryCount =
@@ -2531,97 +2422,6 @@ static const struct brw_tracked_state genX(scissor_state) = {
 /* ---------------------------------------------------------------------- */
 
 static void
-brw_calculate_guardband_size(uint32_t fb_width, uint32_t fb_height,
-                             float m00, float m11, float m30, float m31,
-                             float *xmin, float *xmax,
-                             float *ymin, float *ymax)
-{
-   /* According to the "Vertex X,Y Clamping and Quantization" section of the
-    * Strips and Fans documentation:
-    *
-    * "The vertex X and Y screen-space coordinates are also /clamped/ to the
-    *  fixed-point "guardband" range supported by the rasterization hardware"
-    *
-    * and
-    *
-    * "In almost all circumstances, if an object’s vertices are actually
-    *  modified by this clamping (i.e., had X or Y coordinates outside of
-    *  the guardband extent the rendered object will not match the intended
-    *  result.  Therefore software should take steps to ensure that this does
-    *  not happen - e.g., by clipping objects such that they do not exceed
-    *  these limits after the Drawing Rectangle is applied."
-    *
-    * I believe the fundamental restriction is that the rasterizer (in
-    * the SF/WM stages) have a limit on the number of pixels that can be
-    * rasterized.  We need to ensure any coordinates beyond the rasterizer
-    * limit are handled by the clipper.  So effectively that limit becomes
-    * the clipper's guardband size.
-    *
-    * It goes on to say:
-    *
-    * "In addition, in order to be correctly rendered, objects must have a
-    *  screenspace bounding box not exceeding 8K in the X or Y direction.
-    *  This additional restriction must also be comprehended by software,
-    *  i.e., enforced by use of clipping."
-    *
-    * This makes no sense.  Gen7+ hardware supports 16K render targets,
-    * and you definitely need to be able to draw polygons that fill the
-    * surface.  Our assumption is that the rasterizer was limited to 8K
-    * on Sandybridge, which only supports 8K surfaces, and it was actually
-    * increased to 16K on Ivybridge and later.
-    *
-    * So, limit the guardband to 16K on Gen7+ and 8K on Sandybridge.
-    */
-   const float gb_size = GEN_GEN >= 7 ? 16384.0f : 8192.0f;
-
-   /* Workaround: prevent gpu hangs on SandyBridge
-    * by disabling guardband clipping for odd dimensions.
-    */
-   if (GEN_GEN == 6 && (fb_width & 1 || fb_height & 1)) {
-      *xmin = -1.0f;
-      *xmax =  1.0f;
-      *ymin = -1.0f;
-      *ymax =  1.0f;
-      return;
-   }
-
-   if (m00 != 0 && m11 != 0) {
-      /* First, we compute the screen-space render area */
-      const float ss_ra_xmin = MIN3(        0, m30 + m00, m30 - m00);
-      const float ss_ra_xmax = MAX3( fb_width, m30 + m00, m30 - m00);
-      const float ss_ra_ymin = MIN3(        0, m31 + m11, m31 - m11);
-      const float ss_ra_ymax = MAX3(fb_height, m31 + m11, m31 - m11);
-
-      /* We want the guardband to be centered on that */
-      const float ss_gb_xmin = (ss_ra_xmin + ss_ra_xmax) / 2 - gb_size;
-      const float ss_gb_xmax = (ss_ra_xmin + ss_ra_xmax) / 2 + gb_size;
-      const float ss_gb_ymin = (ss_ra_ymin + ss_ra_ymax) / 2 - gb_size;
-      const float ss_gb_ymax = (ss_ra_ymin + ss_ra_ymax) / 2 + gb_size;
-
-      /* Now we need it in native device coordinates */
-      const float ndc_gb_xmin = (ss_gb_xmin - m30) / m00;
-      const float ndc_gb_xmax = (ss_gb_xmax - m30) / m00;
-      const float ndc_gb_ymin = (ss_gb_ymin - m31) / m11;
-      const float ndc_gb_ymax = (ss_gb_ymax - m31) / m11;
-
-      /* Thanks to Y-flipping and ORIGIN_UPPER_LEFT, the Y coordinates may be
-       * flipped upside-down.  X should be fine though.
-       */
-      assert(ndc_gb_xmin <= ndc_gb_xmax);
-      *xmin = ndc_gb_xmin;
-      *xmax = ndc_gb_xmax;
-      *ymin = MIN2(ndc_gb_ymin, ndc_gb_ymax);
-      *ymax = MAX2(ndc_gb_ymin, ndc_gb_ymax);
-   } else {
-      /* The viewport scales to 0, so nothing will be rendered. */
-      *xmin = 0.0f;
-      *xmax = 0.0f;
-      *ymin = 0.0f;
-      *ymax = 0.0f;
-   }
-}
-
-static void
 genX(upload_sf_clip_viewport)(struct brw_context *brw)
 {
    struct gl_context *ctx = &brw->ctx;
@@ -2674,7 +2474,7 @@ genX(upload_sf_clip_viewport)(struct brw_context *brw)
       sfv.ViewportMatrixElementm30 = translate[0],
       sfv.ViewportMatrixElementm31 = translate[1] * y_scale + y_bias,
       sfv.ViewportMatrixElementm32 = translate[2],
-      brw_calculate_guardband_size(fb_width, fb_height,
+      gen_calculate_guardband_size(fb_width, fb_height,
                                    sfv.ViewportMatrixElementm00,
                                    sfv.ViewportMatrixElementm11,
                                    sfv.ViewportMatrixElementm30,
@@ -3344,13 +3144,13 @@ genX(upload_push_constant_packets)(struct brw_context *brw)
 
                if (binding->BufferObject == ctx->Shared->NullBufferObj) {
                   static unsigned msg_id = 0;
-                  _mesa_gl_debug(ctx, &msg_id, MESA_DEBUG_SOURCE_API,
-                                 MESA_DEBUG_TYPE_UNDEFINED,
-                                 MESA_DEBUG_SEVERITY_HIGH,
-                                 "UBO %d unbound, %s shader uniform data "
-                                 "will be undefined.",
-                                 range->block,
-                                 _mesa_shader_stage_to_string(stage));
+                  _mesa_gl_debugf(ctx, &msg_id, MESA_DEBUG_SOURCE_API,
+                                  MESA_DEBUG_TYPE_UNDEFINED,
+                                  MESA_DEBUG_SEVERITY_HIGH,
+                                  "UBO %d unbound, %s shader uniform data "
+                                  "will be undefined.",
+                                  range->block,
+                                  _mesa_shader_stage_to_string(stage));
                   continue;
                }
 
@@ -4220,6 +4020,11 @@ genX(upload_hs_state)(struct brw_context *brw)
          hs.IncludeVertexHandles = true;
 
          hs.MaximumNumberofThreads = devinfo->max_tcs_threads - 1;
+
+#if GEN_GEN >= 9
+         hs.DispatchMode = vue_prog_data->dispatch_mode;
+         hs.IncludePrimitiveID = tcs_prog_data->include_primitive_id;
+#endif
       }
    }
 }
@@ -4561,7 +4366,9 @@ genX(upload_cs_state)(struct brw_context *brw)
    const struct GENX(INTERFACE_DESCRIPTOR_DATA) idd = {
       .KernelStartPointer = brw->cs.base.prog_offset,
       .SamplerStatePointer = stage_state->sampler_offset,
-      .SamplerCount = DIV_ROUND_UP(CLAMP(stage_state->sampler_count, 0, 16), 4),
+      /* WA_1606682166 */
+      .SamplerCount = GEN_GEN == 11 ? 0 :
+                      DIV_ROUND_UP(CLAMP(stage_state->sampler_count, 0, 16), 4),
       .BindingTablePointer = stage_state->bind_bo_offset,
       .ConstantURBEntryReadLength = cs_prog_data->push.per_thread.regs,
       .NumberofThreadsinGPGPUThreadGroup = cs_prog_data->threads,
@@ -5765,6 +5572,8 @@ genX(init_atoms)(struct brw_context *brw)
 #if GEN_GEN < 6
    static const struct brw_tracked_state *render_atoms[] =
    {
+      &genX(vf_statistics),
+
       /* Once all the programs are done, we know how large urb entry
        * sizes need to be and can decide if we need to change the urb
        * layout.
@@ -5821,6 +5630,8 @@ genX(init_atoms)(struct brw_context *brw)
 #elif GEN_GEN == 6
    static const struct brw_tracked_state *render_atoms[] =
    {
+      &genX(vf_statistics),
+
       &genX(sf_clip_viewport),
 
       /* Command packets: */
@@ -5885,6 +5696,8 @@ genX(init_atoms)(struct brw_context *brw)
 #elif GEN_GEN == 7
    static const struct brw_tracked_state *render_atoms[] =
    {
+      &genX(vf_statistics),
+
       /* Command packets: */
 
       &genX(cc_vp),
@@ -5975,6 +5788,8 @@ genX(init_atoms)(struct brw_context *brw)
 #elif GEN_GEN >= 8
    static const struct brw_tracked_state *render_atoms[] =
    {
+      &genX(vf_statistics),
+
       &genX(cc_vp),
       &genX(sf_clip_viewport),
 

@@ -137,11 +137,18 @@ else
   driver_svga = declare_dependency()
 endif
 if with_gallium_virgl
+  subdir('winsys/virgl/common')
   subdir('winsys/virgl/drm')
   subdir('winsys/virgl/vtest')
   subdir('drivers/virgl')
 else
   driver_virgl = declare_dependency()
+endif
+if with_gallium_lima
+  subdir('winsys/lima/drm')
+  subdir('drivers/lima')
+else
+  driver_lima = declare_dependency()
 endif
 if with_gallium_opencl
   # TODO: this isn't really clover specific, but ATM clover is the only

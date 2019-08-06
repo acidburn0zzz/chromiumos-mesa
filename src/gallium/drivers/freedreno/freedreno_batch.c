@@ -89,6 +89,7 @@ batch_init(struct fd_batch *batch)
 	fd_reset_wfi(batch);
 
 	util_dynarray_init(&batch->draw_patches, NULL);
+	util_dynarray_init(&batch->fb_read_patches, NULL);
 
 	if (is_a2xx(ctx->screen)) {
 		util_dynarray_init(&batch->shader_patches, NULL);
@@ -168,6 +169,7 @@ batch_fini(struct fd_batch *batch)
 	fd_submit_del(batch->submit);
 
 	util_dynarray_fini(&batch->draw_patches);
+	util_dynarray_fini(&batch->fb_read_patches);
 
 	if (is_a2xx(batch->ctx->screen)) {
 		util_dynarray_fini(&batch->shader_patches);
@@ -196,7 +198,7 @@ batch_flush_reset_dependencies(struct fd_batch *batch, bool flush)
 
 	foreach_batch(dep, cache, batch->dependents_mask) {
 		if (flush)
-			fd_batch_flush(dep, false, false);
+			fd_batch_flush(dep, false);
 		fd_batch_reference(&dep, NULL);
 	}
 
@@ -275,7 +277,7 @@ __fd_batch_destroy(struct fd_batch *batch)
 void
 __fd_batch_describe(char* buf, const struct fd_batch *batch)
 {
-	util_sprintf(buf, "fd_batch<%u>", batch->seqno);
+	sprintf(buf, "fd_batch<%u>", batch->seqno);
 }
 
 void
@@ -305,7 +307,7 @@ batch_cleanup_func(void *job, int id)
 }
 
 static void
-batch_flush(struct fd_batch *batch, bool force)
+batch_flush(struct fd_batch *batch)
 {
 	DBG("%p: needs_flush=%d", batch, batch->needs_flush);
 
@@ -354,7 +356,7 @@ batch_flush(struct fd_batch *batch, bool force)
  *   a fence to sync on
  */
 void
-fd_batch_flush(struct fd_batch *batch, bool sync, bool force)
+fd_batch_flush(struct fd_batch *batch, bool sync)
 {
 	struct fd_batch *tmp = NULL;
 	bool newbatch = false;
@@ -370,7 +372,7 @@ fd_batch_flush(struct fd_batch *batch, bool sync, bool force)
 		newbatch = true;
 	}
 
-	batch_flush(tmp, force);
+	batch_flush(tmp);
 
 	if (newbatch) {
 		struct fd_context *ctx = batch->ctx;
@@ -407,7 +409,7 @@ batch_depends_on(struct fd_batch *batch, struct fd_batch *other)
 	if (batch->dependents_mask & (1 << other->idx))
 		return true;
 
-	foreach_batch(dep, cache, batch->dependents_mask)
+	foreach_batch(dep, cache, other->dependents_mask)
 		if (batch_depends_on(batch, dep))
 			return true;
 
@@ -436,7 +438,7 @@ flush_write_batch(struct fd_resource *rsc)
 	fd_batch_reference_locked(&b, rsc->write_batch);
 
 	mtx_unlock(&b->ctx->screen->lock);
-	fd_batch_flush(b, true, false);
+	fd_batch_flush(b, true);
 	mtx_lock(&b->ctx->screen->lock);
 
 	fd_bc_invalidate_batch(b, false);
@@ -510,7 +512,7 @@ fd_batch_check_size(struct fd_batch *batch)
 	debug_assert(!batch->flushed);
 
 	if (unlikely(fd_mesa_debug & FD_DBG_FLUSH)) {
-		fd_batch_flush(batch, true, false);
+		fd_batch_flush(batch, true);
 		return;
 	}
 
@@ -519,7 +521,7 @@ fd_batch_check_size(struct fd_batch *batch)
 
 	struct fd_ringbuffer *ring = batch->draw;
 	if ((ring->cur - ring->start) > (ring->size/4 - 0x1000))
-		fd_batch_flush(batch, true, false);
+		fd_batch_flush(batch, true);
 }
 
 /* emit a WAIT_FOR_IDLE only if needed, ie. if there has not already

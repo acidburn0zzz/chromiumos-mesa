@@ -572,7 +572,7 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
 
 	if (dirty & (FD_DIRTY_ZSA | FD_DIRTY_RASTERIZER | FD_DIRTY_PROG)) {
 		struct fd5_zsa_stateobj *zsa = fd5_zsa_stateobj(ctx->zsa);
-		bool fragz = fp->has_kill | fp->writes_pos;
+		bool fragz = fp->no_earlyz | fp->writes_pos;
 
 		OUT_PKT4(ring, REG_A5XX_RB_DEPTH_CNTL, 1);
 		OUT_RING(ring, zsa->rb_depth_cntl);
@@ -919,8 +919,19 @@ t7              opcode: CP_WAIT_FOR_IDLE (26) (1 dwords)
 	OUT_PKT4(ring, REG_A5XX_SP_MODE_CNTL, 1);
 	OUT_RING(ring, 0x0000001e);   /* SP_MODE_CNTL */
 
-	OUT_PKT4(ring, REG_A5XX_SP_DBG_ECO_CNTL, 1);
-	OUT_RING(ring, 0x40000800);   /* SP_DBG_ECO_CNTL */
+	if (ctx->screen->gpu_id == 540) {
+		OUT_PKT4(ring, REG_A5XX_SP_DBG_ECO_CNTL, 1);
+		OUT_RING(ring, 0x800);   /* SP_DBG_ECO_CNTL */
+
+		OUT_PKT4(ring, REG_A5XX_HLSQ_DBG_ECO_CNTL, 1);
+		OUT_RING(ring, 0x0);
+
+		OUT_PKT4(ring, REG_A5XX_VPC_DBG_ECO_CNTL, 1);
+		OUT_RING(ring, 0x800400);
+	} else {
+		OUT_PKT4(ring, REG_A5XX_SP_DBG_ECO_CNTL, 1);
+		OUT_RING(ring, 0x40000800);   /* SP_DBG_ECO_CNTL */
+	}
 
 	OUT_PKT4(ring, REG_A5XX_TPL1_MODE_CNTL, 1);
 	OUT_RING(ring, 0x00000544);   /* TPL1_MODE_CNTL */

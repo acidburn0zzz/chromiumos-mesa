@@ -771,6 +771,22 @@ v3d_create_sampler_state(struct pipe_context *pctx,
 }
 
 static void
+v3d_flag_dirty_sampler_state(struct v3d_context *v3d,
+                             enum pipe_shader_type shader)
+{
+        switch (shader) {
+        case PIPE_SHADER_VERTEX:
+                v3d->dirty |= VC5_DIRTY_VERTTEX;
+                break;
+        case PIPE_SHADER_FRAGMENT:
+                v3d->dirty |= VC5_DIRTY_FRAGTEX;
+                break;
+        default:
+                unreachable("Unsupported shader stage");
+        }
+}
+
+static void
 v3d_sampler_states_bind(struct pipe_context *pctx,
                         enum pipe_shader_type shader, unsigned start,
                         unsigned nr, void **hwcso)
@@ -793,6 +809,8 @@ v3d_sampler_states_bind(struct pipe_context *pctx,
         }
 
         stage_tex->num_samplers = new_nr;
+
+        v3d_flag_dirty_sampler_state(v3d, shader);
 }
 
 static void
@@ -846,6 +864,9 @@ v3d_setup_texture_shader_state(struct V3DX(TEXTURE_SHADER_STATE) *tex,
             prsc->target == PIPE_TEXTURE_1D_ARRAY) {
                 tex->image_height = tex->image_width >> 14;
         }
+
+        tex->image_width &= (1 << 14) - 1;
+        tex->image_height &= (1 << 14) - 1;
 #endif
 
         if (prsc->target == PIPE_TEXTURE_3D) {
@@ -1155,6 +1176,8 @@ v3d_set_sampler_views(struct pipe_context *pctx,
         }
 
         stage_tex->num_textures = new_nr;
+
+        v3d_flag_dirty_sampler_state(v3d, shader);
 }
 
 static struct pipe_stream_output_target *
@@ -1163,20 +1186,20 @@ v3d_create_stream_output_target(struct pipe_context *pctx,
                                 unsigned buffer_offset,
                                 unsigned buffer_size)
 {
-        struct pipe_stream_output_target *target;
+        struct v3d_stream_output_target *target;
 
-        target = CALLOC_STRUCT(pipe_stream_output_target);
+        target = CALLOC_STRUCT(v3d_stream_output_target);
         if (!target)
                 return NULL;
 
-        pipe_reference_init(&target->reference, 1);
-        pipe_resource_reference(&target->buffer, prsc);
+        pipe_reference_init(&target->base.reference, 1);
+        pipe_resource_reference(&target->base.buffer, prsc);
 
-        target->context = pctx;
-        target->buffer_offset = buffer_offset;
-        target->buffer_size = buffer_size;
+        target->base.context = pctx;
+        target->base.buffer_offset = buffer_offset;
+        target->base.buffer_size = buffer_size;
 
-        return target;
+        return &target->base;
 }
 
 static void
@@ -1218,7 +1241,8 @@ static void
 v3d_set_shader_buffers(struct pipe_context *pctx,
                        enum pipe_shader_type shader,
                        unsigned start, unsigned count,
-                       const struct pipe_shader_buffer *buffers)
+                       const struct pipe_shader_buffer *buffers,
+                       unsigned writable_bitmask)
 {
         struct v3d_context *v3d = v3d_context(pctx);
         struct v3d_ssbo_stateobj *so = &v3d->ssbo[shader];
