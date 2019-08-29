@@ -238,6 +238,25 @@ enum gbm_bo_flags {
     * Buffer is linear, i.e. not tiled.
     */
    GBM_BO_USE_LINEAR = (1 << 4),
+
+   /* Flags used in minigbm that are not implemented
+    * with mesagbm. Stub them out so they don't have to
+    * be removed from the various users (chrome).
+    */
+   GBM_BO_USE_TEXTURING = 0,
+   GBM_BO_USE_CAMERA_WRITE = 0,
+   GBM_BO_USE_CAMERA_READ = 0,
+   GBM_BO_USE_HW_VIDEO_DECODER = 0,
+
+   /* These are also minigbm flags that aren't implemented in mesagbm. In at
+    * least one place
+    * (platform/tast-tests/helpers/local/graphics.GBM.gbmtest.cc) they are
+    * used in a switch statement, so they can't all be zero. Instead, set them
+    * to the minigbm values. [OVER-9416] */
+   GBM_BO_USE_SW_READ_OFTEN = (1 << 9),
+   GBM_BO_USE_SW_READ_RARELY = (1 << 10),
+   GBM_BO_USE_SW_WRITE_OFTEN = (1 << 11),
+   GBM_BO_USE_SW_WRITE_RARELY = (1 << 12),
 };
 
 int
@@ -275,7 +294,11 @@ gbm_bo_create_with_modifiers(struct gbm_device *gbm,
 #define GBM_BO_IMPORT_WL_BUFFER         0x5501
 #define GBM_BO_IMPORT_EGL_IMAGE         0x5502
 #define GBM_BO_IMPORT_FD                0x5503
-#define GBM_BO_IMPORT_FD_MODIFIER       0x5504
+#define GBM_BO_IMPORT_FD_PLANAR         0x5504
+/* Moved GBM_BO_IMPORT_FD_MODIFIER from 0x5504 because
+ * of minigbm conflict OVER-6267
+ */
+#define GBM_BO_IMPORT_FD_MODIFIER       0x5507
 
 struct gbm_import_fd_data {
    int fd;
@@ -294,6 +317,20 @@ struct gbm_import_fd_modifier_data {
    int strides[4];
    int offsets[4];
    uint64_t modifier;
+};
+
+/* GBM_MAX_PLANES is part of the interface provided by minigbm. */
+#define GBM_MAX_PLANES 4
+
+/* Structure for GBM_BO_IMPORT_FD_PLANAR. */
+struct gbm_import_fd_planar_data {
+   int fds[GBM_MAX_PLANES];
+   uint32_t width;
+   uint32_t height;
+   uint32_t format;
+   uint32_t strides[GBM_MAX_PLANES];
+   uint32_t offsets[GBM_MAX_PLANES];
+   uint64_t format_modifiers[GBM_MAX_PLANES];
 };
 
 struct gbm_bo *
@@ -373,6 +410,35 @@ gbm_bo_get_plane_count(struct gbm_bo *bo);
 
 union gbm_bo_handle
 gbm_bo_get_handle_for_plane(struct gbm_bo *bo, int plane);
+
+// Neverware, copied from minigbm
+
+uint64_t
+gbm_bo_get_format_modifier(struct gbm_bo *bo);
+
+size_t
+gbm_bo_get_num_planes(struct gbm_bo *bo);
+
+// may not be needed?
+union gbm_bo_handle
+gbm_bo_get_plane_handle(struct gbm_bo *bo, size_t plane);
+
+int
+gbm_bo_get_plane_fd(struct gbm_bo *bo, size_t plane);
+
+uint32_t
+gbm_bo_get_plane_offset(struct gbm_bo *bo, size_t plane);
+
+uint32_t
+gbm_bo_get_plane_size(struct gbm_bo *bo, size_t plane);
+
+uint32_t
+gbm_bo_get_plane_stride(struct gbm_bo *bo, size_t plane);
+
+uint64_t
+gbm_bo_get_plane_format_modifier(struct gbm_bo *bo, size_t plane);
+
+// (end) Neverware
 
 int
 gbm_bo_write(struct gbm_bo *bo, const void *buf, size_t count);

@@ -753,6 +753,45 @@ gbm_dri_bo_get_handle_for_plane(struct gbm_bo *_bo, int plane)
 }
 
 static uint32_t
+gbm_dri_bo_get_height(struct gbm_bo *_bo, int plane)
+{
+   struct gbm_dri_device *dri = gbm_dri_device(_bo->gbm);
+   struct gbm_dri_bo *bo = gbm_dri_bo(_bo);
+   __DRIimage *image;
+   int height = 0;
+
+   if (!dri->image || dri->image->base.version < 11 || !dri->image->fromPlanar) {
+      /* Preserve legacy behavior if plane is 0 */
+      if (plane == 0)
+         return _bo->height;
+
+      errno = ENOSYS;
+      return 0;
+   }
+
+   if (plane >= get_number_planes(dri, bo->image)) {
+      errno = EINVAL;
+      return 0;
+   }
+
+   if (bo->image == NULL) {
+      assert(plane == 0);
+      return _bo->height;
+   }
+
+   image = dri->image->fromPlanar(bo->image, plane, NULL);
+   if (image) {
+      dri->image->queryImage(image, __DRI_IMAGE_ATTRIB_HEIGHT, &height);
+      dri->image->destroyImage(image);
+   } else {
+      assert(plane == 0);
+      dri->image->queryImage(bo->image, __DRI_IMAGE_ATTRIB_HEIGHT, &height);
+   }
+
+   return (uint32_t)height;
+}
+
+static uint32_t
 gbm_dri_bo_get_stride(struct gbm_bo *_bo, int plane)
 {
    struct gbm_dri_device *dri = gbm_dri_device(_bo->gbm);
@@ -989,6 +1028,65 @@ gbm_dri_bo_import(struct gbm_device *gbm,
                                                   fd_data->modifier,
                                                   fd_data->fds,
                                                   fd_data->num_fds,
+                                                  fd_data->strides,
+                                                  fd_data->offsets,
+                                                  0, 0, 0, 0,
+                                                  &error, NULL);
+      if (image == NULL) {
+         errno = ENOSYS;
+         return NULL;
+      }
+
+      gbm_format = fourcc;
+      break;
+   }
+
+   /* Minigbm style import with modifiers. */
+   case GBM_BO_IMPORT_FD_PLANAR:
+   {
+      struct gbm_import_fd_planar_data *fd_data = buffer;
+      unsigned int error;
+      unsigned int num_fds = 0;
+      unsigned i;
+      int fourcc;
+
+      /* Import with modifier requires createImageFromDmaBufs2 */
+      if (dri->image == NULL || dri->image->base.version < 15 ||
+          dri->image->createImageFromDmaBufs2 == NULL) {
+         errno = ENOSYS;
+         return NULL;
+      }
+
+      /* Determine the number of passed in planes. */
+      for (i = 0; i < GBM_MAX_PLANES; i++) {
+         /* minigbm checks a table of format to number of planes.
+          * Here, instead just consider this list -1 terminated.
+          */
+         if (fd_data->fds[i] == -1)
+            break;
+         num_fds++;
+      }
+      /* Minigbm supports passing in per-plane modifiers.
+       * Mesa does not support this.
+       * Warn the caller of this limitation by checking
+       * the passed in modifiers. It will just use
+       * the modifier from the first plane.
+       */
+      for (i = 1; i < num_fds; i++) {
+         if (fd_data->format_modifiers[i] != fd_data->format_modifiers[0])
+            fprintf(stderr, "Format modifiers differ between planes.\n");
+      }
+
+      /* GBM's GBM_FORMAT_* tokens are a strict superset of the DRI FourCC
+       * tokens accepted by createImageFromDmaBufs2, except for not supporting
+       * the sARGB format. */
+      fourcc = gbm_format_canonicalize(fd_data->format);
+
+      image = dri->image->createImageFromDmaBufs2(dri->screen, fd_data->width,
+                                                  fd_data->height, fourcc,
+                                                  fd_data->format_modifiers[0],
+                                                  fd_data->fds,
+                                                  num_fds,
                                                   fd_data->strides,
                                                   fd_data->offsets,
                                                   0, 0, 0, 0,
@@ -1376,6 +1474,7 @@ dri_device_create(int fd)
    dri->base.bo_get_fd = gbm_dri_bo_get_fd;
    dri->base.bo_get_planes = gbm_dri_bo_get_planes;
    dri->base.bo_get_handle = gbm_dri_bo_get_handle_for_plane;
+   dri->base.bo_get_height = gbm_dri_bo_get_height;
    dri->base.bo_get_stride = gbm_dri_bo_get_stride;
    dri->base.bo_get_offset = gbm_dri_bo_get_offset;
    dri->base.bo_get_modifier = gbm_dri_bo_get_modifier;
