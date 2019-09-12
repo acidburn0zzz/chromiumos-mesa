@@ -238,6 +238,7 @@ enum gbm_bo_flags {
    GBM_BO_USE_CAMERA_WRITE = 0,
    GBM_BO_USE_CAMERA_READ = 0,
    GBM_BO_USE_HW_VIDEO_DECODER = 0,
+   GBM_BO_USE_HW_VIDEO_ENCODER = 0,
 
    /* These are also minigbm flags that aren't implemented in mesagbm. In at
     * least one place
