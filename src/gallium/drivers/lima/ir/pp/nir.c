@@ -27,6 +27,8 @@
 #include "util/ralloc.h"
 #include "util/bitscan.h"
 #include "compiler/nir/nir.h"
+#include "pipe/p_state.h"
+
 
 #include "ppir.h"
 
@@ -109,8 +111,7 @@ static void ppir_node_add_src(ppir_compiler *comp, ppir_node *node,
       }
    }
 
-   ppir_dest *dest = ppir_node_get_dest(child);
-   ppir_node_target_assign(ps, dest);
+   ppir_node_target_assign(ps, child);
 }
 
 static int nir_to_ppir_opcodes[nir_num_opcodes] = {
@@ -122,9 +123,8 @@ static int nir_to_ppir_opcodes[nir_num_opcodes] = {
    [nir_op_fabs] = ppir_op_abs,
    [nir_op_fneg] = ppir_op_neg,
    [nir_op_fadd] = ppir_op_add,
-   [nir_op_fdot2] = ppir_op_dot2,
-   [nir_op_fdot3] = ppir_op_dot3,
-   [nir_op_fdot4] = ppir_op_dot4,
+   [nir_op_fsum3] = ppir_op_sum3,
+   [nir_op_fsum4] = ppir_op_sum4,
    [nir_op_frsq] = ppir_op_rsqrt,
    [nir_op_flog2] = ppir_op_log2,
    [nir_op_fexp2] = ppir_op_exp2,
@@ -149,6 +149,8 @@ static int nir_to_ppir_opcodes[nir_num_opcodes] = {
    [nir_op_inot] = ppir_op_not,
    [nir_op_ftrunc] = ppir_op_trunc,
    [nir_op_fsat] = ppir_op_sat,
+   [nir_op_fddx] = ppir_op_ddx,
+   [nir_op_fddy] = ppir_op_ddy,
 };
 
 static ppir_node *ppir_emit_alu(ppir_block *block, nir_instr *ni)
@@ -173,13 +175,10 @@ static ppir_node *ppir_emit_alu(ppir_block *block, nir_instr *ni)
 
    unsigned src_mask;
    switch (op) {
-   case ppir_op_dot2:
-      src_mask = 0b0011;
-      break;
-   case ppir_op_dot3:
+   case ppir_op_sum3:
       src_mask = 0b0111;
       break;
-   case ppir_op_dot4:
+   case ppir_op_sum4:
       src_mask = 0b1111;
       break;
    default:
@@ -275,21 +274,28 @@ static ppir_node *ppir_emit_intrinsic(ppir_block *block, nir_instr *ni)
       return &lnode->node;
 
    case nir_intrinsic_load_frag_coord:
-      if (!instr->dest.is_ssa)
-         mask = u_bit_consecutive(0, instr->num_components);
-
-      lnode = ppir_node_create_dest(block, ppir_op_load_fragcoord, &instr->dest, mask);
-      if (!lnode)
-         return NULL;
-
-      lnode->num_components = instr->num_components;
-      return &lnode->node;
-
    case nir_intrinsic_load_point_coord:
+   case nir_intrinsic_load_front_face:
       if (!instr->dest.is_ssa)
          mask = u_bit_consecutive(0, instr->num_components);
 
-      lnode = ppir_node_create_dest(block, ppir_op_load_pointcoord, &instr->dest, mask);
+      ppir_op op;
+      switch (instr->intrinsic) {
+      case nir_intrinsic_load_frag_coord:
+         op = ppir_op_load_fragcoord;
+         break;
+      case nir_intrinsic_load_point_coord:
+         op = ppir_op_load_pointcoord;
+         break;
+      case nir_intrinsic_load_front_face:
+         op = ppir_op_load_frontface;
+         break;
+      default:
+         assert(0);
+         break;
+      }
+
+      lnode = ppir_node_create_dest(block, op, &instr->dest, mask);
       if (!lnode)
          return NULL;
 
@@ -382,7 +388,7 @@ static ppir_node *ppir_emit_tex(ppir_block *block, nir_instr *ni)
    case GLSL_SAMPLER_DIM_EXTERNAL:
       break;
    default:
-      ppir_debug("unsupported sampler dim: %d\n", instr->sampler_dim);
+      ppir_error("unsupported sampler dim: %d\n", instr->sampler_dim);
       return NULL;
    }
 
@@ -391,7 +397,6 @@ static ppir_node *ppir_emit_tex(ppir_block *block, nir_instr *ni)
    for (int i = 0; i < instr->coord_components; i++)
          node->src_coords.swizzle[i] = i;
 
-   assert(instr->num_srcs == 1);
    for (int i = 0; i < instr->num_srcs; i++) {
       switch (instr->src[i].src_type) {
       case nir_tex_src_coord:
@@ -399,7 +404,8 @@ static ppir_node *ppir_emit_tex(ppir_block *block, nir_instr *ni)
                            u_bit_consecutive(0, instr->coord_components));
          break;
       default:
-         ppir_debug("unknown texture source");
+         ppir_error("unsupported texture source type\n");
+         assert(0);
          return NULL;
       }
    }
@@ -559,8 +565,30 @@ static void ppir_add_ordering_deps(ppir_compiler *comp)
    }
 }
 
+static void ppir_print_shader_db(struct nir_shader *nir, ppir_compiler *comp,
+                                 struct pipe_debug_callback *debug)
+{
+   const struct shader_info *info = &nir->info;
+   char *shaderdb;
+   int ret = asprintf(&shaderdb,
+                      "%s shader: %d inst, %d loops, %d:%d spills:fills\n",
+                      gl_shader_stage_name(info->stage),
+                      comp->cur_instr_index,
+                      comp->num_loops,
+                      comp->num_spills,
+                      comp->num_fills);
+   assert(ret >= 0);
+
+   if (lima_debug & LIMA_DEBUG_SHADERDB)
+      fprintf(stderr, "SHADER-DB: %s\n", shaderdb);
+
+   pipe_debug_message(debug, SHADER_INFO, "%s", shaderdb);
+   free(shaderdb);
+}
+
 bool ppir_compile_nir(struct lima_fs_shader_state *prog, struct nir_shader *nir,
-                      struct ra_regs *ra)
+                      struct ra_regs *ra,
+                      struct pipe_debug_callback *debug)
 {
    nir_function_impl *func = nir_shader_get_entrypoint(nir);
    ppir_compiler *comp = ppir_compiler_create(prog, func->reg_alloc, func->ssa_alloc);
@@ -607,6 +635,8 @@ bool ppir_compile_nir(struct lima_fs_shader_state *prog, struct nir_shader *nir,
 
    if (!ppir_codegen_prog(comp))
       goto err_out0;
+
+   ppir_print_shader_db(nir, comp, debug);
 
    ralloc_free(comp);
    return true;

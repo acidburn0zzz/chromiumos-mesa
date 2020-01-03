@@ -621,6 +621,8 @@ brw_initialize_context_constants(struct brw_context *brw)
    if (devinfo->gen >= 5 || devinfo->is_g4x)
       ctx->Const.MaxClipPlanes = 8;
 
+   ctx->Const.GLSLFragCoordIsSysVal = true;
+   ctx->Const.GLSLFrontFacingIsSysVal = true;
    ctx->Const.GLSLTessLevelsAsInputs = true;
    ctx->Const.PrimitiveRestartForPatches = true;
 
@@ -842,7 +844,7 @@ brw_process_driconf_options(struct brw_context *brw)
    driOptionCache *options = &brw->optionCache;
    driParseConfigFiles(options, &brw->screen->optionCache,
                        brw->driContext->driScreenPriv->myNum,
-                       "i965", NULL);
+                       "i965", NULL, NULL, 0);
 
    int bo_reuse_mode = driQueryOptioni(options, "bo_reuse");
    switch (bo_reuse_mode) {
@@ -962,6 +964,7 @@ brwCreateContext(gl_api api,
       *dri_ctx_error = __DRI_CTX_ERROR_NO_MEMORY;
       return false;
    }
+   brw->perf_ctx = gen_perf_new_context(brw);
 
    driContextPriv->driverPrivate = brw;
    brw->driContext = driContextPriv;
@@ -986,6 +989,13 @@ brwCreateContext(gl_api api,
 
    if (notify_reset)
       functions.GetGraphicsResetStatus = brw_get_graphics_reset_status;
+
+   brw_process_driconf_options(brw);
+
+   if (api == API_OPENGL_CORE &&
+       driQueryOptionb(&screen->optionCache, "force_compat_profile")) {
+      api = API_OPENGL_COMPAT;
+   }
 
    struct gl_context *ctx = &brw->ctx;
 
@@ -1020,8 +1030,6 @@ brwCreateContext(gl_api api,
    }
 
    _mesa_meta_init(ctx);
-
-   brw_process_driconf_options(brw);
 
    if (INTEL_DEBUG & DEBUG_PERF)
       brw->perf_debug = true;
@@ -1237,7 +1245,7 @@ intelDestroyContext(__DRIcontext * driContextPriv)
 GLboolean
 intelUnbindContext(__DRIcontext * driContextPriv)
 {
-   GET_CURRENT_CONTEXT(ctx);
+   struct gl_context *ctx = driContextPriv->driverPrivate;
    _mesa_glthread_finish(ctx);
 
    /* Unset current context and dispath table */

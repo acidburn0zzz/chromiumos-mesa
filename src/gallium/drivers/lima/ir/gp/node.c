@@ -58,6 +58,7 @@ const gpir_op_info gpir_op_infos[] = {
       .name = "complex2",
       .slots = (int []) { GPIR_INSTR_SLOT_MUL0, GPIR_INSTR_SLOT_END },
       .spillless = true,
+      .schedule_first = true,
    },
    [gpir_op_add] = {
       .name = "add",
@@ -140,25 +141,37 @@ const gpir_op_info gpir_op_infos[] = {
    },
    [gpir_op_preexp2] = {
       .name = "preexp2",
+      .slots = (int []) { GPIR_INSTR_SLOT_PASS, GPIR_INSTR_SLOT_END },
+      .spillless = true,
+      .schedule_first = true,
    },
    [gpir_op_postlog2] = {
       .name = "postlog2",
+      .slots = (int []) { GPIR_INSTR_SLOT_PASS, GPIR_INSTR_SLOT_END },
    },
    [gpir_op_exp2_impl] = {
       .name = "exp2_impl",
+      .slots = (int []) { GPIR_INSTR_SLOT_COMPLEX, GPIR_INSTR_SLOT_END },
+      .spillless = true,
+      .schedule_first = true,
    },
    [gpir_op_log2_impl] = {
       .name = "log2_impl",
+      .slots = (int []) { GPIR_INSTR_SLOT_COMPLEX, GPIR_INSTR_SLOT_END },
+      .spillless = true,
+      .schedule_first = true,
    },
    [gpir_op_rcp_impl] = {
       .name = "rcp_impl",
       .slots = (int []) { GPIR_INSTR_SLOT_COMPLEX, GPIR_INSTR_SLOT_END },
       .spillless = true,
+      .schedule_first = true,
    },
    [gpir_op_rsqrt_impl] = {
       .name = "rsqrt_impl",
       .slots = (int []) { GPIR_INSTR_SLOT_COMPLEX, GPIR_INSTR_SLOT_END },
       .spillless = true,
+      .schedule_first = true,
    },
    [gpir_op_load_uniform] = {
       .name = "ld_uni",

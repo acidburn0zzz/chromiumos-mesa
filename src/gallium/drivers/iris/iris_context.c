@@ -98,8 +98,10 @@ iris_lost_context_state(struct iris_batch *batch)
    }
 
    ice->state.dirty = ~0ull;
+   ice->state.current_hash_scale = 0;
    memset(ice->state.last_grid, 0, sizeof(ice->state.last_grid));
    batch->last_surface_base_address = ~0ull;
+   ice->vtbl.lost_genx_state(ice, batch);
 }
 
 static enum pipe_reset_status

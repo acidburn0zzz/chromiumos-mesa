@@ -145,7 +145,6 @@ enum {
 
 	/* Shader compiler options the shader cache should be aware of: */
 	DBG_FS_CORRECT_DERIVS_AFTER_KILL,
-	DBG_UNSAFE_MATH,
 	DBG_SI_SCHED,
 	DBG_GISEL,
 	DBG_W32_GE,
@@ -175,6 +174,8 @@ enum {
 	DBG_ZERO_VRAM,
 
 	/* 3D engine options: */
+	DBG_NO_GFX,
+	DBG_NO_NGG,
 	DBG_ALWAYS_PD,
 	DBG_PD,
 	DBG_NO_PD,
@@ -504,6 +505,8 @@ struct si_screen {
 	bool				dpbb_allowed;
 	bool				dfsm_allowed;
 	bool				llvm_has_working_vgpr_indexing;
+	bool				use_ngg;
+	bool				use_ngg_streamout;
 
 	struct {
 #define OPT_BOOL(name, dflt, description) bool name:1;
@@ -885,6 +888,9 @@ struct si_context {
 	void (*emit_cache_flush)(struct si_context *ctx);
 
 	struct blitter_context		*blitter;
+	void				*noop_blend;
+	void				*noop_dsa;
+	void				*discard_rasterizer_state;
 	void				*custom_dsa_flush;
 	void				*custom_blend_resolve;
 	void				*custom_blend_fmask_decompress;
@@ -1081,6 +1087,8 @@ struct si_context {
 	struct si_resource	*scratch_buffer;
 	unsigned		scratch_waves;
 	unsigned		spi_tmpring_size;
+	unsigned		max_seen_scratch_bytes_per_wave;
+	unsigned		max_seen_compute_scratch_bytes_per_wave;
 
 	struct si_resource	*compute_scratch_buffer;
 
@@ -1692,7 +1700,9 @@ si_make_CB_shader_coherent(struct si_context *sctx, unsigned num_samples,
 		       SI_CONTEXT_INV_VCACHE;
 
 	if (sctx->chip_class >= GFX10) {
-		if (shaders_read_metadata)
+		if (sctx->screen->info.tcc_harvested)
+			sctx->flags |= SI_CONTEXT_INV_L2;
+		else if (shaders_read_metadata)
 			sctx->flags |= SI_CONTEXT_INV_L2_METADATA;
 	} else if (sctx->chip_class == GFX9) {
 		/* Single-sample color is coherent with shaders on GFX9, but
@@ -1718,7 +1728,9 @@ si_make_DB_shader_coherent(struct si_context *sctx, unsigned num_samples,
 		       SI_CONTEXT_INV_VCACHE;
 
 	if (sctx->chip_class >= GFX10) {
-		if (shaders_read_metadata)
+		if (sctx->screen->info.tcc_harvested)
+			sctx->flags |= SI_CONTEXT_INV_L2;
+		else if (shaders_read_metadata)
 			sctx->flags |= SI_CONTEXT_INV_L2_METADATA;
 	} else if (sctx->chip_class == GFX9) {
 		/* Single-sample depth (not stencil) is coherent with shaders
@@ -1907,7 +1919,8 @@ static inline unsigned si_get_wave_size(struct si_screen *sscreen,
 		return sscreen->compute_wave_size;
 	else if (shader_type == PIPE_SHADER_FRAGMENT)
 		return sscreen->ps_wave_size;
-	else if ((shader_type == PIPE_SHADER_TESS_EVAL && es && !ngg) ||
+	else if ((shader_type == PIPE_SHADER_VERTEX && es && !ngg) ||
+		 (shader_type == PIPE_SHADER_TESS_EVAL && es && !ngg) ||
 		 (shader_type == PIPE_SHADER_GEOMETRY && !ngg)) /* legacy GS only supports Wave64 */
 		return 64;
 	else

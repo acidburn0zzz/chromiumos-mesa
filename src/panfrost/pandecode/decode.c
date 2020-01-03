@@ -30,6 +30,7 @@
 #include <stdbool.h>
 #include <stdarg.h>
 #include "decode.h"
+#include "util/macros.h"
 #include "util/u_math.h"
 
 #include "pan_pretty_print.h"
@@ -245,6 +246,16 @@ static const struct pandecode_flag_info mfbd_flag_info [] = {
 };
 #undef FLAG_INFO
 
+#define FLAG_INFO(flag) { MALI_SAMP_##flag, "MALI_SAMP_" #flag }
+static const struct pandecode_flag_info sampler_flag_info [] = {
+        FLAG_INFO(MAG_NEAREST),
+        FLAG_INFO(MIN_NEAREST),
+        FLAG_INFO(MIP_LINEAR_1),
+        FLAG_INFO(MIP_LINEAR_2),
+        FLAG_INFO(NORM_COORDS),
+        {}
+};
+#undef FLAG_INFO
 
 extern char *replace_fragment;
 extern char *replace_vertex;
@@ -371,6 +382,8 @@ static char *pandecode_attr_mode(enum mali_attr_mode mode)
                 DEFINE_CASE(POT_DIVIDE);
                 DEFINE_CASE(MODULO);
                 DEFINE_CASE(NPOT_DIVIDE);
+                DEFINE_CASE(IMAGE);
+                DEFINE_CASE(INTERNAL);
         default:
                 return "MALI_ATTR_UNUSED /* XXX: Unknown stencil op, check dump */";
         }
@@ -446,6 +459,22 @@ pandecode_mfbd_block_format(enum mali_mfbd_block_format fmt)
 }
 #undef DEFINE_CASE
 
+#define DEFINE_CASE(name) case MALI_EXCEPTION_ACCESS_## name: return ""#name
+static char *
+pandecode_exception_access(enum mali_exception_access fmt)
+{
+        switch (fmt) {
+                DEFINE_CASE(NONE);
+                DEFINE_CASE(EXECUTE);
+                DEFINE_CASE(READ);
+                DEFINE_CASE(WRITE);
+
+        default:
+                unreachable("Invalid case");
+        }
+}
+#undef DEFINE_CASE
+
 /* Midgard's tiler descriptor is embedded within the
  * larger FBD */
 
@@ -466,7 +495,7 @@ pandecode_midgard_tiler_descriptor(const struct midgard_tiler_descriptor *t)
 
         if (t->heap_start == t->heap_end) {
               /* Print identically to show symmetry for empty tiler heaps */  
-                MEMORY_PROP(t, heap_start);
+                MEMORY_PROP(t, heap_end);
         } else {
                 /* Points to the end of a buffer */
                 char *a = pointer_as_memory_reference(t->heap_end - 1);
@@ -639,7 +668,10 @@ pandecode_rt_format(struct mali_rt_format format)
 
         pandecode_swizzle(format.swizzle);
 
-        pandecode_prop("unk4 = 0x%" PRIx32, format.unk4);
+        pandecode_prop("no_preload = 0x%" PRIx32, format.no_preload);
+
+        if (format.zero)
+                pandecode_prop("zero = 0x%" PRIx32, format.zero);
 
         pandecode_indent--;
         pandecode_log("},\n");
@@ -983,6 +1015,11 @@ pandecode_attributes(const struct pandecode_mapped_memory *mem,
 {
         char *prefix = varying ? "varyings" : "attributes";
 
+        if (!addr) {
+                pandecode_msg("no %s\n", prefix);
+                return;
+        }
+
         union mali_attr *attr = pandecode_fetch_gpu_mem(mem, addr, sizeof(union mali_attr) * count);
 
         char base[128];
@@ -1242,7 +1279,7 @@ pandecode_attribute_meta(int job_no, int count, const struct mali_vertex_tiler_p
         pandecode_indent--;
         pandecode_log("};\n");
 
-        return max_index;
+        return count ? (max_index + 1) : 0;
 }
 
 static void
@@ -1322,8 +1359,8 @@ pandecode_vertex_tiler_prefix(struct mali_vertex_tiler_prefix *p, int job_no)
         if (p->index_count)
                 pandecode_prop("index_count = MALI_POSITIVE(%" PRId32 ")", p->index_count + 1);
 
-        if (p->negative_start)
-                pandecode_prop("negative_start = %d", p->negative_start);
+        if (p->offset_bias_correction)
+                pandecode_prop("offset_bias_correction = %d", p->offset_bias_correction);
 
         DYN_MEMORY_PROP(p, job_no, indices);
 
@@ -1410,9 +1447,11 @@ pandecode_scratchpad(uintptr_t pscratchpad, int job_no, char *suffix)
         pandecode_log("};\n");
 }
 
+static unsigned shader_id = 0;
+
 static void
 pandecode_shader_disassemble(mali_ptr shader_ptr, int shader_no, int type,
-                             bool is_bifrost)
+                             bool is_bifrost, unsigned nr_regs)
 {
         struct pandecode_mapped_memory *mem = pandecode_find_mapped_gpu_mem_containing(shader_ptr);
         uint8_t *PANDECODE_PTR_VAR(code, mem, shader_ptr);
@@ -1425,10 +1464,16 @@ pandecode_shader_disassemble(mali_ptr shader_ptr, int shader_no, int type,
 
         printf("\n\n");
 
+        char prefix[512];
+
+        snprintf(prefix, sizeof(prefix) - 1, "shader%d - %s shader: ",
+                        shader_id++,
+                        (type == JOB_TYPE_TILER) ? "FRAGMENT" : "VERTEX");
+
         if (is_bifrost) {
                 disassemble_bifrost(code, sz, false);
         } else {
-                disassemble_midgard(code, sz);
+                disassemble_midgard(code, sz, true, nr_regs, prefix);
         }
 
         printf("\n\n");
@@ -1489,6 +1534,8 @@ pandecode_vertex_tiler_postfix_pre(const struct mali_vertex_tiler_postfix *p,
                 pandecode_prop("attribute_count = %" PRId16, s->attribute_count);
                 pandecode_prop("varying_count = %" PRId16, s->varying_count);
 
+                unsigned nr_registers = 0;
+
                 if (is_bifrost) {
                         pandecode_log(".bifrost1 = {\n");
                         pandecode_indent++;
@@ -1505,6 +1552,7 @@ pandecode_vertex_tiler_postfix_pre(const struct mali_vertex_tiler_postfix *p,
                         pandecode_prop("uniform_count = %" PRId16, s->midgard1.uniform_count);
                         pandecode_prop("uniform_buffer_count = %" PRId16, s->midgard1.uniform_buffer_count);
                         pandecode_prop("work_count = %" PRId16, s->midgard1.work_count);
+                        nr_registers = s->midgard1.work_count;
 
                         pandecode_log(".flags = ");
                         pandecode_log_decoded_flags(shader_midgard1_flag_info, s->midgard1.flags);
@@ -1609,12 +1657,12 @@ pandecode_vertex_tiler_postfix_pre(const struct mali_vertex_tiler_postfix *p,
                                         shader = pandecode_midgard_blend_mrt(blend_base, job_no, i);
 
                                 if (shader & ~0xF)
-                                        pandecode_shader_disassemble(shader, job_no, job_type, false);
+                                        pandecode_shader_disassemble(shader, job_no, job_type, false, 0);
                         }
                 }
 
                 if (shader_ptr & ~0xF)
-                   pandecode_shader_disassemble(shader_ptr, job_no, job_type, is_bifrost);
+                   pandecode_shader_disassemble(shader_ptr, job_no, job_type, is_bifrost, nr_registers);
         } else
                 pandecode_msg("<no shader>\n");
 
@@ -1655,17 +1703,17 @@ pandecode_vertex_tiler_postfix_pre(const struct mali_vertex_tiler_postfix *p,
          * pass a zero buffer with the right stride/size set, (or whatever)
          * since the GPU will write to it itself */
 
+        if (p->varying_meta) {
+                varying_count = pandecode_attribute_meta(job_no, varying_count, p, true, suffix);
+        }
+
         if (p->varyings) {
                 attr_mem = pandecode_find_mapped_gpu_mem_containing(p->varyings);
 
                 /* Number of descriptors depends on whether there are
                  * non-internal varyings */
 
-                pandecode_attributes(attr_mem, p->varyings, job_no, suffix, varying_count > 1 ? 4 : 1, true);
-        }
-
-        if (p->varying_meta) {
-                pandecode_attribute_meta(job_no, varying_count, p, true, suffix);
+                pandecode_attributes(attr_mem, p->varyings, job_no, suffix, varying_count, true);
         }
 
         bool is_compute = job_type == JOB_TYPE_COMPUTE;
@@ -1864,11 +1912,9 @@ pandecode_vertex_tiler_postfix_pre(const struct mali_vertex_tiler_postfix *p,
                                 pandecode_log("struct mali_sampler_descriptor sampler_descriptor_%"PRIx64"_%d_%d = {\n", d + sizeof(*s) * i, job_no, i);
                                 pandecode_indent++;
 
-                                /* Only the lower two bits are understood right now; the rest we display as hex */
-                                pandecode_log(".filter_mode = MALI_TEX_MIN(%s) | MALI_TEX_MAG(%s) | 0x%" PRIx32",\n",
-                                              MALI_FILTER_NAME(s->filter_mode & MALI_TEX_MIN_MASK),
-                                              MALI_FILTER_NAME(s->filter_mode & MALI_TEX_MAG_MASK),
-                                              s->filter_mode & ~3);
+                                pandecode_log(".filter_mode = ");
+                                pandecode_log_decoded_flags(sampler_flag_info, s->filter_mode);
+                                pandecode_log_cont(",\n");
 
                                 pandecode_prop("min_lod = FIXED_16(%f)", DECODE_FIXED_16(s->min_lod));
                                 pandecode_prop("max_lod = FIXED_16(%f)", DECODE_FIXED_16(s->max_lod));
@@ -2171,8 +2217,8 @@ pandecode_vertex_or_tiler_job_mdg(const struct mali_job_descriptor_header *h,
                 pandecode_padded_vertices(v->instance_shift, v->instance_odd);
         }
 
-        if (v->draw_start)
-                pandecode_prop("draw_start = %d", v->draw_start);
+        if (v->offset_start)
+                pandecode_prop("offset_start = %d", v->offset_start);
 
         if (v->zero5) {
                 pandecode_msg("Zero tripped\n");
@@ -2244,10 +2290,15 @@ pandecode_fragment_job(const struct pandecode_mapped_memory *mem,
 
         const char *fbd_type = s->framebuffer & MALI_MFBD ? "MALI_MFBD" : "MALI_SFBD";
 
+        /* TODO: Decode */
+        unsigned extra_flags = (s->framebuffer & ~FBD_MASK) & ~MALI_MFBD;
+
         if (fbd_dumped)
-                pandecode_prop("framebuffer = framebuffer_%d_p | %s", job_no, fbd_type);
+                pandecode_prop("framebuffer = framebuffer_%d_p | %s | 0x%X", job_no,
+                                fbd_type, extra_flags);
         else
-                pandecode_prop("framebuffer = %s | %s", pointer_as_memory_reference(p), fbd_type);
+                pandecode_prop("framebuffer = %s | %s | 0x%X", pointer_as_memory_reference(p),
+                                fbd_type, extra_flags);
 
         pandecode_indent--;
         pandecode_log("};\n");
@@ -2303,10 +2354,10 @@ pandecode_jc(mali_ptr jc_gpu_va, bool bifrost)
                         pandecode_prop("job_descriptor_size = %d", h->job_descriptor_size);
 
                 if (h->exception_status != 0x1)
-                        pandecode_prop("exception_status = %x (source ID: 0x%x access: 0x%x exception: 0x%x)",
+                        pandecode_prop("exception_status = %x (source ID: 0x%x access: %s exception: 0x%x)",
                                        h->exception_status,
                                        (h->exception_status >> 16) & 0xFFFF,
-                                       (h->exception_status >> 8) & 0x3,
+                                       pandecode_exception_access((h->exception_status >> 8) & 0x3),
                                        h->exception_status  & 0xFF);
 
                 if (h->first_incomplete_task)

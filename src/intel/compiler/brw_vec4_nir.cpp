@@ -407,6 +407,7 @@ vec4_visitor::nir_emit_intrinsic(nir_intrinsic_instr *instr)
    switch (instr->intrinsic) {
 
    case nir_intrinsic_load_input: {
+      assert(nir_dest_bit_size(instr->dest) == 32);
       /* We set EmitNoIndirectInput for VS */
       unsigned load_offset = nir_src_as_uint(instr->src[0]);
 
@@ -417,53 +418,22 @@ vec4_visitor::nir_emit_intrinsic(nir_intrinsic_instr *instr)
                     glsl_type::uvec4_type);
       src = retype(src, dest.type);
 
-      bool is_64bit = nir_dest_bit_size(instr->dest) == 64;
-      if (is_64bit) {
-         dst_reg tmp = dst_reg(this, glsl_type::dvec4_type);
-         src.swizzle = BRW_SWIZZLE_XYZW;
-         shuffle_64bit_data(tmp, src, false);
-         emit(MOV(dest, src_reg(tmp)));
-      } else {
-         /* Swizzle source based on component layout qualifier */
-         src.swizzle = BRW_SWZ_COMP_INPUT(nir_intrinsic_component(instr));
-         emit(MOV(dest, src));
-      }
+      /* Swizzle source based on component layout qualifier */
+      src.swizzle = BRW_SWZ_COMP_INPUT(nir_intrinsic_component(instr));
+      emit(MOV(dest, src));
       break;
    }
 
    case nir_intrinsic_store_output: {
+      assert(nir_src_bit_size(instr->src[0]) == 32);
       unsigned store_offset = nir_src_as_uint(instr->src[1]);
       int varying = instr->const_index[0] + store_offset;
-
-      bool is_64bit = nir_src_bit_size(instr->src[0]) == 64;
-      if (is_64bit) {
-         src_reg data;
-         src = get_nir_src(instr->src[0], BRW_REGISTER_TYPE_DF,
-                           instr->num_components);
-         data = src_reg(this, glsl_type::dvec4_type);
-         shuffle_64bit_data(dst_reg(data), src, true);
-         src = retype(data, BRW_REGISTER_TYPE_F);
-      } else {
-         src = get_nir_src(instr->src[0], BRW_REGISTER_TYPE_F,
-                           instr->num_components);
-      }
+      src = get_nir_src(instr->src[0], BRW_REGISTER_TYPE_F,
+                        instr->num_components);
 
       unsigned c = nir_intrinsic_component(instr);
       output_reg[varying][c] = dst_reg(src);
       output_num_components[varying][c] = instr->num_components;
-
-      unsigned num_components = instr->num_components;
-      if (is_64bit)
-         num_components *= 2;
-
-      output_reg[varying][c] = dst_reg(src);
-      output_num_components[varying][c] = MIN2(4, num_components);
-
-      if (is_64bit && num_components > 4) {
-         assert(num_components <= 8);
-         output_reg[varying + 1][c] = byte_offset(dst_reg(src), REG_SIZE);
-         output_num_components[varying + 1][c] = num_components - 4;
-      }
       break;
    }
 
@@ -816,45 +786,6 @@ brw_swizzle_for_nir_swizzle(uint8_t swizzle[4])
    return BRW_SWIZZLE4(swizzle[0], swizzle[1], swizzle[2], swizzle[3]);
 }
 
-static enum brw_conditional_mod
-brw_conditional_for_nir_comparison(nir_op op)
-{
-   switch (op) {
-   case nir_op_flt32:
-   case nir_op_ilt32:
-   case nir_op_ult32:
-      return BRW_CONDITIONAL_L;
-
-   case nir_op_fge32:
-   case nir_op_ige32:
-   case nir_op_uge32:
-      return BRW_CONDITIONAL_GE;
-
-   case nir_op_feq32:
-   case nir_op_ieq32:
-   case nir_op_b32all_fequal2:
-   case nir_op_b32all_iequal2:
-   case nir_op_b32all_fequal3:
-   case nir_op_b32all_iequal3:
-   case nir_op_b32all_fequal4:
-   case nir_op_b32all_iequal4:
-      return BRW_CONDITIONAL_Z;
-
-   case nir_op_fne32:
-   case nir_op_ine32:
-   case nir_op_b32any_fnequal2:
-   case nir_op_b32any_inequal2:
-   case nir_op_b32any_fnequal3:
-   case nir_op_b32any_inequal3:
-   case nir_op_b32any_fnequal4:
-   case nir_op_b32any_inequal4:
-      return BRW_CONDITIONAL_NZ;
-
-   default:
-      unreachable("not reached: bad operation for comparison");
-   }
-}
-
 bool
 vec4_visitor::optimize_predicate(nir_alu_instr *instr,
                                  enum brw_predicate *predicate)
@@ -905,7 +836,7 @@ vec4_visitor::optimize_predicate(nir_alu_instr *instr,
    }
 
    emit(CMP(dst_null_d(), op[0], op[1],
-            brw_conditional_for_nir_comparison(cmp_instr->op)));
+            brw_cmod_for_nir_comparison(cmp_instr->op)));
 
    return true;
 }
@@ -1032,7 +963,7 @@ vec4_visitor::emit_conversion_to_double(dst_reg dst, src_reg src,
 static int
 try_immediate_source(const nir_alu_instr *instr, src_reg *op,
                      bool try_src0_also,
-                     MAYBE_UNUSED const gen_device_info *devinfo)
+                     ASSERTED const gen_device_info *devinfo)
 {
    unsigned idx;
 
@@ -1559,7 +1490,7 @@ vec4_visitor::nir_emit_alu(nir_alu_instr *instr)
    case nir_op_feq32:
    case nir_op_fne32: {
       enum brw_conditional_mod conditional_mod =
-         brw_conditional_for_nir_comparison(instr->op);
+         brw_cmod_for_nir_comparison(instr->op);
 
       if (nir_src_bit_size(instr->src[0].src) < 64) {
          /* If the order of the sources is changed due to an immediate value,
@@ -1596,7 +1527,7 @@ vec4_visitor::nir_emit_alu(nir_alu_instr *instr)
          brw_swizzle_for_size(nir_op_infos[instr->op].input_sizes[0]);
 
       emit(CMP(dst_null_d(), swizzle(op[0], swiz), swizzle(op[1], swiz),
-               brw_conditional_for_nir_comparison(instr->op)));
+               brw_cmod_for_nir_comparison(instr->op)));
       emit(MOV(dst, brw_imm_d(0)));
       inst = emit(MOV(dst, brw_imm_d(~0)));
       inst->predicate = BRW_PREDICATE_ALIGN16_ALL4H;
@@ -1615,7 +1546,7 @@ vec4_visitor::nir_emit_alu(nir_alu_instr *instr)
          brw_swizzle_for_size(nir_op_infos[instr->op].input_sizes[0]);
 
       emit(CMP(dst_null_d(), swizzle(op[0], swiz), swizzle(op[1], swiz),
-               brw_conditional_for_nir_comparison(instr->op)));
+               brw_cmod_for_nir_comparison(instr->op)));
 
       emit(MOV(dst, brw_imm_d(0)));
       inst = emit(MOV(dst, brw_imm_d(~0)));
@@ -2047,7 +1978,7 @@ vec4_visitor::nir_emit_alu(nir_alu_instr *instr)
       break;
 
    case nir_op_fdph_replicated:
-      try_immediate_source(instr, op, true, devinfo);
+      try_immediate_source(instr, op, false, devinfo);
       inst = emit(BRW_OPCODE_DPH, dst, op[0], op[1]);
       inst->saturate = instr->dest.saturate;
       break;

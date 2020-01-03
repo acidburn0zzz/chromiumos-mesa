@@ -590,23 +590,6 @@ set_image_fast_clear_state(struct anv_cmd_buffer *cmd_buffer,
       set_image_compressed_bit(cmd_buffer, image, aspect, 0, 0, 1, true);
 }
 
-#if GEN_IS_HASWELL || GEN_GEN >= 8
-static inline uint32_t
-mi_alu(uint32_t opcode, uint32_t operand1, uint32_t operand2)
-{
-   struct GENX(MI_MATH_ALU_INSTRUCTION) instr = {
-      .ALUOpcode = opcode,
-      .Operand1 = operand1,
-      .Operand2 = operand2,
-   };
-
-   uint32_t dw;
-   GENX(MI_MATH_ALU_INSTRUCTION_pack)(NULL, &dw, &instr);
-
-   return dw;
-}
-#endif
-
 /* This is only really practical on haswell and above because it requires
  * MI math in order to get it correct.
  */
@@ -1612,6 +1595,7 @@ genX(CmdExecuteCommands)(
     */
    primary->state.current_pipeline = UINT32_MAX;
    primary->state.current_l3_config = NULL;
+   primary->state.current_hash_scale = 0;
 
    /* Each of the secondary command buffers will use its own state base
     * address.  We need to re-emit state base address for the primary after
@@ -1731,7 +1715,7 @@ genX(cmd_buffer_config_l3)(struct anv_cmd_buffer *cmd_buffer,
    assert(!urb_low_bw || cfg->n[GEN_L3P_URB] == cfg->n[GEN_L3P_SLM]);
 
    /* Minimum number of ways that can be allocated to the URB. */
-   MAYBE_UNUSED const unsigned n0_urb = devinfo->is_baytrail ? 32 : 0;
+   const unsigned n0_urb = devinfo->is_baytrail ? 32 : 0;
    assert(cfg->n[GEN_L3P_URB] >= n0_urb);
 
    uint32_t l3sqcr1, l3cr2, l3cr3;
@@ -2569,20 +2553,12 @@ cmd_buffer_flush_push_constants(struct anv_cmd_buffer *cmd_buffer,
                const struct anv_pipeline_binding *binding =
                   &bind_map->surface_to_descriptor[surface];
 
-               struct anv_address read_addr;
-               uint32_t read_len;
+               struct anv_address addr;
                if (binding->set == ANV_DESCRIPTOR_SET_SHADER_CONSTANTS) {
-                  struct anv_address constant_data = {
+                  addr = (struct anv_address) {
                      .bo = pipeline->device->dynamic_state_pool.block_pool.bo,
                      .offset = pipeline->shaders[stage]->constant_data.offset,
                   };
-                  unsigned constant_data_size =
-                     pipeline->shaders[stage]->constant_data_size;
-
-                  read_len = MIN2(range->length,
-                     DIV_ROUND_UP(constant_data_size, 32) - range->start);
-                  read_addr = anv_address_add(constant_data,
-                                              range->start * 32);
                } else if (binding->set == ANV_DESCRIPTOR_SET_DESCRIPTORS) {
                   /* This is a descriptor set buffer so the set index is
                    * actually given by binding->binding.  (Yes, that's
@@ -2590,45 +2566,27 @@ cmd_buffer_flush_push_constants(struct anv_cmd_buffer *cmd_buffer,
                    */
                   struct anv_descriptor_set *set =
                      gfx_state->base.descriptors[binding->binding];
-                  struct anv_address desc_buffer_addr =
-                     anv_descriptor_set_address(cmd_buffer, set);
-                  const unsigned desc_buffer_size = set->desc_mem.alloc_size;
-
-                  read_len = MIN2(range->length,
-                     DIV_ROUND_UP(desc_buffer_size, 32) - range->start);
-                  read_addr = anv_address_add(desc_buffer_addr,
-                                              range->start * 32);
+                  addr = anv_descriptor_set_address(cmd_buffer, set);
                } else {
                   const struct anv_descriptor *desc =
                      anv_descriptor_for_binding(&gfx_state->base, binding);
 
                   if (desc->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
-                     read_len = MIN2(range->length,
-                        DIV_ROUND_UP(desc->buffer_view->range, 32) - range->start);
-                     read_addr = anv_address_add(desc->buffer_view->address,
-                                                 range->start * 32);
+                     addr = desc->buffer_view->address;
                   } else {
                      assert(desc->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC);
 
                      uint32_t dynamic_offset =
                         dynamic_offset_for_binding(&gfx_state->base, binding);
-                     uint32_t buf_offset =
-                        MIN2(desc->offset + dynamic_offset, desc->buffer->size);
-                     uint32_t buf_range =
-                        MIN2(desc->range, desc->buffer->size - buf_offset);
-
-                     read_len = MIN2(range->length,
-                        DIV_ROUND_UP(buf_range, 32) - range->start);
-                     read_addr = anv_address_add(desc->buffer->address,
-                                                 buf_offset + range->start * 32);
+                     addr = anv_address_add(desc->buffer->address,
+                                            desc->offset + dynamic_offset);
                   }
                }
 
-               if (read_len > 0) {
-                  c.ConstantBody.Buffer[n] = read_addr;
-                  c.ConstantBody.ReadLength[n] = read_len;
-                  n--;
-               }
+               c.ConstantBody.Buffer[n] =
+                  anv_address_add(addr, range->start * 32);
+               c.ConstantBody.ReadLength[n] = range->length;
+               n--;
             }
 
             struct anv_state state =
@@ -2679,6 +2637,8 @@ genX(cmd_buffer_flush_state)(struct anv_cmd_buffer *cmd_buffer)
    assert((pipeline->active_stages & VK_SHADER_STAGE_COMPUTE_BIT) == 0);
 
    genX(cmd_buffer_config_l3)(cmd_buffer, pipeline->urb.l3_config);
+
+   genX(cmd_buffer_emit_hashing_mode)(cmd_buffer, UINT_MAX, UINT_MAX, 1);
 
    genX(flush_pipeline_select_3d)(cmd_buffer);
 
@@ -3540,7 +3500,7 @@ void
 genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
 {
    struct anv_pipeline *pipeline = cmd_buffer->state.compute.base.pipeline;
-   MAYBE_UNUSED VkResult result;
+   VkResult result;
 
    assert(pipeline->active_stages == VK_SHADER_STAGE_COMPUTE_BIT);
 
@@ -3827,6 +3787,32 @@ genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
       anv_batch_emit(&cmd_buffer->batch, GENX(3DSTATE_CC_STATE_POINTERS), t);
 #endif
 
+#if GEN_GEN == 9
+   if (pipeline == _3D) {
+      /* There is a mid-object preemption workaround which requires you to
+       * re-emit MEDIA_VFE_STATE after switching from GPGPU to 3D.  However,
+       * even without preemption, we have issues with geometry flickering when
+       * GPGPU and 3D are back-to-back and this seems to fix it.  We don't
+       * really know why.
+       */
+      const uint32_t subslices =
+         MAX2(cmd_buffer->device->instance->physicalDevice.subslice_total, 1);
+      anv_batch_emit(&cmd_buffer->batch, GENX(MEDIA_VFE_STATE), vfe) {
+         vfe.MaximumNumberofThreads =
+            devinfo->max_cs_threads * subslices - 1;
+         vfe.NumberofURBEntries     = 2;
+         vfe.URBEntryAllocationSize = 2;
+      }
+
+      /* We just emitted a dummy MEDIA_VFE_STATE so now that packet is
+       * invalid. Set the compute pipeline to dirty to force a re-emit of the
+       * pipeline in case we get back-to-back dispatch calls with the same
+       * pipeline and a PIPELINE_SELECT in between.
+       */
+      cmd_buffer->state.compute.pipeline_dirty = true;
+   }
+#endif
+
    /* From "BXML » GT » MI » vol1a GPU Overview » [Instruction]
     * PIPELINE_SELECT [DevBWR+]":
     *
@@ -3921,6 +3907,98 @@ genX(cmd_buffer_emit_gen7_depth_flush)(struct anv_cmd_buffer *cmd_buffer)
    anv_batch_emit(&cmd_buffer->batch, GENX(PIPE_CONTROL), pipe) {
       pipe.DepthStallEnable = true;
    }
+}
+
+/**
+ * Update the pixel hashing modes that determine the balancing of PS threads
+ * across subslices and slices.
+ *
+ * \param width Width bound of the rendering area (already scaled down if \p
+ *              scale is greater than 1).
+ * \param height Height bound of the rendering area (already scaled down if \p
+ *               scale is greater than 1).
+ * \param scale The number of framebuffer samples that could potentially be
+ *              affected by an individual channel of the PS thread.  This is
+ *              typically one for single-sampled rendering, but for operations
+ *              like CCS resolves and fast clears a single PS invocation may
+ *              update a huge number of pixels, in which case a finer
+ *              balancing is desirable in order to maximally utilize the
+ *              bandwidth available.  UINT_MAX can be used as shorthand for
+ *              "finest hashing mode available".
+ */
+void
+genX(cmd_buffer_emit_hashing_mode)(struct anv_cmd_buffer *cmd_buffer,
+                                   unsigned width, unsigned height,
+                                   unsigned scale)
+{
+#if GEN_GEN == 9
+   const struct gen_device_info *devinfo = &cmd_buffer->device->info;
+   const unsigned slice_hashing[] = {
+      /* Because all Gen9 platforms with more than one slice require
+       * three-way subslice hashing, a single "normal" 16x16 slice hashing
+       * block is guaranteed to suffer from substantial imbalance, with one
+       * subslice receiving twice as much work as the other two in the
+       * slice.
+       *
+       * The performance impact of that would be particularly severe when
+       * three-way hashing is also in use for slice balancing (which is the
+       * case for all Gen9 GT4 platforms), because one of the slices
+       * receives one every three 16x16 blocks in either direction, which
+       * is roughly the periodicity of the underlying subslice imbalance
+       * pattern ("roughly" because in reality the hardware's
+       * implementation of three-way hashing doesn't do exact modulo 3
+       * arithmetic, which somewhat decreases the magnitude of this effect
+       * in practice).  This leads to a systematic subslice imbalance
+       * within that slice regardless of the size of the primitive.  The
+       * 32x32 hashing mode guarantees that the subslice imbalance within a
+       * single slice hashing block is minimal, largely eliminating this
+       * effect.
+       */
+      _32x32,
+      /* Finest slice hashing mode available. */
+      NORMAL
+   };
+   const unsigned subslice_hashing[] = {
+      /* 16x16 would provide a slight cache locality benefit especially
+       * visible in the sampler L1 cache efficiency of low-bandwidth
+       * non-LLC platforms, but it comes at the cost of greater subslice
+       * imbalance for primitives of dimensions approximately intermediate
+       * between 16x4 and 16x16.
+       */
+      _16x4,
+      /* Finest subslice hashing mode available. */
+      _8x4
+   };
+   /* Dimensions of the smallest hashing block of a given hashing mode.  If
+    * the rendering area is smaller than this there can't possibly be any
+    * benefit from switching to this mode, so we optimize out the
+    * transition.
+    */
+   const unsigned min_size[][2] = {
+         { 16, 4 },
+         { 8, 4 }
+   };
+   const unsigned idx = scale > 1;
+
+   if (cmd_buffer->state.current_hash_scale != scale &&
+       (width > min_size[idx][0] || height > min_size[idx][1])) {
+      uint32_t gt_mode;
+
+      anv_pack_struct(&gt_mode, GENX(GT_MODE),
+                      .SliceHashing = (devinfo->num_slices > 1 ? slice_hashing[idx] : 0),
+                      .SliceHashingMask = (devinfo->num_slices > 1 ? -1 : 0),
+                      .SubsliceHashing = subslice_hashing[idx],
+                      .SubsliceHashingMask = -1);
+
+      cmd_buffer->state.pending_pipe_bits |=
+         ANV_PIPE_CS_STALL_BIT | ANV_PIPE_STALL_AT_SCOREBOARD_BIT;
+      genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
+
+      emit_lri(&cmd_buffer->batch, GENX(GT_MODE_num), gt_mode);
+
+      cmd_buffer->state.current_hash_scale = scale;
+   }
+#endif
 }
 
 static void

@@ -739,7 +739,7 @@ static void si_set_shader_image_desc(struct si_context *ctx,
 		assert(fmask_desc || tex->surface.fmask_size == 0);
 
 		if (uses_dcc && !skip_decompress &&
-		    ((ctx->chip_class <= GFX9 && view->access & PIPE_IMAGE_ACCESS_WRITE) ||
+		    (view->access & PIPE_IMAGE_ACCESS_WRITE ||
 		     !vi_dcc_formats_compatible(screen, res->b.b.format, view->format))) {
 			/* If DCC can't be disabled, at least decompress it.
 			 * The decompression is relatively cheap if the surface
@@ -2321,7 +2321,7 @@ static void si_init_bindless_descriptors(struct si_context *sctx,
 					 short shader_userdata_rel_index,
 					 unsigned num_elements)
 {
-	MAYBE_UNUSED unsigned desc_slot;
+	ASSERTED unsigned desc_slot;
 
 	si_init_descriptors(desc, shader_userdata_rel_index, 16, num_elements);
 	sctx->bindless_descriptors.num_active_slots = num_elements;

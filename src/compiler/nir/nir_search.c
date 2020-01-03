@@ -472,7 +472,7 @@ construct_value(nir_builder *build,
        * expression we are replacing has any exact values, the entire
        * replacement should be exact.
        */
-      alu->exact = state->has_exact_alu;
+      alu->exact = state->has_exact_alu || expr->exact;
 
       for (unsigned i = 0; i < nir_op_infos[op].num_inputs; i++) {
          /* If the source is an explicitly sized source, then we need to reset
@@ -549,7 +549,7 @@ construct_value(nir_builder *build,
    }
 }
 
-MAYBE_UNUSED static void dump_value(const nir_search_value *val)
+UNUSED static void dump_value(const nir_search_value *val)
 {
    switch (val->type) {
    case nir_search_value_constant: {

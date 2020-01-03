@@ -124,7 +124,7 @@ brw_codegen_wm_prog(struct brw_context *brw,
                             key, &prog_data, nir,
                             &fp->program, st_index8, st_index16, st_index32,
                             true, false, vue_map,
-                            &error_str);
+                            NULL, &error_str);
 
    if (program == NULL) {
       if (!fp->program.is_arb_asm) {
@@ -535,7 +535,7 @@ brw_upload_wm_prog(struct brw_context *brw)
    fp = (struct brw_program *) brw->programs[MESA_SHADER_FRAGMENT];
    fp->id = key.base.program_string_id;
 
-   MAYBE_UNUSED bool success = brw_codegen_wm_prog(brw, fp, &key,
+   ASSERTED bool success = brw_codegen_wm_prog(brw, fp, &key,
                                                    &brw->vue_map_geom_out);
    assert(success);
 }

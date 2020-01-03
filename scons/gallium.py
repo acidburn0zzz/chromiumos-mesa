@@ -132,7 +132,7 @@ def check_cc(env, cc, expr, cpp_opt = '-E'):
     sys.stdout.write('Checking for %s ... ' % cc)
 
     source = tempfile.NamedTemporaryFile(suffix='.c', delete=False)
-    source.write('#if !(%s)\n#error\n#endif\n' % expr)
+    source.write(('#if !(%s)\n#error\n#endif\n' % expr).encode())
     source.close()
 
     # sys.stderr.write('%r %s %s\n' % (env['CC'], cpp_opt, source.name));
@@ -237,6 +237,9 @@ def generate(env):
     hosthost_platform = host_platform.system().lower()
     if hosthost_platform.startswith('cygwin'):
         hosthost_platform = 'cygwin'
+    # Avoid spurious crosscompilation in MSYS2 environment.
+    if hosthost_platform.startswith('mingw'):
+        hosthost_platform = 'windows'
     host_machine = os.environ.get('PROCESSOR_ARCHITEW6432', os.environ.get('PROCESSOR_ARCHITECTURE', host_platform.machine()))
     host_machine = {
         'x86': 'x86',
@@ -352,6 +355,7 @@ def generate(env):
                 '_DARWIN_C_SOURCE',
                 'GLX_USE_APPLEGL',
                 'GLX_DIRECT_RENDERING',
+                'BUILDING_MESA',
             ]
         else:
             cppdefines += [
@@ -367,6 +371,9 @@ def generate(env):
 
         if check_functions(env, ['strtod_l', 'strtof_l']):
             cppdefines += ['HAVE_STRTOD_L']
+
+        if check_functions(env, ['random_r']):
+            cppdefines += ['HAVE_RANDOM_R']
 
         if check_functions(env, ['timespec_get']):
             cppdefines += ['HAVE_TIMESPEC_GET']
@@ -399,10 +406,8 @@ def generate(env):
             ]
         if env['build'] in ('debug', 'checked'):
             cppdefines += ['_DEBUG']
-    if platform == 'windows':
-        cppdefines += ['PIPE_SUBSYSTEM_WINDOWS_USER']
     if env['embedded']:
-        cppdefines += ['PIPE_SUBSYSTEM_EMBEDDED']
+        cppdefines += ['EMBEDDED_DEVICE']
     env.Append(CPPDEFINES = cppdefines)
 
     # C compiler options

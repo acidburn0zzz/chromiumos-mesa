@@ -219,6 +219,7 @@ struct st_config_options
 {
    bool disable_blend_func_extended;
    bool disable_glsl_line_continuations;
+   bool disable_arb_gpu_shader5;
    bool force_glsl_extensions_warn;
    unsigned force_glsl_version;
    bool allow_glsl_extension_directive_midshader;
@@ -230,6 +231,7 @@ struct st_config_options
    bool force_glsl_abs_sqrt;
    bool allow_glsl_cross_stage_interpolation_mismatch;
    bool allow_glsl_layout_qualifier_on_function_parameters;
+   char *force_gl_vendor;
    unsigned char config_options_sha1[20];
 };
 

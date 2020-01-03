@@ -223,7 +223,6 @@ static const struct dri2_egl_display_vtbl dri2_surfaceless_display_vtbl = {
    .destroy_surface = surfaceless_destroy_surface,
    .create_image = dri2_create_image_khr,
    .swap_buffers_region = dri2_fallback_swap_buffers_region,
-   .set_damage_region = dri2_fallback_set_damage_region,
    .post_sub_buffer = dri2_fallback_post_sub_buffer,
    .copy_buffers = dri2_fallback_copy_buffers,
    .query_buffer_age = dri2_fallback_query_buffer_age,
@@ -243,13 +242,6 @@ static const __DRIimageLoaderExtension image_loader_extension = {
    .flushFrontBuffer = surfaceless_flush_front_buffer,
 };
 
-static const __DRIswrastLoaderExtension swrast_loader_extension = {
-   .base            = { __DRI_SWRAST_LOADER, 1 },
-   .getDrawableInfo = NULL,
-   .putImage        = NULL,
-   .getImage        = NULL,
-};
-
 static const __DRIextension *image_loader_extensions[] = {
    &image_loader_extension.base,
    &image_lookup_extension.base,
@@ -258,7 +250,7 @@ static const __DRIextension *image_loader_extensions[] = {
 };
 
 static const __DRIextension *swrast_loader_extensions[] = {
-   &swrast_loader_extension.base,
+   &swrast_pbuffer_loader_extension.base,
    &image_loader_extension.base,
    &image_lookup_extension.base,
    &use_invalidate.base,
@@ -317,8 +309,9 @@ surfaceless_probe_device(_EGLDisplay *disp, bool swrast)
           * are unavailable since 6c5ab, and kms_swrast is more
           * feature complete than swrast.
           */
-         if (strcmp(driver_name, "vgem") == 0 ||
-             strcmp(driver_name, "virtio_gpu") == 0)
+         if (driver_name &&
+             (strcmp(driver_name, "vgem") == 0 ||
+              strcmp(driver_name, "virtio_gpu") == 0))
             dri2_dpy->driver_name = strdup("kms_swrast");
          free(driver_name);
       } else {

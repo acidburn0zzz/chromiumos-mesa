@@ -26,6 +26,7 @@
 #include "ac_gpu_info.h"
 #include "sid.h"
 
+#include "util/macros.h"
 #include "util/u_math.h"
 
 #include <stdio.h>
@@ -89,6 +90,14 @@ static bool has_syncobj(int fd)
 	if (drmGetCap(fd, DRM_CAP_SYNCOBJ, &value))
 		return false;
 	return value ? true : false;
+}
+
+static uint64_t fix_vram_size(uint64_t size)
+{
+	/* The VRAM size is underreported, so we need to fix it, because
+	 * it's used to compute the number of memory modules for harvesting.
+	 */
+	return align64(size, 256*1024*1024);
 }
 
 bool ac_query_gpu_info(int fd, void *dev_p,
@@ -264,7 +273,7 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 
 		/* Note: usable_heap_size values can be random and can't be relied on. */
 		info->gart_size = meminfo.gtt.total_heap_size;
-		info->vram_size = meminfo.vram.total_heap_size;
+		info->vram_size = fix_vram_size(meminfo.vram.total_heap_size);
 		info->vram_vis_size = meminfo.cpu_accessible_vram.total_heap_size;
 	} else {
 		/* This is a deprecated interface, which reports usable sizes
@@ -295,7 +304,7 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 		}
 
 		info->gart_size = gtt.heap_size;
-		info->vram_size = vram.heap_size;
+		info->vram_size = fix_vram_size(vram.heap_size);
 		info->vram_vis_size = vram_vis.heap_size;
 	}
 
@@ -418,6 +427,9 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 	}
 	if (info->chip_class >= GFX10) {
 		info->tcc_cache_line_size = 128;
+		/* This is a hack, but it's all we can do without a kernel upgrade. */
+		info->tcc_harvested =
+			(info->vram_size / info->num_tcc_blocks) != 512*1024*1024;
 	} else {
 		info->tcc_cache_line_size = 64;
 	}
@@ -436,6 +448,7 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 	assert(util_is_power_of_two_or_zero(dma.available_rings + 1));
 	assert(util_is_power_of_two_or_zero(compute.available_rings + 1));
 
+	info->has_graphics = gfx.available_rings > 0;
 	info->num_sdma_rings = util_bitcount(dma.available_rings);
 	info->num_compute_rings = util_bitcount(compute.available_rings);
 
@@ -448,6 +461,12 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 	info->num_good_cu_per_sh = info->num_good_compute_units /
 				   (info->max_se * info->max_sh_per_se);
 
+	/* Round down to the nearest multiple of 2, because the hw can't
+	 * disable CUs. It can only disable whole WGPs (dual-CUs).
+	 */
+	if (info->chip_class >= GFX10)
+		info->num_good_cu_per_sh -= info->num_good_cu_per_sh % 2;
+
 	memcpy(info->si_tile_mode_array, amdinfo->gb_tile_mode,
 		sizeof(amdinfo->gb_tile_mode));
 	info->enabled_rb_mask = amdinfo->enabled_rb_pipes_mask;
@@ -459,7 +478,7 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 	info->gart_page_size = alignment_info.size_remote;
 
 	if (info->chip_class == GFX6)
-		info->gfx_ib_pad_with_type2 = TRUE;
+		info->gfx_ib_pad_with_type2 = true;
 
 	unsigned ib_align = 0;
 	ib_align = MAX2(ib_align, gfx.ib_start_alignment);
@@ -476,7 +495,8 @@ bool ac_query_gpu_info(int fd, void *dev_p,
 
 	if (info->drm_minor >= 31 &&
 	    (info->family == CHIP_RAVEN ||
-	     info->family == CHIP_RAVEN2)) {
+	     info->family == CHIP_RAVEN2 ||
+	     info->family == CHIP_RENOIR)) {
 		if (info->num_render_backends == 1)
 			info->use_display_dcc_unaligned = true;
 		else
@@ -531,6 +551,7 @@ void ac_print_gpu_info(struct radeon_info *info)
 	printf("    num_sdma_rings = %i\n", info->num_sdma_rings);
 	printf("    clock_crystal_freq = %i\n", info->clock_crystal_freq);
 	printf("    tcc_cache_line_size = %u\n", info->tcc_cache_line_size);
+	printf("    tcc_harvested = %u\n", info->tcc_harvested);
 
 	printf("    use_display_dcc_unaligned = %u\n", info->use_display_dcc_unaligned);
 	printf("    use_display_dcc_with_retile_blit = %u\n", info->use_display_dcc_with_retile_blit);

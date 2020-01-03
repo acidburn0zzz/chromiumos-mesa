@@ -186,7 +186,7 @@ brw_codegen_vs_prog(struct brw_context *brw,
     */
    char *error_str;
    program = brw_compile_vs(compiler, brw, mem_ctx, key, &prog_data,
-                            nir, st_index, &error_str);
+                            nir, st_index, NULL, &error_str);
    if (program == NULL) {
       if (!vp->program.is_arb_asm) {
          vp->program.sh.data->LinkStatus = LINKING_FAILURE;
@@ -317,7 +317,7 @@ brw_upload_vs_prog(struct brw_context *brw)
    vp = (struct brw_program *) brw->programs[MESA_SHADER_VERTEX];
    vp->id = key.base.program_string_id;
 
-   MAYBE_UNUSED bool success = brw_codegen_vs_prog(brw, vp, &key);
+   ASSERTED bool success = brw_codegen_vs_prog(brw, vp, &key);
    assert(success);
 }
 

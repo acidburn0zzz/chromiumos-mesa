@@ -52,6 +52,11 @@ offset(const fs_reg &reg, const brw::fs_builder &bld, unsigned delta)
 
 #define UBO_START ((1 << 16) - 4)
 
+struct shader_stats {
+   const char *scheduler_mode;
+   unsigned promoted_constants;
+};
+
 /**
  * The fragment shader front-end.
  *
@@ -104,7 +109,6 @@ public:
    bool fixup_sends_duplicate_payload();
    void fixup_3src_null_dest();
    void assign_curb_setup();
-   void calculate_urb_setup();
    void assign_urb_setup();
    void convert_attr_sources_to_hw_regs(fs_inst *inst);
    void assign_vs_urb_setup();
@@ -390,7 +394,8 @@ public:
 
    int shader_time_index;
 
-   unsigned promoted_constants;
+   struct shader_stats shader_stats;
+
    brw::fs_builder bld;
 
 private:
@@ -401,6 +406,9 @@ private:
 
    void resolve_inot_sources(const brw::fs_builder &bld, nir_alu_instr *instr,
                              fs_reg *op);
+   void lower_mul_dword_inst(fs_inst *inst, bblock_t *block);
+   void lower_mul_qword_inst(fs_inst *inst, bblock_t *block);
+   void lower_mulh_inst(fs_inst *inst, bblock_t *block);
 };
 
 /**
@@ -414,13 +422,14 @@ public:
    fs_generator(const struct brw_compiler *compiler, void *log_data,
                 void *mem_ctx,
                 struct brw_stage_prog_data *prog_data,
-                unsigned promoted_constants,
+                struct shader_stats shader_stats,
                 bool runtime_check_aads_emit,
                 gl_shader_stage stage);
    ~fs_generator();
 
    void enable_debug(const char *shader_name);
-   int generate_code(const cfg_t *cfg, int dispatch_width);
+   int generate_code(const cfg_t *cfg, int dispatch_width,
+                     struct brw_compile_stats *stats);
    const unsigned *get_assembly();
 
 private:
@@ -518,7 +527,7 @@ private:
    unsigned dispatch_width; /**< 8, 16 or 32 */
 
    exec_list discard_halt_patches;
-   unsigned promoted_constants;
+   struct shader_stats shader_stats;
    bool runtime_check_aads_emit;
    bool debug_flag;
    const char *shader_name;
@@ -566,11 +575,6 @@ void shuffle_from_32bit_read(const brw::fs_builder &bld,
                              const fs_reg &src,
                              uint32_t first_component,
                              uint32_t components);
-
-fs_reg shuffle_for_32bit_write(const brw::fs_builder &bld,
-                               const fs_reg &src,
-                               uint32_t first_component,
-                               uint32_t components);
 
 fs_reg setup_imm_df(const brw::fs_builder &bld,
                     double v);
