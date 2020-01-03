@@ -531,8 +531,8 @@ struct bifrost_blend_rt {
 
 struct mali_shader_meta {
         mali_ptr shader;
-        u16 texture_count;
         u16 sampler_count;
+        u16 texture_count;
         u16 attribute_count;
         u16 varying_count;
 
@@ -651,6 +651,21 @@ struct mali_job_descriptor_header {
                 u32 next_job_32;
         };
 } __attribute__((packed));
+
+/* These concern exception_status */
+
+/* Access type causing a fault, paralleling AS_FAULTSTATUS_* entries in the
+ * kernel */
+
+enum mali_exception_access {
+        /* Atomic in the kernel for MMU, but that doesn't make sense for a job
+         * fault so it's just unused */
+        MALI_EXCEPTION_ACCESS_NONE    = 0,
+
+        MALI_EXCEPTION_ACCESS_EXECUTE = 1,
+        MALI_EXCEPTION_ACCESS_READ    = 2,
+        MALI_EXCEPTION_ACCESS_WRITE   = 3
+};
 
 struct mali_payload_set_value {
         u64 out;
@@ -783,6 +798,15 @@ struct mali_payload_set_value {
  * 3. If e <= 2^shift, then we need to use the round-down algorithm. Set
  * magic_divisor = m - 1 and extra_flags = 1.
  * 4. Otherwise, set magic_divisor = m and extra_flags = 0.
+ *
+ * Unrelated to instancing/actual attributes, images (the OpenCL kind) are
+ * implemented as special attributes, denoted by MALI_ATTR_IMAGE. For images,
+ * let shift=extra_flags=0. Stride is set to the image format's bytes-per-pixel
+ * (*NOT the row stride*). Size is set to the size of the image itself.
+ *
+ * Special internal varyings (including gl_FrontFacing) are handled vai
+ * MALI_ATTR_INTERNAL, which has all fields set to zero and uses a special
+ * elements pseudo-pointer.
  */
 
 enum mali_attr_mode {
@@ -791,7 +815,13 @@ enum mali_attr_mode {
 	MALI_ATTR_POT_DIVIDE = 2,
 	MALI_ATTR_MODULO = 3,
 	MALI_ATTR_NPOT_DIVIDE = 4,
+        MALI_ATTR_IMAGE = 5,
+        MALI_ATTR_INTERNAL = 6
 };
+
+/* Pseudo-address for gl_FrontFacing */
+
+#define MALI_VARYING_FRONT_FACING (0x20)
 
 /* This magic "pseudo-address" is used as `elements` to implement
  * gl_PointCoord. When read from a fragment shader, it generates a point
@@ -920,8 +950,23 @@ struct mali_vertex_tiler_prefix {
         u32 workgroups_x_shift_3 : 6;
 
 
-        /* Negative of draw_start for TILER jobs from what I've seen */
-        int32_t negative_start;
+        /* Negative of min_index. This is used to compute
+         * the unbiased index in tiler/fragment shader runs.
+         * 
+         * The hardware adds offset_bias_correction in each run,
+         * so that absent an index bias, the first vertex processed is
+         * genuinely the first vertex (0). But with an index bias,
+         * the first vertex process is numbered the same as the bias.
+         *
+         * To represent this more conviniently:
+         * unbiased_index = lower_bound_index +
+         *                  index_bias +
+         *                  offset_bias_correction
+         *
+         * This is done since the hardware doesn't accept a index_bias
+         * and this allows it to recover the unbiased index.
+         */
+        int32_t offset_bias_correction;
         u32 zero1;
 
         /* Like many other strictly nonzero quantities, index_count is
@@ -1065,7 +1110,7 @@ struct midgard_payload_vertex_tiler {
         u8 zero4;
 
         /* Offset for first vertex in buffer */
-        u32 draw_start;
+        u32 offset_start;
 
 	u64 zero5;
 
@@ -1182,21 +1227,20 @@ struct mali_texture_descriptor {
         mali_ptr payload[MAX_MIP_LEVELS * MAX_CUBE_FACES * MAX_ELEMENTS];
 } __attribute__((packed));
 
-/* Used as part of filter_mode */
+/* filter_mode */
 
-#define MALI_LINEAR 0
-#define MALI_NEAREST 1
-#define MALI_MIP_LINEAR (0x18)
+#define MALI_SAMP_MAG_NEAREST (1 << 0)
+#define MALI_SAMP_MIN_NEAREST (1 << 1)
 
-/* Used to construct low bits of filter_mode */
+/* TODO: What do these bits mean individually? Only seen set together */
 
-#define MALI_TEX_MAG(mode) (((mode) & 1) << 0)
-#define MALI_TEX_MIN(mode) (((mode) & 1) << 1)
+#define MALI_SAMP_MIP_LINEAR_1 (1 << 3)
+#define MALI_SAMP_MIP_LINEAR_2 (1 << 4)
 
-#define MALI_TEX_MAG_MASK (1)
-#define MALI_TEX_MIN_MASK (2)
+/* Flag in filter_mode, corresponding to OpenCL's NORMALIZED_COORDS_TRUE
+ * sampler_t flag. For typical OpenGL textures, this is always set. */
 
-#define MALI_FILTER_NAME(filter) (filter ? "MALI_NEAREST" : "MALI_LINEAR")
+#define MALI_SAMP_NORM_COORDS (1 << 5)
 
 /* Used for lod encoding. Thanks @urjaman for pointing out these routines can
  * be cleaned up a lot. */
@@ -1426,7 +1470,7 @@ struct mali_single_framebuffer {
  * of compute jobs. Superficially resembles a single framebuffer descriptor */
 
 struct mali_compute_fbd {
-        u32 unknown1[16];
+        u32 unknown1[8];
 } __attribute__((packed));
 
 /* Format bits for the render target flags */
@@ -1453,7 +1497,16 @@ struct mali_rt_format {
 
         unsigned swizzle : 12;
 
-        unsigned unk4 : 4;
+        unsigned zero : 3;
+
+        /* Disables MFBD preload. When this bit is set, the render target will
+         * be cleared every frame. When this bit is clear, the hardware will
+         * automatically wallpaper the render target back from main memory.
+         * Unfortunately, MFBD preload is very broken on Midgard, so in
+         * practice, this is a chicken bit that should always be set.
+         * Discovered by accident, as all good chicken bits are. */
+
+        unsigned no_preload : 1;
 } __attribute__((packed));
 
 struct bifrost_render_target {

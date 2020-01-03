@@ -343,7 +343,7 @@ static int gfx6_compute_level(ADDR_HANDLE addrlib,
 	    AddrSurfInfoIn->flags.depth &&
 	    surf_level->mode == RADEON_SURF_MODE_2D &&
 	    level == 0) {
-		AddrHtileIn->flags.tcCompatible = AddrSurfInfoIn->flags.tcCompatible;
+		AddrHtileIn->flags.tcCompatible = AddrSurfInfoOut->tcCompatible;
 		AddrHtileIn->pitch = AddrSurfInfoOut->pitch;
 		AddrHtileIn->height = AddrSurfInfoOut->height;
 		AddrHtileIn->numSlices = AddrSurfInfoOut->depth;
@@ -658,6 +658,7 @@ static int gfx6_compute_surface(ADDR_HANDLE addrlib,
 	 */
 	AddrSurfInfoIn.flags.dccCompatible =
 		info->chip_class >= GFX8 &&
+		info->has_graphics && /* disable DCC on compute-only chips */
 		!(surf->flags & RADEON_SURF_Z_OR_SBUFFER) &&
 		!(surf->flags & RADEON_SURF_DISABLE_DCC) &&
 		!compressed &&
@@ -776,19 +777,12 @@ static int gfx6_compute_surface(ADDR_HANDLE addrlib,
 			if (level > 0)
 				continue;
 
-			/* Check that we actually got a TC-compatible HTILE if
-			 * we requested it (only for level 0, since we're not
-			 * supporting HTILE on higher mip levels anyway). */
-			assert(AddrSurfInfoOut.tcCompatible ||
-			       !AddrSurfInfoIn.flags.tcCompatible ||
-			       AddrSurfInfoIn.flags.matchStencilTileCfg);
+			if (!AddrSurfInfoOut.tcCompatible) {
+				AddrSurfInfoIn.flags.tcCompatible = 0;
+				surf->flags &= ~RADEON_SURF_TC_COMPATIBLE_HTILE;
+			}
 
 			if (AddrSurfInfoIn.flags.matchStencilTileCfg) {
-				if (!AddrSurfInfoOut.tcCompatible) {
-					AddrSurfInfoIn.flags.tcCompatible = 0;
-					surf->flags &= ~RADEON_SURF_TC_COMPATIBLE_HTILE;
-				}
-
 				AddrSurfInfoIn.flags.matchStencilTileCfg = 0;
 				AddrSurfInfoIn.tileIndex = AddrSurfInfoOut.tileIndex;
 				stencil_tile_idx = AddrSurfInfoOut.stencilTileIdx;
@@ -981,7 +975,6 @@ gfx9_get_preferred_swizzle_mode(ADDR_HANDLE addrlib,
 	/* TODO: We could allow some of these: */
 	sin.forbiddenBlock.micro = 1; /* don't allow the 256B swizzle modes */
 	sin.forbiddenBlock.var = 1; /* don't allow the variable-sized swizzle modes */
-	sin.forbiddenBlock.linear = 1; /* don't allow linear swizzle modes */
 	sin.bpp = in->bpp;
 	sin.width = in->width;
 	sin.height = in->height;
@@ -1122,7 +1115,9 @@ static int gfx9_compute_miptree(ADDR_HANDLE addrlib,
 		}
 
 		/* DCC */
-		if (!(surf->flags & RADEON_SURF_DISABLE_DCC) && !compressed &&
+		if (info->has_graphics &&
+		    !(surf->flags & RADEON_SURF_DISABLE_DCC) &&
+		    !compressed &&
 		    gfx9_is_dcc_capable(info, in->swizzleMode)) {
 			ADDR2_COMPUTE_DCCINFO_INPUT din = {0};
 			ADDR2_COMPUTE_DCCINFO_OUTPUT dout = {0};
@@ -1263,7 +1258,7 @@ static int gfx9_compute_miptree(ADDR_HANDLE addrlib,
 							return ret;
 
 						surf->u.gfx9.dcc_retile_map[index * 2] = addrout.addr;
-						if (addrout.addr > USHRT_MAX)
+						if (addrout.addr > UINT16_MAX)
 							surf->u.gfx9.dcc_retile_use_uint16 = false;
 
 						/* Compute dst DCC address */
@@ -1276,7 +1271,7 @@ static int gfx9_compute_miptree(ADDR_HANDLE addrlib,
 							return ret;
 
 						surf->u.gfx9.dcc_retile_map[index * 2 + 1] = addrout.addr;
-						if (addrout.addr > USHRT_MAX)
+						if (addrout.addr > UINT16_MAX)
 							surf->u.gfx9.dcc_retile_use_uint16 = false;
 
 						assert(index * 2 + 1 < surf->u.gfx9.dcc_retile_num_elements);

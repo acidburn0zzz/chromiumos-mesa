@@ -44,6 +44,7 @@
 #include "util/hash_table.h"
 
 #include "midgard/midgard_compile.h"
+#include "compiler/shader_enums.h"
 
 /* Forward declare to avoid extra header dep */
 struct prim_convert_context;
@@ -78,13 +79,27 @@ struct panfrost_query {
         unsigned type;
         unsigned index;
 
-        /* Memory for the GPU to writeback the value of the query */
-        struct panfrost_transfer transfer;
+        union {
+                /* For computed queries. 64-bit to prevent overflow */
+                struct {
+                        uint64_t start;
+                        uint64_t end;
+                };
+
+                /* Memory for the GPU to writeback the value of the query */
+                struct panfrost_transfer transfer;
+        };
 };
 
 struct panfrost_fence {
         struct pipe_reference reference;
         int fd;
+};
+
+struct panfrost_streamout {
+        struct pipe_stream_output_target *targets[PIPE_MAX_SO_BUFFERS];
+        uint32_t offsets[PIPE_MAX_SO_BUFFERS];
+        unsigned num_targets;
 };
 
 struct panfrost_context {
@@ -101,24 +116,28 @@ struct panfrost_context {
         /* panfrost_resource -> panfrost_job */
         struct hash_table *write_jobs;
 
+        /* Within a launch_grid call.. */
+        const struct pipe_grid_info *compute_grid;
+
         /* Bit mask for supported PIPE_DRAW for this hardware */
         unsigned draw_modes;
 
         struct pipe_framebuffer_state pipe_framebuffer;
+        struct panfrost_streamout streamout;
 
         struct panfrost_memory cmdstream_persistent;
-        struct panfrost_memory shaders;
         struct panfrost_memory scratchpad;
         struct panfrost_memory tiler_heap;
-        struct panfrost_memory tiler_polygon_list;
         struct panfrost_memory tiler_dummy;
         struct panfrost_memory depth_stencil_buffer;
 
+        bool active_queries;
+        uint64_t prims_generated;
+        uint64_t tf_prims_generated;
         struct panfrost_query *occlusion_query;
 
         /* Each draw has corresponding vertex and tiler payloads */
-        struct midgard_payload_vertex_tiler payload_vertex;
-        struct midgard_payload_vertex_tiler payload_tiler;
+        struct midgard_payload_vertex_tiler payloads[PIPE_SHADER_TYPES];
 
         /* The fragment shader binary itself is pointed here (for the tripipe) but
          * also everything else in the shader core, including blending, the
@@ -131,6 +150,7 @@ struct panfrost_context {
 
         unsigned vertex_count;
         unsigned instance_count;
+        enum pipe_prim_type active_prim;
 
         /* If instancing is enabled, vertex count padded for instance; if
          * it is disabled, just equal to plain vertex count */
@@ -138,23 +158,19 @@ struct panfrost_context {
 
         union mali_attr attributes[PIPE_MAX_ATTRIBS];
 
-        struct mali_single_framebuffer vt_framebuffer_sfbd;
-        struct bifrost_framebuffer vt_framebuffer_mfbd;
-
         /* TODO: Multiple uniform buffers (index =/= 0), finer updates? */
 
         struct panfrost_constant_buffer constant_buffer[PIPE_SHADER_TYPES];
 
-        /* CSOs */
         struct panfrost_rasterizer *rasterizer;
-
-        struct panfrost_shader_variants *vs;
-        struct panfrost_shader_variants *fs;
-
+        struct panfrost_shader_variants *shader[PIPE_SHADER_TYPES];
         struct panfrost_vertex_state *vertex;
 
         struct pipe_vertex_buffer vertex_buffers[PIPE_MAX_ATTRIBS];
         uint32_t vb_mask;
+
+        struct pipe_shader_buffer ssbo[PIPE_SHADER_TYPES][PIPE_MAX_SHADER_BUFFERS];
+        uint32_t ssbo_mask[PIPE_SHADER_TYPES];
 
         struct panfrost_sampler_state *samplers[PIPE_SHADER_TYPES][PIPE_MAX_SAMPLERS];
         unsigned sampler_count[PIPE_SHADER_TYPES];
@@ -204,8 +220,6 @@ struct panfrost_rasterizer {
 
 /* A shader state corresponds to the actual, current variant of the shader */
 struct panfrost_shader_state {
-        struct pipe_shader_state *base;
-
         /* Compiled, mapped descriptor, ready for the hardware */
         bool compiled;
         struct mali_shader_meta *tripipe;
@@ -215,9 +229,12 @@ struct panfrost_shader_state {
         bool can_discard;
         bool writes_point_size;
         bool reads_point_coord;
+        bool reads_face;
 
         struct mali_attr_meta varyings[PIPE_MAX_ATTRIBS];
         gl_varying_slot varyings_loc[PIPE_MAX_ATTRIBS];
+        struct pipe_stream_output_info stream_output;
+        uint64_t so_mask;
 
         unsigned sysval_count;
         unsigned sysval[MAX_SYSVAL_COUNT];
@@ -230,11 +247,21 @@ struct panfrost_shader_state {
 
         /* Should we enable helper invocations */
         bool helper_invocations;
+
+        struct panfrost_bo *bo;
 };
 
 /* A collection of varyings (the CSO) */
 struct panfrost_shader_variants {
-        struct pipe_shader_state base;
+        /* A panfrost_shader_variants can represent a shader for
+         * either graphics or compute */
+
+        bool is_compute;
+
+        union {
+                struct pipe_shader_state base;
+                struct pipe_compute_state cbase;
+        };
 
         struct panfrost_shader_state variants[MAX_SHADER_VARIANTS];
         unsigned variant_count;
@@ -303,7 +330,14 @@ mali_ptr
 panfrost_fragment_job(struct panfrost_context *ctx, bool has_draws);
 
 void
-panfrost_shader_compile(struct panfrost_context *ctx, struct mali_shader_meta *meta, const char *src, int type, struct panfrost_shader_state *state);
+panfrost_shader_compile(
+                struct panfrost_context *ctx,
+                struct mali_shader_meta *meta,
+                enum pipe_shader_ir ir_type,
+                const void *ir,
+                gl_shader_stage stage,
+                struct panfrost_shader_state *state,
+                uint64_t *outputs_written);
 
 void
 panfrost_pack_work_groups_compute(
@@ -348,5 +382,16 @@ panfrost_padded_vertex_count(
 unsigned
 pan_expand_shift_odd(struct pan_shift_odd o);
 
+/* Compute */
+
+void
+panfrost_compute_context_init(struct pipe_context *pctx);
+
+/* Varyings */
+
+void
+panfrost_emit_varying_descriptor(
+        struct panfrost_context *ctx,
+        unsigned vertex_count);
 
 #endif

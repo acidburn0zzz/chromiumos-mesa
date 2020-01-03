@@ -468,9 +468,6 @@ make_surface(const struct anv_device *dev,
                return VK_SUCCESS;
             }
 
-            add_surface(image, &image->planes[plane].aux_surface, plane);
-            add_aux_state_tracking_buffer(image, plane, dev);
-
             /* For images created without MUTABLE_FORMAT_BIT set, we know that
              * they will always be used with the original format.  In
              * particular, they will always be used with a format that
@@ -483,6 +480,9 @@ make_surface(const struct anv_device *dev,
                 image->ccs_e_compatible) {
                image->planes[plane].aux_usage = ISL_AUX_USAGE_CCS_E;
             }
+
+            add_surface(image, &image->planes[plane].aux_surface, plane);
+            add_aux_state_tracking_buffer(image, plane, dev);
          }
       }
    } else if ((aspect & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV) && image->samples > 1) {
@@ -735,6 +735,17 @@ anv_CreateImage(VkDevice device,
       return anv_image_from_external(device, pCreateInfo, create_info,
                                      pAllocator, pImage);
 
+   bool use_external_format = false;
+   const struct VkExternalFormatANDROID *ext_format =
+      vk_find_struct_const(pCreateInfo->pNext, EXTERNAL_FORMAT_ANDROID);
+
+   /* "If externalFormat is zero, the effect is as if the
+    * VkExternalFormatANDROID structure was not present. Otherwise, the image
+    * will have the specified external format."
+    */
+   if (ext_format && ext_format->externalFormat != 0)
+      use_external_format = true;
+
    const VkNativeBufferANDROID *gralloc_info =
       vk_find_struct_const(pCreateInfo->pNext, NATIVE_BUFFER_ANDROID);
    if (gralloc_info)
@@ -750,6 +761,7 @@ anv_CreateImage(VkDevice device,
    return anv_image_create(device,
       &(struct anv_image_create_info) {
          .vk_info = pCreateInfo,
+         .external_format = use_external_format,
       },
       pAllocator,
       pImage);

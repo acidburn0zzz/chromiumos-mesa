@@ -156,15 +156,18 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 	case PIPE_CAP_FBFETCH:
 	case PIPE_CAP_COMPUTE_GRID_INFO_LAST_BLOCK:
 	case PIPE_CAP_IMAGE_LOAD_FORMATTED:
-	case PIPE_CAP_PREFER_COMPUTE_BLIT_FOR_MULTIMEDIA:
-        case PIPE_CAP_TGSI_DIV:
+	case PIPE_CAP_PREFER_COMPUTE_FOR_MULTIMEDIA:
+	case PIPE_CAP_TGSI_DIV:
 		return 1;
 
 	case PIPE_CAP_QUERY_SO_OVERFLOW:
-		return sscreen->info.chip_class <= GFX9;
+		return !sscreen->use_ngg_streamout;
 
 	case PIPE_CAP_POST_DEPTH_COVERAGE:
 		return sscreen->info.chip_class >= GFX10;
+
+	case PIPE_CAP_GRAPHICS:
+		return sscreen->info.has_graphics;
 
 	case PIPE_CAP_RESOURCE_FROM_USER_MEMORY:
 		return !SI_BIG_ENDIAN && sscreen->info.has_userptr;
@@ -211,6 +214,7 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 				RADEON_SPARSE_PAGE_SIZE : 0;
 
 	case PIPE_CAP_PACKED_UNIFORMS:
+	case PIPE_CAP_SHADER_SAMPLES_IDENTICAL:
 		if (sscreen->options.enable_nir)
 			return 1;
 		return 0;
@@ -335,6 +339,8 @@ static int si_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 		return sscreen->info.pci_dev;
 	case PIPE_CAP_PCI_FUNCTION:
 		return sscreen->info.pci_func;
+	case PIPE_CAP_TGSI_ATOMINC_WRAP:
+		return HAVE_LLVM >= 0x1000;
 
 	default:
 		return u_pipe_screen_get_param_defaults(pscreen, param);

@@ -23,6 +23,8 @@
  *
  */
 
+#include <assert.h>
+
 #include "pan_context.h"
 #include "util/hash_table.h"
 #include "util/ralloc.h"
@@ -69,6 +71,9 @@ panfrost_free_job(struct panfrost_context *ctx, struct panfrost_job *job)
                 /* Mark it free */
                 BITSET_SET(screen->free_transient, *index);
         }
+
+        /* Unreference the polygon list */
+        panfrost_bo_unreference(ctx->base.screen, job->polygon_list);
 
         _mesa_hash_table_remove_key(ctx->jobs, &job->key);
 
@@ -124,8 +129,13 @@ panfrost_get_job_for_fbo(struct panfrost_context *ctx)
 
         /* If we already began rendering, use that */
 
-        if (ctx->job)
+        if (ctx->job) {
+                assert(ctx->job->key.zsbuf == ctx->pipe_framebuffer.zsbuf &&
+                       !memcmp(ctx->job->key.cbufs,
+                               ctx->pipe_framebuffer.cbufs,
+                               sizeof(ctx->job->key.cbufs)));
                 return ctx->job;
+        }
 
         /* If not, look up the job */
 
@@ -133,6 +143,10 @@ panfrost_get_job_for_fbo(struct panfrost_context *ctx)
         struct pipe_surface *zsbuf = ctx->pipe_framebuffer.zsbuf;
         struct panfrost_job *job = panfrost_get_job(ctx, cbufs, zsbuf);
 
+        /* Set this job as the current FBO job. Will be reset when updating the
+         * FB state and when submitting or releasing a job.
+         */
+        ctx->job = job;
         return job;
 }
 
@@ -147,6 +161,27 @@ panfrost_job_add_bo(struct panfrost_job *job, struct panfrost_bo *bo)
 
         panfrost_bo_reference(bo);
         _mesa_set_add(job->bos, bo);
+}
+
+/* Returns the polygon list's GPU address if available, or otherwise allocates
+ * the polygon list.  It's perfectly fast to use allocate/free BO directly,
+ * since we'll hit the BO cache and this is one-per-batch anyway. */
+
+mali_ptr
+panfrost_job_get_polygon_list(struct panfrost_job *batch, unsigned size)
+{
+        if (batch->polygon_list) {
+                assert(batch->polygon_list->size >= size);
+        } else {
+                struct panfrost_screen *screen = pan_screen(batch->ctx->base.screen);
+
+                /* Create the BO as invisible, as there's no reason to map */
+
+                batch->polygon_list = panfrost_drm_create_bo(screen,
+                                size, PAN_ALLOCATE_INVISIBLE);
+        }
+
+        return batch->polygon_list->gpu;
 }
 
 void
@@ -181,6 +216,20 @@ panfrost_job_submit(struct panfrost_context *ctx, struct panfrost_job *job)
 
         if (ret)
                 fprintf(stderr, "panfrost_job_submit failed: %d\n", ret);
+
+        /* The job has been submitted, let's invalidate the current FBO job
+         * cache.
+	 */
+        assert(!ctx->job || job == ctx->job);
+        ctx->job = NULL;
+
+        /* Remove the job from the ctx->jobs set so that future
+         * panfrost_get_job() calls don't see it.
+         * We must reset the job key to avoid removing another valid entry when
+         * the job is freed.
+         */
+        _mesa_hash_table_remove_key(ctx->jobs, &job->key);
+        memset(&job->key, 0, sizeof(job->key));
 }
 
 void
@@ -368,6 +417,17 @@ panfrost_job_union_scissor(struct panfrost_job *job,
         job->miny = MIN2(job->miny, miny);
         job->maxx = MAX2(job->maxx, maxx);
         job->maxy = MAX2(job->maxy, maxy);
+}
+
+void
+panfrost_job_intersection_scissor(struct panfrost_job *job,
+                                  unsigned minx, unsigned miny,
+                                  unsigned maxx, unsigned maxy)
+{
+        job->minx = MAX2(job->minx, minx);
+        job->miny = MAX2(job->miny, miny);
+        job->maxx = MIN2(job->maxx, maxx);
+        job->maxy = MIN2(job->maxy, maxy);
 }
 
 void

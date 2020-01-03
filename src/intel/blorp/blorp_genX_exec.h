@@ -1074,7 +1074,7 @@ blorp_emit_blend_state(struct blorp_batch *batch,
 
 static uint32_t
 blorp_emit_color_calc_state(struct blorp_batch *batch,
-                            MAYBE_UNUSED const struct blorp_params *params)
+                            UNUSED const struct blorp_params *params)
 {
    uint32_t offset;
    blorp_emit_dynamic(batch, GENX(COLOR_CALC_STATE), cc, 64, &offset) {
@@ -1111,11 +1111,6 @@ blorp_emit_depth_stencil_state(struct blorp_batch *batch,
       ds.DepthBufferWriteEnable = true;
 
       switch (params->hiz_op) {
-      case ISL_AUX_OP_NONE:
-         ds.DepthTestEnable = true;
-         ds.DepthTestFunction = COMPAREFUNCTION_ALWAYS;
-         break;
-
       /* See the following sections of the Sandy Bridge PRM, Volume 2, Part1:
        *   - 7.5.3.1 Depth Buffer Clear
        *   - 7.5.3.2 Depth Buffer Resolve
@@ -1126,6 +1121,7 @@ blorp_emit_depth_stencil_state(struct blorp_batch *batch,
          ds.DepthTestFunction = COMPAREFUNCTION_NEVER;
          break;
 
+      case ISL_AUX_OP_NONE:
       case ISL_AUX_OP_FAST_CLEAR:
       case ISL_AUX_OP_AMBIGUATE:
          ds.DepthTestEnable = false;
@@ -1475,7 +1471,7 @@ blorp_emit_surface_states(struct blorp_batch *batch,
    uint32_t bind_offset = 0, surface_offsets[2];
    void *surface_maps[2];
 
-   MAYBE_UNUSED bool has_indirect_clear_color = false;
+   UNUSED bool has_indirect_clear_color = false;
    if (params->use_pre_baked_binding_table) {
       bind_offset = params->pre_baked_binding_table_offset;
    } else {

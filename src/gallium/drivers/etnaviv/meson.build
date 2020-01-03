@@ -35,8 +35,10 @@ files_etnaviv = files(
   'etnaviv_blt.h',
   'etnaviv_clear_blit.c',
   'etnaviv_clear_blit.h',
-  'etnaviv_compiler.c',
   'etnaviv_compiler.h',
+  'etnaviv_compiler_nir.c',
+  'etnaviv_compiler_nir_emit.h',
+  'etnaviv_compiler_tgsi.c',
   'etnaviv_context.c',
   'etnaviv_context.h',
   'etnaviv_debug.h',
@@ -97,7 +99,7 @@ libetnaviv = static_library(
     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_etnaviv,
   ],
   link_with: libetnaviv_drm,
-  dependencies : dep_libdrm,
+  dependencies : [dep_libdrm, idep_nir_headers],
 )
 
 etnaviv_compiler = executable(
@@ -106,13 +108,14 @@ etnaviv_compiler = executable(
   include_directories : [
     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_etnaviv,
   ],
-  link_with : [libmesa_util, libgallium, libetnaviv, libetnaviv_drm],
+  link_with : [libgallium, libetnaviv, libetnaviv_drm],
   build_by_default : with_tools.contains('etnaviv'),
   install : with_tools.contains('etnaviv'),
-  dependencies : dep_libdrm,
+  dependencies : [idep_mesautil, dep_libdrm],
 )
 
 driver_etnaviv = declare_dependency(
   compile_args : '-DGALLIUM_ETNAVIV',
   link_with : [libetnaviv, libetnavivdrm],
+  dependencies : idep_nir,
 )

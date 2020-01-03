@@ -53,10 +53,12 @@ struct radeon_info {
 	enum chip_class             chip_class;
 	uint32_t                    family_id;
 	uint32_t                    chip_external_rev;
+	bool                        has_graphics; /* false if the chip is compute-only */
 	uint32_t                    num_compute_rings;
 	uint32_t                    num_sdma_rings;
 	uint32_t                    clock_crystal_freq;
 	uint32_t                    tcc_cache_line_size;
+	bool			    tcc_harvested;
 
 	/* There are 2 display DCC codepaths, because display expects unaligned DCC. */
 	/* Disable RB and pipe alignment to skip the retile blit. (1 RB chips only) */
@@ -172,7 +174,7 @@ unsigned ac_get_compute_resource_limits(struct radeon_info *info,
 					unsigned max_waves_per_sh,
 					unsigned threadgroups_per_cu);
 
-static inline unsigned ac_get_max_simd_waves(enum radeon_family family)
+static inline unsigned ac_get_max_wave64_per_simd(enum radeon_family family)
 {
 
 	switch (family) {
@@ -187,10 +189,26 @@ static inline unsigned ac_get_max_simd_waves(enum radeon_family family)
 	}
 }
 
-static inline uint32_t
-ac_get_num_physical_sgprs(enum chip_class chip_class)
+static inline unsigned ac_get_num_physical_vgprs(enum chip_class chip_class,
+						 unsigned wave_size)
 {
-	return chip_class >= GFX8 ? 800 : 512;
+	/* The number is per SIMD. */
+	if (chip_class >= GFX10)
+		return wave_size == 32 ? 1024 : 512;
+	else
+		return 256;
+}
+
+static inline uint32_t
+ac_get_num_physical_sgprs(const struct radeon_info *info)
+{
+	/* The number is per SIMD. There is enough SGPRs for the maximum number
+	 * of Wave32, which is double the number for Wave64.
+	 */
+	if (info->chip_class >= GFX10)
+		return 128 * ac_get_max_wave64_per_simd(info->family) * 2;
+
+	return info->chip_class >= GFX8 ? 800 : 512;
 }
 
 #ifdef __cplusplus

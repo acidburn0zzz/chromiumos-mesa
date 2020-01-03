@@ -171,7 +171,8 @@ brw_nir_lower_vs_inputs(nir_shader *nir,
     * loaded as one vec4 or dvec4 per element (or matrix column), depending on
     * whether it is a double-precision type or not.
     */
-   nir_lower_io(nir, nir_var_shader_in, type_size_vec4, 0);
+   nir_lower_io(nir, nir_var_shader_in, type_size_vec4,
+                nir_lower_io_lower_64bit_to_32);
 
    /* This pass needs actual constants */
    nir_opt_constant_folding(nir);
@@ -294,7 +295,8 @@ brw_nir_lower_vue_inputs(nir_shader *nir,
    }
 
    /* Inputs are stored in vec4 slots, so use type_size_vec4(). */
-   nir_lower_io(nir, nir_var_shader_in, type_size_vec4, 0);
+   nir_lower_io(nir, nir_var_shader_in, type_size_vec4,
+                nir_lower_io_lower_64bit_to_32);
 
    /* This pass needs actual constants */
    nir_opt_constant_folding(nir);
@@ -345,7 +347,8 @@ brw_nir_lower_tes_inputs(nir_shader *nir, const struct brw_vue_map *vue_map)
       var->data.driver_location = var->data.location;
    }
 
-   nir_lower_io(nir, nir_var_shader_in, type_size_vec4, 0);
+   nir_lower_io(nir, nir_var_shader_in, type_size_vec4,
+                nir_lower_io_lower_64bit_to_32);
 
    /* This pass needs actual constants */
    nir_opt_constant_folding(nir);
@@ -396,7 +399,7 @@ brw_nir_lower_fs_inputs(nir_shader *nir,
       }
    }
 
-   nir_lower_io_options lower_io_options = 0;
+   nir_lower_io_options lower_io_options = nir_lower_io_lower_64bit_to_32;
    if (key->persample_interp)
       lower_io_options |= nir_lower_io_force_sample_interpolation;
 
@@ -417,7 +420,8 @@ brw_nir_lower_vue_outputs(nir_shader *nir)
       var->data.driver_location = var->data.location;
    }
 
-   nir_lower_io(nir, nir_var_shader_out, type_size_vec4, 0);
+   nir_lower_io(nir, nir_var_shader_out, type_size_vec4,
+                nir_lower_io_lower_64bit_to_32);
 }
 
 void
@@ -428,7 +432,8 @@ brw_nir_lower_tcs_outputs(nir_shader *nir, const struct brw_vue_map *vue_map,
       var->data.driver_location = var->data.location;
    }
 
-   nir_lower_io(nir, nir_var_shader_out, type_size_vec4, 0);
+   nir_lower_io(nir, nir_var_shader_out, type_size_vec4,
+                nir_lower_io_lower_64bit_to_32);
 
    /* This pass needs actual constants */
    nir_opt_constant_folding(nir);
@@ -870,7 +875,7 @@ brw_postprocess_nir(nir_shader *nir, const struct brw_compiler *compiler,
    OPT(nir_lower_to_source_mods, nir_lower_all_source_mods);
    OPT(nir_copy_prop);
    OPT(nir_opt_dce);
-   OPT(nir_opt_move_comparisons);
+   OPT(nir_opt_move, nir_move_comparisons);
 
    OPT(nir_lower_bool_to_int32);
 
@@ -1034,6 +1039,55 @@ brw_nir_apply_key(nir_shader *nir,
 
    if (progress)
       brw_nir_optimize(nir, compiler, is_scalar, false);
+}
+
+enum brw_conditional_mod
+brw_cmod_for_nir_comparison(nir_op op)
+{
+   switch (op) {
+   case nir_op_flt:
+   case nir_op_flt32:
+   case nir_op_ilt:
+   case nir_op_ilt32:
+   case nir_op_ult:
+   case nir_op_ult32:
+      return BRW_CONDITIONAL_L;
+
+   case nir_op_fge:
+   case nir_op_fge32:
+   case nir_op_ige:
+   case nir_op_ige32:
+   case nir_op_uge:
+   case nir_op_uge32:
+      return BRW_CONDITIONAL_GE;
+
+   case nir_op_feq:
+   case nir_op_feq32:
+   case nir_op_ieq:
+   case nir_op_ieq32:
+   case nir_op_b32all_fequal2:
+   case nir_op_b32all_iequal2:
+   case nir_op_b32all_fequal3:
+   case nir_op_b32all_iequal3:
+   case nir_op_b32all_fequal4:
+   case nir_op_b32all_iequal4:
+      return BRW_CONDITIONAL_Z;
+
+   case nir_op_fne:
+   case nir_op_fne32:
+   case nir_op_ine:
+   case nir_op_ine32:
+   case nir_op_b32any_fnequal2:
+   case nir_op_b32any_inequal2:
+   case nir_op_b32any_fnequal3:
+   case nir_op_b32any_inequal3:
+   case nir_op_b32any_fnequal4:
+   case nir_op_b32any_inequal4:
+      return BRW_CONDITIONAL_NZ;
+
+   default:
+      unreachable("Unsupported NIR comparison op");
+   }
 }
 
 enum brw_reg_type

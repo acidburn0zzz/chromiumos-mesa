@@ -725,6 +725,7 @@ void st_init_extensions(struct pipe_screen *screen,
       { o(ARB_shader_draw_parameters),       PIPE_CAP_DRAW_PARAMETERS                  },
       { o(ARB_shader_group_vote),            PIPE_CAP_TGSI_VOTE                        },
       { o(EXT_shader_image_load_formatted),  PIPE_CAP_IMAGE_LOAD_FORMATTED             },
+      { o(EXT_shader_image_load_store),      PIPE_CAP_TGSI_ATOMINC_WRAP                },
       { o(ARB_shader_stencil_export),        PIPE_CAP_SHADER_STENCIL_EXPORT            },
       { o(ARB_shader_texture_image_samples), PIPE_CAP_TGSI_TXQS                        },
       { o(ARB_shader_texture_lod),           PIPE_CAP_FRAGMENT_SHADER_TEXTURE_LOD      },
@@ -752,9 +753,11 @@ void st_init_extensions(struct pipe_screen *screen,
       { o(EXT_multisampled_render_to_texture), PIPE_CAP_SURFACE_SAMPLE_COUNT           },
       { o(EXT_semaphore),                    PIPE_CAP_FENCE_SIGNAL                     },
       { o(EXT_semaphore_fd),                 PIPE_CAP_FENCE_SIGNAL                     },
+      { o(EXT_shader_samples_identical),     PIPE_CAP_SHADER_SAMPLES_IDENTICAL         },
       { o(EXT_texture_array),                PIPE_CAP_MAX_TEXTURE_ARRAY_LAYERS         },
       { o(EXT_texture_filter_anisotropic),   PIPE_CAP_ANISOTROPIC_FILTER               },
       { o(EXT_texture_mirror_clamp),         PIPE_CAP_TEXTURE_MIRROR_CLAMP             },
+      { o(EXT_texture_shadow_lod),           PIPE_CAP_TEXTURE_SHADOW_LOD               },
       { o(EXT_texture_swizzle),              PIPE_CAP_TEXTURE_SWIZZLE                  },
       { o(EXT_transform_feedback),           PIPE_CAP_MAX_STREAM_OUTPUT_BUFFERS        },
       { o(EXT_window_rectangles),            PIPE_CAP_MAX_WINDOW_RECTANGLES            },
@@ -1088,7 +1091,7 @@ void st_init_extensions(struct pipe_screen *screen,
    if (api == API_OPENGLES2 && ESSLVersion >= 320)
       extensions->ARB_gpu_shader5 = GL_TRUE;
 
-   if (GLSLVersion >= 400)
+   if (GLSLVersion >= 400 && !options->disable_arb_gpu_shader5)
       extensions->ARB_gpu_shader5 = GL_TRUE;
    if (GLSLVersion >= 410)
       extensions->ARB_shader_precision = GL_TRUE;
@@ -1149,6 +1152,8 @@ void st_init_extensions(struct pipe_screen *screen,
    }
 
    consts->GLSLZeroInit = options->glsl_zero_init;
+
+   consts->VendorOverride = options->force_gl_vendor;
 
    consts->UniformBooleanTrue = consts->NativeIntegers ? ~0U : fui(1.0f);
 

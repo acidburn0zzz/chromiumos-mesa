@@ -441,7 +441,8 @@ static void schedule_insert_ready_list(sched_ctx *ctx,
 
    struct list_head *insert_pos = &ctx->ready_list;
    list_for_each_entry(gpir_node, node, &ctx->ready_list, list) {
-      if (insert_node->sched.dist > node->sched.dist) {
+      if (insert_node->sched.dist > node->sched.dist ||
+          gpir_op_infos[insert_node->op].schedule_first) {
          insert_pos = &node->list;
          break;
       }
@@ -626,23 +627,26 @@ static bool schedule_try_place_node(sched_ctx *ctx, gpir_node *node,
    return true;
 }
 
-static gpir_node *create_move(sched_ctx *ctx, gpir_node *node)
+/* Create a new node with "node" as the child, replace all uses of "node" with
+ * this new node, and replace "node" with it in the ready list.
+ */
+static gpir_node *create_replacement(sched_ctx *ctx, gpir_node *node,
+                                     gpir_op op)
 {
-   gpir_alu_node *move = gpir_node_create(node->block, gpir_op_mov);
-   if (unlikely(!move))
+
+   gpir_alu_node *new_node = gpir_node_create(node->block, op);
+   if (unlikely(!new_node))
       return NULL;
 
-   move->children[0] = node;
-   move->num_child = 1;
+   new_node->children[0] = node;
+   new_node->num_child = 1;
 
-   move->node.sched.instr = NULL;
-   move->node.sched.pos = -1;
-   move->node.sched.dist = node->sched.dist;
-   move->node.sched.max_node = node->sched.max_node;
-   move->node.sched.next_max_node = node->sched.next_max_node;
-   move->node.sched.complex_allowed = node->sched.complex_allowed;
-
-   gpir_debug("create move %d for %d\n", move->node.index, node->index);
+   new_node->node.sched.instr = NULL;
+   new_node->node.sched.pos = -1;
+   new_node->node.sched.dist = node->sched.dist;
+   new_node->node.sched.max_node = node->sched.max_node;
+   new_node->node.sched.next_max_node = node->sched.next_max_node;
+   new_node->node.sched.complex_allowed = node->sched.complex_allowed;
 
    ctx->ready_list_slots--;
    list_del(&node->list);
@@ -650,12 +654,26 @@ static gpir_node *create_move(sched_ctx *ctx, gpir_node *node)
    node->sched.next_max_node = false;
    node->sched.ready = false;
    node->sched.inserted = false;
-   gpir_node_replace_succ(&move->node, node);
-   gpir_node_add_dep(&move->node, node, GPIR_DEP_INPUT);
-   schedule_insert_ready_list(ctx, &move->node);
-   return &move->node;
+   gpir_node_replace_succ(&new_node->node, node);
+   gpir_node_add_dep(&new_node->node, node, GPIR_DEP_INPUT);
+   schedule_insert_ready_list(ctx, &new_node->node);
+   return &new_node->node;
 }
 
+static gpir_node *create_move(sched_ctx *ctx, gpir_node *node)
+{
+   gpir_node *move = create_replacement(ctx, node, gpir_op_mov);
+   gpir_debug("create move %d for %d\n", move->index, node->index);
+   return move;
+}
+
+static gpir_node *create_postlog2(sched_ctx *ctx, gpir_node *node)
+{
+   assert(node->op == gpir_op_complex1);
+   gpir_node *postlog2 = create_replacement(ctx, node, gpir_op_postlog2);
+   gpir_debug("create postlog2 %d for %d\n", postlog2->index, node->index);
+   return postlog2;
+}
 
 /* Once we schedule the successor, would the predecessor be fully ready? */
 static bool pred_almost_ready(gpir_dep *dep)
@@ -894,7 +912,7 @@ static void spill_node(sched_ctx *ctx, gpir_node *node, gpir_store_node *store)
          gpir_node_add_dep(&load->node, &store->node, GPIR_DEP_READ_AFTER_WRITE);
          gpir_debug("spilling use %d of node %d to load node %d\n",
                     use->index, node->index, load->node.index);
-         MAYBE_UNUSED bool result = _try_place_node(ctx, use->sched.instr, &load->node);
+         ASSERTED bool result = _try_place_node(ctx, use->sched.instr, &load->node);
          assert(result);
       }
    }
@@ -916,7 +934,7 @@ static void spill_node(sched_ctx *ctx, gpir_node *node, gpir_store_node *store)
       }
       if (node->sched.next_max_node) {
          node->sched.next_max_node = false;
-         ctx->instr->alu_num_slot_needed_by_next_max--;
+         ctx->instr->alu_num_unscheduled_next_max--;
       }
    }
 }
@@ -935,7 +953,22 @@ static bool used_by_store(gpir_node *node, gpir_instr *instr)
    return false;
 }
 
+static gpir_node *consuming_postlog2(gpir_node *node)
+{
+   if (node->op != gpir_op_complex1)
+      return NULL;
 
+   gpir_node_foreach_succ(node, dep) {
+      if (dep->type != GPIR_DEP_INPUT)
+         continue;
+      if (dep->succ->op == gpir_op_postlog2)
+         return dep->succ;
+      else
+         return NULL;
+   }
+
+   return NULL;
+}
 
 static bool try_spill_node(sched_ctx *ctx, gpir_node *node)
 {
@@ -959,6 +992,16 @@ static bool try_spill_node(sched_ctx *ctx, gpir_node *node)
 
       if (available == 0)
          return false;
+
+      /* Don't spill complex1 if it's used postlog2, turn the postlog2 into a
+       * move, replace the complex1 with postlog2 and spill that instead. The
+       * store needs a move anyways so the postlog2 is usually free.
+       */
+      gpir_node *postlog2 = consuming_postlog2(node);
+      if (postlog2) {
+         postlog2->op = gpir_op_mov;
+         node = create_postlog2(ctx, node);
+      }
 
       /* TODO: use a better heuristic for choosing an available register? */
       int physreg = ffsll(available) - 1;
@@ -1114,13 +1157,32 @@ static bool can_use_complex(gpir_node *node)
       if (succ->type != gpir_node_type_alu)
          continue;
 
+      /* Note: this must be consistent with gpir_codegen_{mul,add}_slot{0,1}
+       */
       gpir_alu_node *alu = gpir_node_to_alu(succ);
-      if (alu->num_child >= 2 && alu->children[1] == node)
+      switch (alu->node.op) {
+      case gpir_op_complex1:
+         /* complex1 puts its third source in the fourth slot */
+         if (alu->children[1] == node || alu->children[2] == node)
+            return false;
+         break;
+      case gpir_op_complex2:
+         /* complex2 has its source duplicated, since it actually takes two
+          * sources but we only ever use it with both sources the same. Hence
+          * its source can never be the complex slot.
+          */
          return false;
-
-      /* complex1 puts its third source in the fourth slot */
-      if (alu->node.op == gpir_op_complex1 && alu->children[2] == node)
-         return false;
+      case gpir_op_select:
+         /* Select has its sources rearranged */
+         if (alu->children[0] == node)
+            return false;
+         break;
+      default:
+         assert(alu->num_child <= 2);
+         if (alu->num_child == 2 && alu->children[1] == node)
+            return false;
+         break;
+      }
    }
 
    return true;
@@ -1134,7 +1196,7 @@ static bool can_use_complex(gpir_node *node)
 
 static void sched_find_max_nodes(sched_ctx *ctx)
 {
-   ctx->instr->alu_num_slot_needed_by_next_max = -5;
+   ctx->instr->alu_num_unscheduled_next_max = 0;
    ctx->instr->alu_num_slot_needed_by_max = 0;
 
    list_for_each_entry(gpir_node, node, &ctx->ready_list, list) {
@@ -1150,7 +1212,7 @@ static void sched_find_max_nodes(sched_ctx *ctx)
       if (node->sched.max_node)
          ctx->instr->alu_num_slot_needed_by_max++;
       if (node->sched.next_max_node)
-         ctx->instr->alu_num_slot_needed_by_next_max++;
+         ctx->instr->alu_num_unscheduled_next_max++;
    }
 }
 
@@ -1160,9 +1222,10 @@ static void sched_find_max_nodes(sched_ctx *ctx)
 static void verify_max_nodes(sched_ctx *ctx)
 {
    int alu_num_slot_needed_by_max = 0;
-   int alu_num_slot_needed_by_next_max = -5;
+   int alu_num_unscheduled_next_max = 0;
    int alu_num_slot_needed_by_store = 0;
    int alu_num_slot_needed_by_non_cplx_store = 0;
+   int alu_max_allowed_next_max = 5;
 
    list_for_each_entry(gpir_node, node, &ctx->ready_list, list) {
       if (!gpir_is_input_node(node))
@@ -1171,7 +1234,7 @@ static void verify_max_nodes(sched_ctx *ctx)
       if (node->sched.max_node)
          alu_num_slot_needed_by_max++;
       if (node->sched.next_max_node)
-         alu_num_slot_needed_by_next_max++;
+         alu_num_unscheduled_next_max++;
       if (used_by_store(node, ctx->instr)) {
          alu_num_slot_needed_by_store++;
          if (node->sched.next_max_node && !node->sched.complex_allowed)
@@ -1179,12 +1242,17 @@ static void verify_max_nodes(sched_ctx *ctx)
       }
    }
 
+   if (ctx->instr->slots[GPIR_INSTR_SLOT_MUL0] &&
+       ctx->instr->slots[GPIR_INSTR_SLOT_MUL0]->op == gpir_op_complex1)
+      alu_max_allowed_next_max = 4;
+
    assert(ctx->instr->alu_num_slot_needed_by_max == alu_num_slot_needed_by_max);
-   assert(ctx->instr->alu_num_slot_needed_by_next_max == alu_num_slot_needed_by_next_max);
+   assert(ctx->instr->alu_num_unscheduled_next_max == alu_num_unscheduled_next_max);
+   assert(ctx->instr->alu_max_allowed_next_max == alu_max_allowed_next_max);
    assert(ctx->instr->alu_num_slot_needed_by_store == alu_num_slot_needed_by_store);
    assert(ctx->instr->alu_num_slot_needed_by_non_cplx_store ==
           alu_num_slot_needed_by_non_cplx_store);
-   assert(ctx->instr->alu_num_slot_free >= alu_num_slot_needed_by_store + alu_num_slot_needed_by_max + MAX2(alu_num_slot_needed_by_next_max, 0));
+   assert(ctx->instr->alu_num_slot_free >= alu_num_slot_needed_by_store + alu_num_slot_needed_by_max + MAX2(alu_num_unscheduled_next_max - alu_max_allowed_next_max, 0));
    assert(ctx->instr->alu_non_cplx_slot_free >= alu_num_slot_needed_by_max + alu_num_slot_needed_by_non_cplx_store);
 }
 
@@ -1212,13 +1280,17 @@ static bool try_node(sched_ctx *ctx)
          ctx->total_spill_needed = 0;
          ctx->max_node_spill_needed = 0;
          int score = schedule_try_node(ctx, node, true);
-         if (score == INT_MIN) {
-            if (ctx->total_spill_needed > 0 &&
-                try_spill_nodes(ctx, node)) {
-               score = schedule_try_node(ctx, node, true);
-               if (score == INT_MIN)
-                  continue;
-            }
+         if (score == INT_MIN && !best_node &&
+             ctx->total_spill_needed > 0 &&
+             try_spill_nodes(ctx, node)) {
+            score = schedule_try_node(ctx, node, true);
+         }
+
+         /* schedule_first nodes must be scheduled if possible */
+         if (gpir_op_infos[node->op].schedule_first && score != INT_MIN) {
+            best_node = node;
+            best_score = score;
+            break;
          }
 
          if (score > best_score) {
@@ -1231,7 +1303,7 @@ static bool try_node(sched_ctx *ctx)
    if (best_node) {
       gpir_debug("scheduling %d (score = %d)%s\n", best_node->index,
                  best_score, best_node->sched.max_node ? " (max)" : "");
-      MAYBE_UNUSED int score = schedule_try_node(ctx, best_node, false);
+      ASSERTED int score = schedule_try_node(ctx, best_node, false);
       assert(score != INT_MIN);
       return true;
    }
@@ -1251,7 +1323,7 @@ static void place_move(sched_ctx *ctx, gpir_node *node)
             gpir_node_replace_child(succ, move, node);
       }
    }
-   MAYBE_UNUSED int score = schedule_try_node(ctx, move, false);
+   ASSERTED int score = schedule_try_node(ctx, move, false);
    assert(score != INT_MIN);
 }
 
@@ -1275,7 +1347,17 @@ static bool sched_move(sched_ctx *ctx)
 {
    list_for_each_entry(gpir_node, node, &ctx->ready_list, list) {
       if (node->sched.max_node) {
-         place_move(ctx, node);
+         /* For complex1 that is consumed by a postlog2, we cannot allow any
+          * moves in between. Convert the postlog2 to a move and insert a new
+          * postlog2, and try to schedule it again in try_node().
+          */
+         gpir_node *postlog2 = consuming_postlog2(node);
+         if (postlog2) {
+            postlog2->op = gpir_op_mov;
+            create_postlog2(ctx, node);
+         } else {
+            place_move(ctx, node);
+         }
          return true;
       }
    }
@@ -1366,7 +1448,8 @@ static bool sched_move(sched_ctx *ctx)
     * need to insert the move.
     */
 
-   if (ctx->instr->alu_num_slot_needed_by_next_max > 0) {
+   if (ctx->instr->alu_num_unscheduled_next_max >
+       ctx->instr->alu_max_allowed_next_max) {
       list_for_each_entry(gpir_node, node, &ctx->ready_list, list) {
          if (!can_place_move(ctx, node))
             continue;

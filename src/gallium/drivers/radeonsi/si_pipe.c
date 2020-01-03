@@ -31,7 +31,6 @@
 
 #include "ac_llvm_util.h"
 #include "radeon/radeon_uvd.h"
-#include "gallivm/lp_bld_misc.h"
 #include "util/disk_cache.h"
 #include "util/u_log.h"
 #include "util/u_memory.h"
@@ -60,7 +59,6 @@ static const struct debug_named_value debug_options[] = {
 	{ "preoptir", DBG(PREOPT_IR), "Print the LLVM IR before initial optimizations" },
 
 	/* Shader compiler options the shader cache should be aware of: */
-	{ "unsafemath", DBG(UNSAFE_MATH), "Enable unsafe math shader optimizations" },
 	{ "sisched", DBG(SI_SCHED), "Enable LLVM SI Machine Instruction Scheduler." },
 	{ "gisel", DBG(GISEL), "Enable LLVM global instruction selector." },
 	{ "w32ge", DBG(W32_GE), "Use Wave32 for vertex, tessellation, and geometry shaders." },
@@ -90,6 +88,8 @@ static const struct debug_named_value debug_options[] = {
 	{ "zerovram", DBG(ZERO_VRAM), "Clear VRAM allocations." },
 
 	/* 3D engine options: */
+	{ "nogfx", DBG(NO_GFX), "Disable graphics. Only multimedia compute paths can be used." },
+	{ "nongg", DBG(NO_NGG), "Disable NGG and use the legacy pipeline." },
 	{ "alwayspd", DBG(ALWAYS_PD), "Always enable the primitive discard compute shader." },
 	{ "pd", DBG(PD), "Enable the primitive discard compute shader for large draw calls." },
 	{ "nopd", DBG(NO_PD), "Disable the primitive discard compute shader." },
@@ -174,7 +174,7 @@ static void si_destroy_context(struct pipe_context *context)
 
 	si_release_all_descriptors(sctx);
 
-	if (sctx->chip_class >= GFX10)
+	if (sctx->chip_class >= GFX10 && sctx->has_graphics)
 		gfx10_destroy_query(sctx);
 
 	pipe_resource_reference(&sctx->esgs_ring, NULL);
@@ -392,8 +392,14 @@ static void si_set_context_param(struct pipe_context *ctx,
 static struct pipe_context *si_create_context(struct pipe_screen *screen,
                                               unsigned flags)
 {
-	struct si_context *sctx = CALLOC_STRUCT(si_context);
 	struct si_screen* sscreen = (struct si_screen *)screen;
+
+	/* Don't create a context if it's not compute-only and hw is compute-only. */
+	if (!sscreen->info.has_graphics &&
+	    !(flags & PIPE_CONTEXT_COMPUTE_ONLY))
+		return NULL;
+
+	struct si_context *sctx = CALLOC_STRUCT(si_context);
 	struct radeon_winsys *ws = sscreen->ws;
 	int shader, i;
 	bool stop_exec_on_failure = (flags & PIPE_CONTEXT_LOSE_CONTEXT_ON_RESET) != 0;
@@ -454,7 +460,13 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen,
 	if (!sctx->ctx)
 		goto fail;
 
-	if (sscreen->info.num_sdma_rings && !(sscreen->debug_flags & DBG(NO_ASYNC_DMA))) {
+	if (sscreen->info.num_sdma_rings &&
+	    !(sscreen->debug_flags & DBG(NO_ASYNC_DMA)) &&
+	    /* SDMA timeouts sometimes on gfx10 so disable it for now. See:
+	     *    https://bugs.freedesktop.org/show_bug.cgi?id=111481
+	     *    https://gitlab.freedesktop.org/mesa/mesa/issues/1907
+	     */
+	    (sctx->chip_class != GFX10 || sscreen->debug_flags & DBG(FORCE_DMA))) {
 		sctx->dma_cs = sctx->ws->cs_create(sctx->ctx, RING_DMA,
 						   (void*)si_flush_dma_cs,
 						   sctx, stop_exec_on_failure);
@@ -495,7 +507,7 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen,
 	if (!sctx->border_color_map)
 		goto fail;
 
-	sctx->ngg = sctx->chip_class >= GFX10;
+	sctx->ngg = sscreen->use_ngg;
 
 	/* Initialize context functions used by graphics and compute. */
 	if (sctx->chip_class >= GFX10)
@@ -520,10 +532,10 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen,
 	si_init_fence_functions(sctx);
 	si_init_query_functions(sctx);
 	si_init_state_compute_functions(sctx);
+	si_init_context_texture_functions(sctx);
 
 	/* Initialize graphics-only context functions. */
 	if (sctx->has_graphics) {
-		si_init_context_texture_functions(sctx);
 		if (sctx->chip_class >= GFX10)
 			gfx10_init_query(sctx);
 		si_init_msaa_functions(sctx);
@@ -536,6 +548,17 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen,
 		if (sctx->blitter == NULL)
 			goto fail;
 		sctx->blitter->skip_viewport_restore = true;
+
+		/* Some states are expected to be always non-NULL. */
+		sctx->noop_blend = util_blitter_get_noop_blend_state(sctx->blitter);
+		sctx->queued.named.blend = sctx->noop_blend;
+
+		sctx->noop_dsa = util_blitter_get_noop_dsa_state(sctx->blitter);
+		sctx->queued.named.dsa = sctx->noop_dsa;
+
+		sctx->discard_rasterizer_state =
+			util_blitter_get_discard_rasterizer_state(sctx->blitter);
+		sctx->queued.named.rasterizer = sctx->discard_rasterizer_state;
 
 		si_init_draw_functions(sctx);
 		si_initialize_prim_discard_tunables(sctx);
@@ -852,22 +875,12 @@ static void si_disk_cache_create(struct si_screen *sscreen)
 	disk_cache_format_hex_id(cache_id, sha1, 20 * 2);
 
 	/* These flags affect shader compilation. */
-	#define ALL_FLAGS (DBG(FS_CORRECT_DERIVS_AFTER_KILL) |	\
-			   DBG(SI_SCHED) |			\
-			   DBG(GISEL) |				\
-			   DBG(UNSAFE_MATH) |			\
-			   DBG(W32_GE) |			\
-			   DBG(W32_PS) |			\
-			   DBG(W32_CS) |			\
-			   DBG(W64_GE) |			\
-			   DBG(W64_PS) |			\
-			   DBG(W64_CS))
+	#define ALL_FLAGS (DBG(SI_SCHED) | DBG(GISEL))
 	uint64_t shader_debug_flags = sscreen->debug_flags & ALL_FLAGS;
-
-	if (sscreen->options.enable_nir) {
-		STATIC_ASSERT((ALL_FLAGS & (1u << 31)) == 0);
-		shader_debug_flags |= 1u << 31;
-	}
+	/* Reserve left-most bit for tgsi/nir selector */
+	assert(!(shader_debug_flags & (1u << 31)));
+	shader_debug_flags |= (uint32_t)
+		((sscreen->options.enable_nir & 0x1) << 31);
 
 	/* Add the high bits of 32-bit addresses, which affects
 	 * how 32-bit addresses are expanded to 64 bits.
@@ -937,6 +950,9 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 	sscreen->debug_flags |= debug_get_flags_option("AMD_DEBUG",
 						       debug_options, 0);
 
+	if (sscreen->debug_flags & DBG(NO_GFX))
+		sscreen->info.has_graphics = false;
+
 	/* Set functions first. */
 	sscreen->b.context_create = si_pipe_create_context;
 	sscreen->b.destroy = si_destroy_screen;
@@ -985,6 +1001,13 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 	if (!si_init_shader_cache(sscreen)) {
 		FREE(sscreen);
 		return NULL;
+	}
+
+	{
+#define OPT_BOOL(name, dflt, description) \
+		sscreen->options.name = \
+			driQueryOptionb(config->options, "radeonsi_"#name);
+#include "si_debug_options.h"
 	}
 
 	si_disk_cache_create(sscreen);
@@ -1068,7 +1091,6 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 	}
 
 	sscreen->tess_factor_ring_size = 32768 * sscreen->info.max_se;
-	assert(((sscreen->tess_factor_ring_size / 4) & C_030938_SIZE) == 0);
 	sscreen->tess_offchip_ring_size = max_offchip_buffers *
 					  sscreen->tess_offchip_block_dw_size * 4;
 
@@ -1114,13 +1136,6 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 	sscreen->commutative_blend_add =
 		driQueryOptionb(config->options, "radeonsi_commutative_blend_add");
 
-	{
-#define OPT_BOOL(name, dflt, description) \
-		sscreen->options.name = \
-			driQueryOptionb(config->options, "radeonsi_"#name);
-#include "si_debug_options.h"
-	}
-
 	sscreen->has_gfx9_scissor_bug = sscreen->info.family == CHIP_VEGA10 ||
 					sscreen->info.family == CHIP_RAVEN;
 	sscreen->has_msaa_sample_loc_bug = (sscreen->info.family >= CHIP_POLARIS10 &&
@@ -1130,7 +1145,12 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 	sscreen->has_ls_vgpr_init_bug = sscreen->info.family == CHIP_VEGA10 ||
 					sscreen->info.family == CHIP_RAVEN;
 	sscreen->has_dcc_constant_encode = sscreen->info.family == CHIP_RAVEN2 ||
+					   sscreen->info.family == CHIP_RENOIR ||
 					   sscreen->info.chip_class >= GFX10;
+	sscreen->use_ngg = sscreen->info.chip_class >= GFX10 &&
+			   sscreen->info.family != CHIP_NAVI14 &&
+			   !(sscreen->debug_flags & DBG(NO_NGG));
+	sscreen->use_ngg_streamout = false;
 
 	/* Only enable primitive binning on APUs by default. */
 	if (sscreen->info.chip_class >= GFX10) {
@@ -1173,7 +1193,8 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 			(sscreen->info.family == CHIP_STONEY ||
 			 sscreen->info.family == CHIP_VEGA12 ||
 			 sscreen->info.family == CHIP_RAVEN ||
-			 sscreen->info.family == CHIP_RAVEN2);
+			 sscreen->info.family == CHIP_RAVEN2 ||
+			 sscreen->info.family == CHIP_RENOIR);
 	}
 
 	sscreen->dcc_msaa_allowed =
@@ -1251,8 +1272,9 @@ radeonsi_screen_create_impl(struct radeon_winsys *ws,
 	}
 
 	/* Create the auxiliary context. This must be done last. */
-	sscreen->aux_context = si_create_context(
-		&sscreen->b, sscreen->options.aux_debug ? PIPE_CONTEXT_DEBUG : 0);
+	sscreen->aux_context = si_create_context(&sscreen->b,
+		(sscreen->options.aux_debug ? PIPE_CONTEXT_DEBUG : 0) |
+		(sscreen->info.has_graphics ? 0 : PIPE_CONTEXT_COMPUTE_ONLY));
 	if (sscreen->options.aux_debug) {
 		struct u_log_context *log = CALLOC_STRUCT(u_log_context);
 		u_log_context_init(log);

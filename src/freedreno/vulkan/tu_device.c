@@ -36,9 +36,9 @@
 #include <unistd.h>
 #include <xf86drm.h>
 
+#include "compiler/glsl_types.h"
 #include "util/debug.h"
 #include "util/disk_cache.h"
-#include "util/strtod.h"
 #include "vk_format.h"
 #include "vk_util.h"
 
@@ -430,7 +430,7 @@ tu_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
       return vk_error(instance, result);
    }
 
-   _mesa_locale_init();
+   glsl_type_singleton_init_or_ref();
 
    VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
 
@@ -454,7 +454,7 @@ tu_DestroyInstance(VkInstance _instance,
 
    VG(VALGRIND_DESTROY_MEMPOOL(instance));
 
-   _mesa_locale_fini();
+   glsl_type_singleton_decref();
 
    vk_debug_report_instance_destroy(&instance->debug_report_callbacks);
 

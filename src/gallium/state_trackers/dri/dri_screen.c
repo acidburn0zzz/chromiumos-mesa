@@ -33,6 +33,7 @@
 
 #include "dri_screen.h"
 #include "dri_context.h"
+#include "dri_helpers.h"
 
 #include "util/u_inlines.h"
 #include "pipe/p_screen.h"
@@ -64,6 +65,8 @@ dri_fill_st_options(struct dri_screen *screen)
 
    options->disable_blend_func_extended =
       driQueryOptionb(optionCache, "disable_blend_func_extended");
+   options->disable_arb_gpu_shader5 =
+      driQueryOptionb(optionCache, "disable_arb_gpu_shader5");
    options->disable_glsl_line_continuations =
       driQueryOptionb(optionCache, "disable_glsl_line_continuations");
    options->force_glsl_extensions_warn =
@@ -87,6 +90,11 @@ dri_fill_st_options(struct dri_screen *screen)
       driQueryOptionb(optionCache, "allow_glsl_cross_stage_interpolation_mismatch");
    options->allow_glsl_layout_qualifier_on_function_parameters =
       driQueryOptionb(optionCache, "allow_glsl_layout_qualifier_on_function_parameters");
+
+   char *vendor_str = driQueryOptionstr(optionCache, "force_gl_vendor");
+   /* not an empty string */
+   if (*vendor_str)
+      options->force_gl_vendor = strdup(vendor_str);
 
    driComputeOptionsSha1(optionCache, options->config_options_sha1);
 }
@@ -423,6 +431,7 @@ dri_get_egl_image(struct st_manager *smapi,
 {
    struct dri_screen *screen = (struct dri_screen *)smapi;
    __DRIimage *img = NULL;
+   const struct dri2_format_mapping *map;
 
    if (screen->lookup_egl_image) {
       img = screen->lookup_egl_image(screen, egl_image);
@@ -433,17 +442,8 @@ dri_get_egl_image(struct st_manager *smapi,
 
    stimg->texture = NULL;
    pipe_resource_reference(&stimg->texture, img->texture);
-   switch (img->dri_components) {
-   case __DRI_IMAGE_COMPONENTS_Y_U_V:
-      stimg->format = PIPE_FORMAT_IYUV;
-      break;
-   case __DRI_IMAGE_COMPONENTS_Y_UV:
-      stimg->format = PIPE_FORMAT_NV12;
-      break;
-   default:
-      stimg->format = img->texture->format;
-      break;
-   }
+   map = dri2_get_mapping_by_fourcc(img->dri_fourcc);
+   stimg->format = map ? map->pipe_format : img->texture->format;
    stimg->level = img->level;
    stimg->layer = img->layer;
 
@@ -487,6 +487,8 @@ dri_destroy_screen(__DRIscreen * sPriv)
    dri_destroy_screen_helper(screen);
 
    pipe_loader_release(&screen->dev, 1);
+
+   free(screen->options.force_gl_vendor);
 
    /* The caller in dri_util preserves the fd ownership */
    free(screen);
