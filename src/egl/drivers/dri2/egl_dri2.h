@@ -122,10 +122,6 @@ struct dri2_egl_display_vtbl {
                                           _EGLSurface *surface,
                                           const EGLint *rects, EGLint n_rects);
 
-   EGLBoolean (*set_damage_region)(_EGLDriver *drv, _EGLDisplay *disp,
-                                   _EGLSurface *surface,
-                                   const EGLint *rects, EGLint n_rects);
-
    EGLBoolean (*swap_buffers_region)(_EGLDriver *drv, _EGLDisplay *disp,
                                      _EGLSurface *surf, EGLint numRects,
                                      const EGLint *rects);
@@ -185,6 +181,7 @@ struct dri2_egl_display
    const __DRInoErrorExtension    *no_error;
    const __DRI2configQueryExtension *config;
    const __DRI2fenceExtension *fence;
+   const __DRI2bufferDamageExtension *buffer_damage;
    const __DRI2blobExtension *blob;
    const __DRI2rendererQueryExtension *rendererQuery;
    const __DRI2interopExtension *interop;
@@ -377,6 +374,7 @@ _EGL_DRIVER_TYPECAST(dri2_egl_sync, _EGLSync, obj)
 extern const __DRIimageLookupExtension image_lookup_extension;
 extern const __DRIuseInvalidateExtension use_invalidate;
 extern const __DRIbackgroundCallableExtension background_callable_extension;
+extern const __DRIswrastLoaderExtension swrast_pbuffer_loader_extension;
 
 EGLBoolean
 dri2_load_driver(_EGLDisplay *disp);

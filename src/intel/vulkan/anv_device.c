@@ -32,7 +32,6 @@
 #include "drm-uapi/drm_fourcc.h"
 
 #include "anv_private.h"
-#include "util/strtod.h"
 #include "util/debug.h"
 #include "util/build_id.h"
 #include "util/disk_cache.h"
@@ -40,12 +39,21 @@
 #include "util/os_file.h"
 #include "util/u_atomic.h"
 #include "util/u_string.h"
+#include "util/xmlpool.h"
 #include "git_sha1.h"
 #include "vk_util.h"
 #include "common/gen_defines.h"
 #include "compiler/glsl_types.h"
 
 #include "genxml/gen7_pack.h"
+
+static const char anv_dri_options_xml[] =
+DRI_CONF_BEGIN
+   DRI_CONF_SECTION_PERFORMANCE
+      DRI_CONF_VK_X11_OVERRIDE_MIN_IMAGE_COUNT(0)
+      DRI_CONF_VK_X11_STRICT_IMAGE_COUNT("false")
+   DRI_CONF_SECTION_END
+DRI_CONF_END;
 
 /* This is probably far to big but it reflects the max size used for messages
  * in OpenGLs KHR_debug.
@@ -318,7 +326,7 @@ anv_physical_device_init_disk_cache(struct anv_physical_device *device)
 {
 #ifdef ENABLE_SHADER_CACHE
    char renderer[10];
-   MAYBE_UNUSED int len = snprintf(renderer, sizeof(renderer), "anv_%04x",
+   ASSERTED int len = snprintf(renderer, sizeof(renderer), "anv_%04x",
                                    device->chipset_id);
    assert(len == sizeof(renderer) - 2);
 
@@ -390,19 +398,15 @@ anv_physical_device_init(struct anv_physical_device *device,
    assert(strlen(path) < ARRAY_SIZE(device->path));
    snprintf(device->path, ARRAY_SIZE(device->path), "%s", path);
 
-   device->no_hw = getenv("INTEL_NO_HW") != NULL;
-
-   const int pci_id_override = gen_get_pci_device_id_override();
-   if (pci_id_override < 0) {
-      device->chipset_id = anv_gem_get_param(fd, I915_PARAM_CHIPSET_ID);
-      if (!device->chipset_id) {
-         result = vk_error(VK_ERROR_INCOMPATIBLE_DRIVER);
-         goto fail;
-      }
-   } else {
-      device->chipset_id = pci_id_override;
-      device->no_hw = true;
+   if (!gen_get_device_info_from_fd(fd, &device->info)) {
+      result = vk_error(VK_ERROR_INCOMPATIBLE_DRIVER);
+      goto fail;
    }
+   device->chipset_id = device->info.chipset_id;
+   device->no_hw = device->info.no_hw;
+
+   if (getenv("INTEL_NO_HW") != NULL)
+      device->no_hw = true;
 
    device->pci_info.domain = drm_device->businfo.pci->domain;
    device->pci_info.bus = drm_device->businfo.pci->bus;
@@ -410,10 +414,6 @@ anv_physical_device_init(struct anv_physical_device *device,
    device->pci_info.function = drm_device->businfo.pci->func;
 
    device->name = gen_get_device_name(device->chipset_id);
-   if (!gen_get_device_info(device->chipset_id, &device->info)) {
-      result = vk_error(VK_ERROR_INCOMPATIBLE_DRIVER);
-      goto fail;
-   }
 
    if (device->info.is_haswell) {
       intel_logw("Haswell Vulkan support is incomplete");
@@ -771,10 +771,15 @@ VkResult anv_CreateInstance(
    instance->pipeline_cache_enabled =
       env_var_as_boolean("ANV_ENABLE_PIPELINE_CACHE", true);
 
-   _mesa_locale_init();
    glsl_type_singleton_init_or_ref();
 
    VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
+
+   driParseOptionInfo(&instance->available_dri_options, anv_dri_options_xml);
+   driParseConfigFiles(&instance->dri_options, &instance->available_dri_options,
+                       0, "anv", NULL,
+                       instance->app_info.engine_name,
+                       instance->app_info.engine_version);
 
    *pInstance = anv_instance_to_handle(instance);
 
@@ -804,7 +809,9 @@ void anv_DestroyInstance(
    vk_debug_report_instance_destroy(&instance->debug_report_callbacks);
 
    glsl_type_singleton_decref();
-   _mesa_locale_fini();
+
+   driDestroyOptionCache(&instance->dri_options);
+   driDestroyOptionInfo(&instance->available_dri_options);
 
    vk_free(&instance->alloc, instance);
 }
@@ -1091,11 +1098,30 @@ void anv_GetPhysicalDeviceFeatures2(
          break;
       }
 
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_EXT: {
+         VkPhysicalDeviceIndexTypeUint8FeaturesEXT *features =
+            (VkPhysicalDeviceIndexTypeUint8FeaturesEXT *)ext;
+         features->indexTypeUint8 = true;
+         break;
+      }
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_FEATURES_EXT: {
          VkPhysicalDeviceInlineUniformBlockFeaturesEXT *features =
             (VkPhysicalDeviceInlineUniformBlockFeaturesEXT *)ext;
          features->inlineUniformBlock = true;
          features->descriptorBindingInlineUniformBlockUpdateAfterBind = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT: {
+         VkPhysicalDeviceLineRasterizationFeaturesEXT *features =
+            (VkPhysicalDeviceLineRasterizationFeaturesEXT *)ext;
+         features->rectangularLines = true;
+         features->bresenhamLines = true;
+         features->smoothLines = true;
+         features->stippledRectangularLines = false;
+         features->stippledBresenhamLines = true;
+         features->stippledSmoothLines = false;
          break;
       }
 
@@ -1112,6 +1138,13 @@ void anv_GetPhysicalDeviceFeatures2(
          VkPhysicalDeviceImagelessFramebufferFeaturesKHR *features =
             (VkPhysicalDeviceImagelessFramebufferFeaturesKHR *)ext;
          features->imagelessFramebuffer = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR: {
+         VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR *features =
+            (VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR *)ext;
+         features->pipelineExecutableInfo = true;
          break;
       }
 
@@ -1152,6 +1185,14 @@ void anv_GetPhysicalDeviceFeatures2(
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES: {
          VkPhysicalDeviceShaderDrawParametersFeatures *features = (void *)ext;
          features->shaderDrawParameters = true;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT: {
+         VkPhysicalDeviceSubgroupSizeControlFeaturesEXT *features =
+            (VkPhysicalDeviceSubgroupSizeControlFeaturesEXT *)ext;
+         features->subgroupSizeControl = true;
+         features->computeFullSubgroups = true;
          break;
       }
 
@@ -1231,10 +1272,14 @@ void anv_GetPhysicalDeviceProperties(
    const uint32_t max_images =
       pdevice->has_bindless_images ? UINT16_MAX : MAX_IMAGES;
 
-   /* The moment we have anything bindless, claim a high per-stage limit */
+   /* If we can use bindless for everything, claim a high per-stage limit,
+    * otherwise use the binding table size, minus the slots reserved for
+    * render targets and one slot for the descriptor buffer. */
    const uint32_t max_per_stage =
-      pdevice->has_a64_buffer_access ? UINT32_MAX :
-                                       MAX_BINDING_TABLE_SIZE - MAX_RTS;
+      pdevice->has_bindless_images && pdevice->has_a64_buffer_access
+      ? UINT32_MAX : MAX_BINDING_TABLE_SIZE - MAX_RTS - 1;
+
+   const uint32_t max_workgroup_size = 32 * devinfo->max_cs_threads;
 
    VkSampleCountFlags sample_counts =
       isl_device_get_sample_counts(&pdevice->isl_dev);
@@ -1294,11 +1339,11 @@ void anv_GetPhysicalDeviceProperties(
       .maxFragmentCombinedOutputResources       = 8,
       .maxComputeSharedMemorySize               = 64 * 1024,
       .maxComputeWorkGroupCount                 = { 65535, 65535, 65535 },
-      .maxComputeWorkGroupInvocations           = 32 * devinfo->max_cs_threads,
+      .maxComputeWorkGroupInvocations           = max_workgroup_size,
       .maxComputeWorkGroupSize = {
-         16 * devinfo->max_cs_threads,
-         16 * devinfo->max_cs_threads,
-         16 * devinfo->max_cs_threads,
+         max_workgroup_size,
+         max_workgroup_size,
+         max_workgroup_size,
       },
       .subPixelPrecisionBits                    = 8,
       .subTexelPrecisionBits                    = 8,
@@ -1347,10 +1392,14 @@ void anv_GetPhysicalDeviceProperties(
       .maxCombinedClipAndCullDistances          = 8,
       .discreteQueuePriorities                  = 2,
       .pointSizeRange                           = { 0.125, 255.875 },
-      .lineWidthRange                           = { 0.0, 7.9921875 },
+      .lineWidthRange                           = {
+         0.0,
+         (devinfo->gen >= 9 || devinfo->is_cherryview) ?
+            2047.9921875 : 7.9921875,
+      },
       .pointSizeGranularity                     = (1.0 / 8.0),
       .lineWidthGranularity                     = (1.0 / 128.0),
-      .strictLines                              = false, /* FINISHME */
+      .strictLines                              = false,
       .standardSampleLocations                  = true,
       .optimalBufferCopyOffsetAlignment         = 128,
       .optimalBufferCopyRowPitchAlignment       = 128,
@@ -1507,6 +1556,25 @@ void anv_GetPhysicalDeviceProperties2(
          break;
       }
 
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_PROPERTIES_EXT: {
+         VkPhysicalDeviceLineRasterizationPropertiesEXT *props =
+            (VkPhysicalDeviceLineRasterizationPropertiesEXT *)ext;
+         /* In the Skylake PRM Vol. 7, subsection titled "GIQ (Diamond)
+          * Sampling Rules - Legacy Mode", it says the following:
+          *
+          *    "Note that the device divides a pixel into a 16x16 array of
+          *    subpixels, referenced by their upper left corners."
+          *
+          * This is the only known reference in the PRMs to the subpixel
+          * precision of line rasterization and a "16x16 array of subpixels"
+          * implies 4 subpixel precision bits.  Empirical testing has shown
+          * that 4 subpixel precision bits applies to all line rasterization
+          * types.
+          */
+         props->lineSubPixelPrecisionBits = 4;
+         break;
+      }
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES: {
          VkPhysicalDeviceMaintenance3Properties *props =
             (VkPhysicalDeviceMaintenance3Properties *)ext;
@@ -1543,6 +1611,16 @@ void anv_GetPhysicalDeviceProperties2(
          break;
       }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch"
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENTATION_PROPERTIES_ANDROID: {
+         VkPhysicalDevicePresentationPropertiesANDROID *props =
+            (VkPhysicalDevicePresentationPropertiesANDROID *)ext;
+         props->sharedImage = VK_FALSE;
+         break;
+      }
+#pragma GCC diagnostic pop
+
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_PROPERTIES: {
          VkPhysicalDeviceProtectedMemoryProperties *props =
             (VkPhysicalDeviceProtectedMemoryProperties *)ext;
@@ -1562,7 +1640,7 @@ void anv_GetPhysicalDeviceProperties2(
          VkPhysicalDeviceSamplerFilterMinmaxPropertiesEXT *properties =
             (VkPhysicalDeviceSamplerFilterMinmaxPropertiesEXT *)ext;
          properties->filterMinmaxImageComponentMapping = pdevice->info.gen >= 9;
-         properties->filterMinmaxSingleComponentFormats = true;
+         properties->filterMinmaxSingleComponentFormats = pdevice->info.gen >= 9;
          break;
       }
 
@@ -2311,7 +2389,7 @@ VkResult anv_CreateDevice(
    if (physical_device->use_softpin) {
       if (pthread_mutex_init(&device->vma_mutex, NULL) != 0) {
          result = vk_error(VK_ERROR_INITIALIZATION_FAILED);
-         goto fail_fd;
+         goto fail_context_id;
       }
 
       /* keep the page with address zero out of the allocator */
@@ -2340,7 +2418,7 @@ VkResult anv_CreateDevice(
                                           vk_priority_to_gen(priority));
       if (err != 0 && priority > VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_EXT) {
          result = vk_error(VK_ERROR_NOT_PERMITTED_EXT);
-         goto fail_fd;
+         goto fail_vmas;
       }
    }
 
@@ -2504,6 +2582,11 @@ VkResult anv_CreateDevice(
    pthread_cond_destroy(&device->queue_submit);
  fail_mutex:
    pthread_mutex_destroy(&device->mutex);
+ fail_vmas:
+   if (physical_device->use_softpin) {
+      util_vma_heap_finish(&device->vma_hi);
+      util_vma_heap_finish(&device->vma_lo);
+   }
  fail_context_id:
    anv_gem_destroy_context(device, device->context_id);
  fail_fd:
@@ -2537,6 +2620,7 @@ void anv_DestroyDevice(
     * BO will go away in a couple of lines so we don't actually leak.
     */
    anv_state_pool_free(&device->dynamic_state_pool, device->border_colors);
+   anv_state_pool_free(&device->dynamic_state_pool, device->slice_hash);
 #endif
 
    anv_scratch_pool_finish(device, &device->scratch_pool);
@@ -2559,6 +2643,11 @@ void anv_DestroyDevice(
    anv_bo_cache_finish(&device->bo_cache);
 
    anv_bo_pool_finish(&device->batch_bo_pool);
+
+   if (physical_device->use_softpin) {
+      util_vma_heap_finish(&device->vma_hi);
+      util_vma_heap_finish(&device->vma_lo);
+   }
 
    pthread_cond_destroy(&device->queue_submit);
    pthread_mutex_destroy(&device->mutex);
@@ -2788,7 +2877,7 @@ anv_vma_free(struct anv_device *device, struct anv_bo *bo)
       util_vma_heap_free(&device->vma_lo, addr_48b, bo->size);
       device->vma_lo_available += bo->size;
    } else {
-      MAYBE_UNUSED const struct anv_physical_device *physical_device =
+      ASSERTED const struct anv_physical_device *physical_device =
          &device->instance->physicalDevice;
       assert(addr_48b >= physical_device->memory.heaps[0].vma_start &&
              addr_48b < (physical_device->memory.heaps[0].vma_start +
@@ -3009,9 +3098,10 @@ VkResult anv_AllocateMemory(
                                       i915_tiling);
          if (ret) {
             anv_bo_cache_release(device, &device->bo_cache, mem->bo);
-            return vk_errorf(device->instance, NULL,
-                             VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                             "failed to set BO tiling: %m");
+            result = vk_errorf(device->instance, NULL,
+                               VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                               "failed to set BO tiling: %m");
+            goto fail;
          }
       }
    }

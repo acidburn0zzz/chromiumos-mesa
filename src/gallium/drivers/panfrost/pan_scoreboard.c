@@ -143,10 +143,6 @@ panfrost_add_dependency(
         struct mali_job_descriptor_header *second =
                 job_descriptor_header(depender);
 
-        /* Ensure we're ready for dependencies */
-        assert(second->job_index);
-        assert(first->job_index);
-
         /* Look for an open slot */
 
         if (!second->job_dependency_index_1)
@@ -303,10 +299,11 @@ panfrost_scoreboard_set_value(struct panfrost_job *batch)
         if (!batch->last_tiler.gpu)
                 return;
 
-        /* Okay, we do. Let's generate it */
+        /* Okay, we do. Let's generate it. We'll need the job's polygon list
+         * regardless of size. */
 
         struct panfrost_context *ctx = batch->ctx;
-        mali_ptr polygon_list = ctx->tiler_polygon_list.bo->gpu;
+        mali_ptr polygon_list = panfrost_job_get_polygon_list(batch, 0);
 
         struct panfrost_transfer job =
                 panfrost_set_value_job(ctx, polygon_list);

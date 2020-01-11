@@ -38,6 +38,7 @@
 #include "lima_program.h"
 #include "lima_bo.h"
 #include "lima_fence.h"
+#include "lima_texture.h"
 #include "ir/lima_ir.h"
 
 #include "xf86drm.h"
@@ -118,6 +119,7 @@ lima_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
 
    case PIPE_CAP_TGSI_FS_POSITION_IS_SYSVAL:
    case PIPE_CAP_TGSI_FS_POINT_IS_SYSVAL:
+   case PIPE_CAP_TGSI_FS_FACE_IS_INTEGER_SYSVAL:
       return 1;
 
    case PIPE_CAP_MAX_TEXTURE_2D_SIZE:
@@ -319,22 +321,8 @@ lima_screen_is_format_supported(struct pipe_screen *pscreen,
       }
    }
 
-   if (usage & PIPE_BIND_SAMPLER_VIEW) {
-      switch (format) {
-      case PIPE_FORMAT_R8G8B8X8_UNORM:
-      case PIPE_FORMAT_R8G8B8A8_UNORM:
-      case PIPE_FORMAT_B8G8R8X8_UNORM:
-      case PIPE_FORMAT_B8G8R8A8_UNORM:
-      case PIPE_FORMAT_A8B8G8R8_SRGB:
-      case PIPE_FORMAT_B8G8R8A8_SRGB:
-      case PIPE_FORMAT_Z16_UNORM:
-      case PIPE_FORMAT_Z24_UNORM_S8_UINT:
-      case PIPE_FORMAT_Z24X8_UNORM:
-         break;
-      default:
-         return false;
-      }
-   }
+   if (usage & PIPE_BIND_SAMPLER_VIEW)
+      return lima_texel_format_supported(format);
 
    return true;
 }
@@ -439,6 +427,8 @@ static const struct debug_named_value debug_options[] = {
           "print PP shader compiler result of each stage" },
         { "dump",     LIMA_DEBUG_DUMP,
           "dump GPU command stream to $PWD/lima.dump" },
+        { "shaderdb", LIMA_DEBUG_SHADERDB,
+          "print shader information for shaderdb" },
         { NULL }
 };
 

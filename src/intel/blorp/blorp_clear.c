@@ -70,12 +70,7 @@ blorp_params_get_clear_kernel(struct blorp_batch *batch,
    nir_ssa_def *color = nir_load_var(&b, v_color);
 
    if (clear_rgb_as_red) {
-      nir_variable *frag_coord =
-         nir_variable_create(b.shader, nir_var_shader_in,
-                             glsl_vec4_type(), "gl_FragCoord");
-      frag_coord->data.location = VARYING_SLOT_POS;
-
-      nir_ssa_def *pos = nir_f2i32(&b, nir_load_var(&b, frag_coord));
+      nir_ssa_def *pos = nir_f2i32(&b, nir_load_frag_coord(&b));
       nir_ssa_def *comp = nir_umod(&b, nir_channel(&b, pos, 0),
                                        nir_imm_int(&b, 3));
       nir_ssa_def *color_component =
@@ -611,7 +606,7 @@ blorp_clear_depth_stencil(struct blorp_batch *batch,
          params.dst.surf.samples = params.stencil.surf.samples;
          params.dst.surf.logical_level0_px =
             params.stencil.surf.logical_level0_px;
-         params.dst.view = params.depth.view;
+         params.dst.view = params.stencil.view;
 
          params.num_samples = params.stencil.surf.samples;
 
@@ -976,7 +971,7 @@ blorp_params_get_mcs_partial_resolve_kernel(struct blorp_batch *batch,
 
    /* Do an MCS fetch and check if it is equal to the magic clear value */
    nir_ssa_def *mcs =
-      blorp_nir_txf_ms_mcs(&b, nir_f2i32(&b, blorp_nir_frag_coord(&b)),
+      blorp_nir_txf_ms_mcs(&b, nir_f2i32(&b, nir_load_frag_coord(&b)),
                                nir_load_layer_id(&b));
    nir_ssa_def *is_clear =
       blorp_nir_mcs_is_clear_color(&b, mcs, blorp_key.num_samples);
@@ -1184,7 +1179,7 @@ blorp_ccs_ambiguate(struct blorp_batch *batch,
    const uint32_t width_rgba_px = width_cl;
    const uint32_t height_rgba_px = height_cl * 4;
 
-   MAYBE_UNUSED bool ok =
+   ASSERTED bool ok =
       isl_surf_init(batch->blorp->isl_dev, &params.dst.surf,
                     .dim = ISL_SURF_DIM_2D,
                     .format = ISL_FORMAT_R32G32B32A32_UINT,

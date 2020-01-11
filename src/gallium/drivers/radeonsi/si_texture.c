@@ -919,8 +919,7 @@ static bool si_texture_get_handle(struct pipe_screen* screen,
 		if (sscreen->ws->buffer_is_suballocated(res->buf) ||
 		    tex->surface.tile_swizzle ||
 		    (tex->buffer.flags & RADEON_FLAG_NO_INTERPROCESS_SHARING &&
-		     sscreen->info.has_local_buffers &&
-		     whandle->type != WINSYS_HANDLE_TYPE_KMS)) {
+		     sscreen->info.has_local_buffers)) {
 			assert(!res->b.is_shared);
 			si_reallocate_texture_inplace(sctx, tex,
 							PIPE_BIND_SHARED, false);
@@ -1914,6 +1913,7 @@ static bool si_can_invalidate_texture(struct si_screen *sscreen,
 				      const struct pipe_box *box)
 {
 	return !tex->buffer.b.is_shared &&
+		!(tex->surface.flags & RADEON_SURF_IMPORTED) &&
 		!(transfer_usage & PIPE_TRANSFER_READ) &&
 		tex->buffer.b.b.last_level == 0 &&
 		util_texrange_covers_whole_level(&tex->buffer.b.b, 0,

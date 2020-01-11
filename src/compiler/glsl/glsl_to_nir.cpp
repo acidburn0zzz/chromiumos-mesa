@@ -460,13 +460,8 @@ nir_visitor::visit(ir_variable *ir)
       break;
 
    case ir_var_shader_in:
-      if (shader->info.stage == MESA_SHADER_FRAGMENT &&
-          ir->data.location == VARYING_SLOT_FACE) {
-         /* For whatever reason, GLSL IR makes gl_FrontFacing an input */
-         var->data.location = SYSTEM_VALUE_FRONT_FACE;
-         var->data.mode = nir_var_system_value;
-      } else if (shader->info.stage == MESA_SHADER_GEOMETRY &&
-                 ir->data.location == VARYING_SLOT_PRIMITIVE_ID) {
+      if (shader->info.stage == MESA_SHADER_GEOMETRY &&
+          ir->data.location == VARYING_SLOT_PRIMITIVE_ID) {
          /* For whatever reason, GLSL IR makes gl_PrimitiveIDIn an input */
          var->data.location = SYSTEM_VALUE_PRIMITIVE_ID;
          var->data.mode = nir_var_system_value;
@@ -995,6 +990,12 @@ nir_visitor::visit(ir_call *ir)
       case ir_intrinsic_image_atomic_comp_swap:
          op = nir_intrinsic_image_deref_atomic_comp_swap;
          break;
+      case ir_intrinsic_image_atomic_inc_wrap:
+         op = nir_intrinsic_image_deref_atomic_inc_wrap;
+         break;
+      case ir_intrinsic_image_atomic_dec_wrap:
+         op = nir_intrinsic_image_deref_atomic_dec_wrap;
+         break;
       case ir_intrinsic_memory_barrier:
          op = nir_intrinsic_memory_barrier;
          break;
@@ -1263,7 +1264,9 @@ nir_visitor::visit(ir_call *ir)
       case nir_intrinsic_image_deref_atomic_comp_swap:
       case nir_intrinsic_image_deref_atomic_fadd:
       case nir_intrinsic_image_deref_samples:
-      case nir_intrinsic_image_deref_size: {
+      case nir_intrinsic_image_deref_size:
+      case nir_intrinsic_image_deref_atomic_inc_wrap:
+      case nir_intrinsic_image_deref_atomic_dec_wrap: {
          nir_ssa_undef_instr *instr_undef =
             nir_ssa_undef_instr_create(shader, 1, 32);
          nir_builder_instr_insert(&b, &instr_undef->instr);
@@ -2684,6 +2687,19 @@ glsl_float64_funcs_to_nir(struct gl_context *ctx,
    NIR_PASS_V(nir, nir_lower_returns);
    NIR_PASS_V(nir, nir_inline_functions);
    NIR_PASS_V(nir, nir_opt_deref);
+
+   /* Do some optimizations to clean up the shader now.  By optimizing the
+    * functions in the library, we avoid having to re-do that work every
+    * time we inline a copy of a function.  Reducing basic blocks also helps
+    * with compile times.
+    */
+   NIR_PASS_V(nir, nir_lower_vars_to_ssa);
+   NIR_PASS_V(nir, nir_copy_prop);
+   NIR_PASS_V(nir, nir_opt_dce);
+   NIR_PASS_V(nir, nir_opt_cse);
+   NIR_PASS_V(nir, nir_opt_gcm, true);
+   NIR_PASS_V(nir, nir_opt_peephole_select, 1, false, false);
+   NIR_PASS_V(nir, nir_opt_dce);
 
    return nir;
 }

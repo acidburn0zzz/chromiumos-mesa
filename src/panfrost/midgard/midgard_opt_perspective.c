@@ -61,11 +61,11 @@ midgard_opt_combine_projection(compiler_context *ctx, midgard_block *block)
                 if (src2.swizzle != SWIZZLE_XXXX) continue;
 
                 /* Awesome, we're the right form. Now check where src2 is from */
-                unsigned frcp = ins->ssa_args.src1;
+                unsigned frcp = ins->ssa_args.src[1];
                 unsigned to = ins->ssa_args.dest;
 
-                if (frcp >= ctx->func->impl->ssa_alloc) continue;
-                if (to >= ctx->func->impl->ssa_alloc) continue;
+                if (frcp & IS_REG) continue;
+                if (to & IS_REG) continue;
 
                 bool frcp_found = false;
                 unsigned frcp_component = 0;
@@ -78,7 +78,7 @@ midgard_opt_combine_projection(compiler_context *ctx, midgard_block *block)
                                 vector_alu_from_unsigned(sub->alu.src1);
 
                         frcp_component = s.swizzle & 3;
-                        frcp_from = sub->ssa_args.src0;
+                        frcp_from = sub->ssa_args.src[0];
 
                         frcp_found =
                                 (sub->type == TAG_ALU_4) &&
@@ -116,15 +116,14 @@ midgard_opt_combine_projection(compiler_context *ctx, midgard_block *block)
                         .mask = ins->mask,
                         .ssa_args = {
                                 .dest = to,
-                                .src0 = frcp_from,
-                                .src1 = -1
+                                .src = { frcp_from, -1, -1 },
                         },
                         .load_store = {
                                 .op = frcp_component == COMPONENT_W ?
                                         midgard_op_ldst_perspective_division_w : 
                                         midgard_op_ldst_perspective_division_z,
                                 .swizzle = SWIZZLE_XYZW,
-                                .unknown = 0x24,
+                                .arg_1 = 0x20
                         }
                 };
 
@@ -147,11 +146,11 @@ midgard_opt_varying_projection(compiler_context *ctx, midgard_block *block)
                 if (ins->type != TAG_LOAD_STORE_4) continue;
                 if (!OP_IS_PROJECTION(ins->load_store.op)) continue;
 
-                unsigned vary = ins->ssa_args.src0;
+                unsigned vary = ins->ssa_args.src[0];
                 unsigned to = ins->ssa_args.dest;
 
-                if (vary >= ctx->func->impl->ssa_alloc) continue;
-                if (to >= ctx->func->impl->ssa_alloc) continue;
+                if (vary & IS_REG) continue;
+                if (to & IS_REG) continue;
                 if (!mir_single_use(ctx, vary)) continue;
 
                 /* Check for a varying source. If we find it, we rewrite */

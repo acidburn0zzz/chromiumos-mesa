@@ -41,10 +41,11 @@ struct midgard_screen {
 
         struct ra_regs *regs[9];
 
-        /* Work register classes corresponds to the above register
-         * sets. 12 per set for 4 classes per work/ldst/tex */
+        /* Work register classes corresponds to the above register sets. 20 per
+         * set for 4 classes per work/ldst/ldst27/texr/texw. TODO: Unify with
+         * compiler.h */
 
-        unsigned reg_classes[9][12];
+        unsigned reg_classes[9][4 * 5];
 };
 
 /* Define the general compiler entry point */
@@ -65,6 +66,8 @@ enum {
         PAN_SYSVAL_VIEWPORT_SCALE = 1,
         PAN_SYSVAL_VIEWPORT_OFFSET = 2,
         PAN_SYSVAL_TEXTURE_SIZE = 3,
+        PAN_SYSVAL_SSBO = 4,
+        PAN_SYSVAL_NUM_WORK_GROUPS = 5,
 } pan_sysval;
 
 #define PAN_TXS_SYSVAL_ID(texidx, dim, is_array)          \

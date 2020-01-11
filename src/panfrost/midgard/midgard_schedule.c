@@ -64,31 +64,33 @@ is_single_component_mask(unsigned mask)
 static bool
 can_run_concurrent_ssa(midgard_instruction *first, midgard_instruction *second)
 {
+        /* Writeout has its own rules anyway */
+        if (first->compact_branch || second->compact_branch)
+                return true;
+
         /* Each instruction reads some registers and writes to a register. See
          * where the first writes */
 
-        /* Figure out where exactly we wrote to */
         int source = first->ssa_args.dest;
         int source_mask = first->mask;
 
         /* As long as the second doesn't read from the first, we're okay */
-        if (second->ssa_args.src0 == source) {
-                if (first->type == TAG_ALU_4) {
-                        /* Figure out which components we just read from */
+        for (unsigned i = 0; i < ARRAY_SIZE(second->ssa_args.src); ++i) {
+                if (second->ssa_args.src[i] != source)
+                        continue;
 
-                        int q = second->alu.src1;
-                        midgard_vector_alu_src *m = (midgard_vector_alu_src *) &q;
-
-                        /* Check if there are components in common, and fail if so */
-                        if (swizzle_to_access_mask(m->swizzle) & source_mask)
-                                return false;
-                } else
+                if (first->type != TAG_ALU_4)
                         return false;
 
-        }
+                /* Figure out which components we just read from */
 
-        if (second->ssa_args.src1 == source)
-                return false;
+                int q = (i == 0) ? second->alu.src1 : second->alu.src2;
+                midgard_vector_alu_src *m = (midgard_vector_alu_src *) &q;
+
+                /* Check if there are components in common, and fail if so */
+                if (swizzle_to_access_mask(m->swizzle) & source_mask)
+                        return false;
+        }
 
         /* Otherwise, it's safe in that regard. Another data hazard is both
          * writing to the same place, of course */
@@ -118,6 +120,78 @@ midgard_has_hazard(
 
 }
 
+/* Fragment writeout (of r0) is allowed when:
+ *
+ *  - All components of r0 are written in the bundle
+ *  - No components of r0 are written in VLUT
+ *  - Non-pipelined dependencies of r0 are not written in the bundle
+ *
+ * This function checks if these requirements are satisfied given the content
+ * of a scheduled bundle.
+ */
+
+static bool
+can_writeout_fragment(compiler_context *ctx, midgard_instruction **bundle, unsigned count, unsigned node_count)
+{
+        /* First scan for which components of r0 are written out. Initially
+         * none are written */
+
+        uint8_t r0_written_mask = 0x0;
+
+        /* Simultaneously we scan for the set of dependencies */
+        BITSET_WORD *dependencies = calloc(sizeof(BITSET_WORD), BITSET_WORDS(node_count));
+
+        for (unsigned i = 0; i < count; ++i) {
+                midgard_instruction *ins = bundle[i];
+
+                if (ins->ssa_args.dest != SSA_FIXED_REGISTER(0))
+                        continue;
+
+                /* Record written out mask */
+                r0_written_mask |= ins->mask;
+
+                /* Record dependencies, but only if they won't become pipeline
+                 * registers. We know we can't be live after this, because
+                 * we're writeout at the very end of the shader. So check if
+                 * they were written before us. */
+
+                unsigned src0 = ins->ssa_args.src[0];
+                unsigned src1 = ins->ssa_args.src[1];
+
+                if (!mir_is_written_before(ctx, bundle[0], src0))
+                        src0 = -1;
+
+                if (!mir_is_written_before(ctx, bundle[0], src1))
+                        src1 = -1;
+
+                if ((src0 > 0) && (src0 < node_count))
+                        BITSET_SET(dependencies, src0);
+
+                if ((src1 > 0) && (src1 < node_count))
+                        BITSET_SET(dependencies, src1);
+
+                /* Requirement 2 */
+                if (ins->unit == UNIT_VLUT)
+                        return false;
+        }
+
+        /* Requirement 1 */
+        if ((r0_written_mask & 0xF) != 0xF)
+                return false;
+
+        /* Requirement 3 */
+
+        for (unsigned i = 0; i < count; ++i) {
+                unsigned dest = bundle[i]->ssa_args.dest;
+
+                if (dest < node_count && BITSET_TEST(dependencies, dest))
+                        return false;
+        }
+
+        /* Otherwise, we're good to go */
+        return true;
+}
+
 /* Schedules, but does not emit, a single basic block. After scheduling, the
  * final tag and size of the block are known, which are necessary for branching
  * */
@@ -127,6 +201,8 @@ schedule_bundle(compiler_context *ctx, midgard_block *block, midgard_instruction
 {
         int instructions_emitted = 0, packed_idx = 0;
         midgard_bundle bundle = { 0 };
+
+        midgard_instruction *scheduled[5] = { NULL };
 
         uint8_t tag = ins->type;
 
@@ -211,13 +287,10 @@ schedule_bundle(compiler_context *ctx, midgard_block *block, midgard_instruction
 
                                         could_scalar &= !s1.half;
 
-                                        if (!ains->ssa_args.inline_constant) {
-                                                midgard_vector_alu_src s2 =
-                                                        vector_alu_from_unsigned(ains->alu.src2);
+                                        midgard_vector_alu_src s2 =
+                                                vector_alu_from_unsigned(ains->alu.src2);
 
-                                                could_scalar &= !s2.half;
-                                        }
-
+                                        could_scalar &= !s2.half;
                                 }
 
                                 bool scalar = could_scalar && scalarable;
@@ -253,12 +326,16 @@ schedule_bundle(compiler_context *ctx, midgard_block *block, midgard_instruction
                                                 else
                                                         break;
                                         } else {
-                                                if ((units & UNIT_SADD) && !(control & UNIT_SADD) && !midgard_has_hazard(segment, segment_size, ains))
+                                                if ((units & UNIT_VMUL) && (last_unit < UNIT_VMUL))
+                                                        unit = UNIT_VMUL;
+                                                else if ((units & UNIT_SADD) && !(control & UNIT_SADD) && !midgard_has_hazard(segment, segment_size, ains))
                                                         unit = UNIT_SADD;
-                                                else if (units & UNIT_SMUL)
-                                                        unit = ((units & UNIT_VMUL) && !(control & UNIT_VMUL)) ? UNIT_VMUL : UNIT_SMUL;
-                                                else if ((units & UNIT_VADD) && !(control & UNIT_VADD))
+                                                else if (units & UNIT_VADD)
                                                         unit = UNIT_VADD;
+                                                else if (units & UNIT_SMUL)
+                                                        unit = UNIT_SMUL;
+                                                else if (units & UNIT_VLUT)
+                                                        unit = UNIT_VLUT;
                                                 else
                                                         break;
                                         }
@@ -370,10 +447,10 @@ schedule_bundle(compiler_context *ctx, midgard_block *block, midgard_instruction
                                 unsigned swizzle = SWIZZLE_FROM_ARRAY(indices);
                                 unsigned r_constant = SSA_FIXED_REGISTER(REGISTER_CONSTANT);
 
-                                if (ains->ssa_args.src0 == r_constant)
+                                if (ains->ssa_args.src[0] == r_constant)
                                         ains->alu.src1 = vector_alu_apply_swizzle(ains->alu.src1, swizzle);
 
-                                if (ains->ssa_args.src1 == r_constant)
+                                if (ains->ssa_args.src[1] == r_constant)
                                         ains->alu.src2 = vector_alu_apply_swizzle(ains->alu.src2, swizzle);
 
                                 bundle.has_embedded_constants = true;
@@ -386,15 +463,10 @@ schedule_bundle(compiler_context *ctx, midgard_block *block, midgard_instruction
                                 /* All of r0 has to be written out along with
                                  * the branch writeout */
 
-                                if (ains->writeout) {
-                                        /* The rules for when "bare" writeout
-                                         * is safe are when all components are
-                                         * r0 are written out in the final
-                                         * bundle, earlier than VLUT, where any
-                                         * register dependencies of r0 are from
-                                         * an earlier bundle. We can't verify
-                                         * this before RA, so we don't try. */
-
+                                if (ains->writeout && !can_writeout_fragment(ctx, scheduled, index, ctx->temp_count)) {
+                                        /* We only work on full moves
+                                         * at the beginning. We could
+                                         * probably do better */
                                         if (index != 0)
                                                 break;
 
@@ -422,6 +494,7 @@ schedule_bundle(compiler_context *ctx, midgard_block *block, midgard_instruction
                         }
 
                         /* Defer marking until after writing to allow for break */
+                        scheduled[index] = ains;
                         control |= ains->unit;
                         last_unit = ains->unit;
                         ++instructions_emitted;
@@ -552,18 +625,15 @@ midgard_pair_load_store(compiler_context *ctx, midgard_block *block)
 
                                 if (c->type != TAG_LOAD_STORE_4) continue;
 
-                                /* Stores cannot be reordered, since they have
-                                 * dependencies. For the same reason, indirect
-                                 * loads cannot be reordered as their index is
-                                 * loaded in r27.w */
+                                /* We can only reorder if there are no sources */
 
-                                if (OP_IS_STORE(c->load_store.op)) continue;
+                                bool deps = false;
 
-                                /* It appears the 0x800 bit is set whenever a
-                                 * load is direct, unset when it is indirect.
-                                 * Skip indirect loads. */
+                                for (unsigned s = 0; s < ARRAY_SIZE(ins->ssa_args.src); ++s)
+                                        deps |= (c->ssa_args.src[s] != -1);
 
-                                if (!(c->load_store.unknown & 0x800)) continue;
+                                if (deps)
+                                        continue;
 
                                 /* We found one! Move it up to pair and remove it from the old location */
 
@@ -612,14 +682,10 @@ mir_squeeze_index(compiler_context *ctx)
         ctx->hash_to_temp = _mesa_hash_table_u64_create(NULL);
 
         mir_foreach_instr_global(ctx, ins) {
-                if (ins->compact_branch) continue;
-
                 ins->ssa_args.dest = find_or_allocate_temp(ctx, ins->ssa_args.dest);
-                ins->ssa_args.src0 = find_or_allocate_temp(ctx, ins->ssa_args.src0);
 
-                if (!ins->ssa_args.inline_constant)
-                        ins->ssa_args.src1 = find_or_allocate_temp(ctx, ins->ssa_args.src1);
-
+                for (unsigned i = 0; i < ARRAY_SIZE(ins->ssa_args.src); ++i)
+                        ins->ssa_args.src[i] = find_or_allocate_temp(ctx, ins->ssa_args.src[i]);
         }
 }
 
@@ -638,26 +704,29 @@ v_load_store_scratch(
                 .mask = mask,
                 .ssa_args = {
                         .dest = -1,
-                        .src0 = -1,
-                        .src1 = -1
+                        .src = { -1, -1, -1 },
                 },
                 .load_store = {
                         .op = is_store ? midgard_op_st_int4 : midgard_op_ld_int4,
                         .swizzle = SWIZZLE_XYZW,
 
                         /* For register spilling - to thread local storage */
-                        .unknown = 0x1EEA,
+                        .arg_1 = 0xEA,
+                        .arg_2 = 0x1E,
 
                         /* Splattered across, TODO combine logically */
                         .varying_parameters = (byte & 0x1FF) << 1,
                         .address = (byte >> 9)
-                }
+                },
+
+                /* If we spill an unspill, RA goes into an infinite loop */
+                .no_spill = true
         };
 
        if (is_store) {
                 /* r0 = r26, r1 = r27 */
                 assert(srcdest == SSA_FIXED_REGISTER(26) || srcdest == SSA_FIXED_REGISTER(27));
-                ins.ssa_args.src0 = (srcdest == SSA_FIXED_REGISTER(27)) ? SSA_FIXED_REGISTER(1) : SSA_FIXED_REGISTER(0);
+                ins.ssa_args.src[0] = srcdest;
         } else {
                 ins.ssa_args.dest = srcdest;
         }
@@ -665,106 +734,119 @@ v_load_store_scratch(
         return ins;
 }
 
-void
-schedule_program(compiler_context *ctx)
+/* If register allocation fails, find the best spill node and spill it to fix
+ * whatever the issue was. This spill node could be a work register (spilling
+ * to thread local storage), but it could also simply be a special register
+ * that needs to spill to become a work register. */
+
+static void mir_spill_register(
+                compiler_context *ctx,
+                struct ra_graph *g,
+                unsigned *spill_count)
 {
-        struct ra_graph *g = NULL;
-        bool spilled = false;
-        int iter_count = 1000; /* max iterations */
+        unsigned spill_index = ctx->temp_count;
 
-        /* Number of 128-bit slots in memory we've spilled into */
-        unsigned spill_count = 0;
+        /* Our first step is to calculate spill cost to figure out the best
+         * spill node. All nodes are equal in spill cost, but we can't spill
+         * nodes written to from an unspill */
 
-        midgard_promote_uniforms(ctx, 8);
-
-        mir_foreach_block(ctx, block) {
-                midgard_pair_load_store(ctx, block);
+        for (unsigned i = 0; i < ctx->temp_count; ++i) {
+                ra_set_node_spill_cost(g, i, 1.0);
         }
 
-        /* Must be lowered right before RA */
-        mir_squeeze_index(ctx);
-        mir_lower_special_reads(ctx);
+        mir_foreach_instr_global(ctx, ins) {
+                if (ins->no_spill &&
+                    ins->ssa_args.dest >= 0 &&
+                    ins->ssa_args.dest < ctx->temp_count)
+                        ra_set_node_spill_cost(g, ins->ssa_args.dest, -1.0);
+        }
 
-        do {
-                /* If we spill, find the best spill node and spill it */
+        int spill_node = ra_get_best_spill_node(g);
 
-                unsigned spill_index = ctx->temp_count;
-                if (g && spilled) {
-                        /* All nodes are equal in spill cost, but we can't
-                         * spill nodes written to from an unspill */
+        if (spill_node < 0) {
+                mir_print_shader(ctx);
+                assert(0);
+        }
 
-                        for (unsigned i = 0; i < ctx->temp_count; ++i) {
-                                ra_set_node_spill_cost(g, i, 1.0);
+        /* We have a spill node, so check the class. Work registers
+         * legitimately spill to TLS, but special registers just spill to work
+         * registers */
+
+        unsigned class = ra_get_node_class(g, spill_node);
+        bool is_special = (class >> 2) != REG_CLASS_WORK;
+        bool is_special_w = (class >> 2) == REG_CLASS_TEXW;
+
+        /* Allocate TLS slot (maybe) */
+        unsigned spill_slot = !is_special ? (*spill_count)++ : 0;
+
+        /* For TLS, replace all stores to the spilled node. For
+         * special reads, just keep as-is; the class will be demoted
+         * implicitly. For special writes, spill to a work register */
+
+        if (!is_special || is_special_w) {
+                if (is_special_w)
+                        spill_slot = spill_index++;
+
+                mir_foreach_instr_global_safe(ctx, ins) {
+                        if (ins->ssa_args.dest != spill_node) continue;
+
+                        midgard_instruction st;
+
+                        if (is_special_w) {
+                                st = v_mov(spill_node, blank_alu_src, spill_slot);
+                                st.no_spill = true;
+                        } else {
+                                ins->ssa_args.dest = SSA_FIXED_REGISTER(26);
+                                st = v_load_store_scratch(ins->ssa_args.dest, spill_slot, true, ins->mask);
                         }
 
-                        mir_foreach_instr_global(ctx, ins) {
-                                if (ins->type != TAG_LOAD_STORE_4)  continue;
-                                if (ins->load_store.op != midgard_op_ld_int4) continue;
-                                if (ins->load_store.unknown != 0x1EEA) continue;
-                                ra_set_node_spill_cost(g, ins->ssa_args.dest, -1.0);
+                        /* Hint: don't rewrite this node */
+                        st.hint = true;
+
+                        mir_insert_instruction_before(mir_next_op(ins), st);
+
+                        if (!is_special)
+                                ctx->spills++;
+                }
+        }
+
+        /* For special reads, figure out how many components we need */
+        unsigned read_mask = 0;
+
+        mir_foreach_instr_global_safe(ctx, ins) {
+                read_mask |= mir_mask_of_read_components(ins, spill_node);
+        }
+
+        /* Insert a load from TLS before the first consecutive
+         * use of the node, rewriting to use spilled indices to
+         * break up the live range. Or, for special, insert a
+         * move. Ironically the latter *increases* register
+         * pressure, but the two uses of the spilling mechanism
+         * are somewhat orthogonal. (special spilling is to use
+         * work registers to back special registers; TLS
+         * spilling is to use memory to back work registers) */
+
+        mir_foreach_block(ctx, block) {
+                bool consecutive_skip = false;
+                unsigned consecutive_index = 0;
+
+                mir_foreach_instr_in_block(block, ins) {
+                        /* We can't rewrite the moves used to spill in the
+                         * first place. These moves are hinted. */
+                        if (ins->hint) continue;
+
+                        if (!mir_has_arg(ins, spill_node)) {
+                                consecutive_skip = false;
+                                continue;
                         }
 
-                        int spill_node = ra_get_best_spill_node(g);
-
-                        if (spill_node < 0) {
-                                mir_print_shader(ctx);
-                                assert(0);
+                        if (consecutive_skip) {
+                                /* Rewrite */
+                                mir_rewrite_index_src_single(ins, spill_node, consecutive_index);
+                                continue;
                         }
 
-                        /* Check the class. Work registers legitimately spill
-                         * to TLS, but special registers just spill to work
-                         * registers */
-                        unsigned class = ra_get_node_class(g, spill_node);
-                        bool is_special = (class >> 2) != REG_CLASS_WORK;
-
-                        /* Allocate TLS slot (maybe) */
-                        unsigned spill_slot = !is_special ? spill_count++ : 0;
-
-                        /* For TLS, replace all stores to the spilled node. For
-                         * special, just keep as-is; the class will be demoted
-                         * implicitly */
-
-                        if (!is_special) {
-                                mir_foreach_instr_global_safe(ctx, ins) {
-                                        if (ins->compact_branch) continue;
-                                        if (ins->ssa_args.dest != spill_node) continue;
-                                        ins->ssa_args.dest = SSA_FIXED_REGISTER(26);
-
-                                        midgard_instruction st = v_load_store_scratch(ins->ssa_args.dest, spill_slot, true, ins->mask);
-                                        mir_insert_instruction_before(mir_next_op(ins), st);
-
-                                        ctx->spills++;
-                                }
-                        }
-
-                        /* Insert a load from TLS before the first consecutive
-                         * use of the node, rewriting to use spilled indices to
-                         * break up the live range. Or, for special, insert a
-                         * move. Ironically the latter *increases* register
-                         * pressure, but the two uses of the spilling mechanism
-                         * are somewhat orthogonal. (special spilling is to use
-                         * work registers to back special registers; TLS
-                         * spilling is to use memory to back work registers) */
-
-                        mir_foreach_block(ctx, block) {
-
-                        bool consecutive_skip = false;
-                        unsigned consecutive_index = 0;
-
-                        mir_foreach_instr_in_block(block, ins) {
-                                if (ins->compact_branch) continue;
-                                
-                                if (!mir_has_arg(ins, spill_node)) {
-                                        consecutive_skip = false;
-                                        continue;
-                                }
-
-                                if (consecutive_skip) {
-                                        /* Rewrite */
-                                        mir_rewrite_index_src_single(ins, spill_node, consecutive_index);
-                                        continue;
-                                }
-
+                        if (!is_special_w) {
                                 consecutive_index = ++spill_index;
 
                                 midgard_instruction *before = ins;
@@ -778,29 +860,81 @@ schedule_program(compiler_context *ctx)
                                 if (is_special) {
                                         /* Move */
                                         st = v_mov(spill_node, blank_alu_src, consecutive_index);
+                                        st.no_spill = true;
                                 } else {
                                         /* TLS load */
                                         st = v_load_store_scratch(consecutive_index, spill_slot, false, 0xF);
                                 }
 
+                                /* Mask the load based on the component count
+                                 * actually needed to prvent RA loops */
+
+                                st.mask = read_mask;
+
                                 mir_insert_instruction_before(before, st);
                                // consecutive_skip = true;
-
-
-                                /* Rewrite to use */
-                                mir_rewrite_index_src_single(ins, spill_node, consecutive_index);
-
-                                if (!is_special)
-                                        ctx->fills++;
+                        } else {
+                                /* Special writes already have their move spilled in */
+                                consecutive_index = spill_slot;
                         }
-                        }
+
+
+                        /* Rewrite to use */
+                        mir_rewrite_index_src_single(ins, spill_node, consecutive_index);
+
+                        if (!is_special)
+                                ctx->fills++;
                 }
+        }
+
+        /* Reset hints */
+
+        mir_foreach_instr_global(ctx, ins) {
+                ins->hint = false;
+        }
+}
+
+void
+schedule_program(compiler_context *ctx)
+{
+        struct ra_graph *g = NULL;
+        bool spilled = false;
+        int iter_count = 1000; /* max iterations */
+
+        /* Number of 128-bit slots in memory we've spilled into */
+        unsigned spill_count = 0;
+
+        midgard_promote_uniforms(ctx, 16);
+
+        mir_foreach_block(ctx, block) {
+                midgard_pair_load_store(ctx, block);
+        }
+
+        /* Must be lowered right before RA */
+        mir_squeeze_index(ctx);
+        mir_lower_special_reads(ctx);
+
+        /* Lowering can introduce some dead moves */
+
+        mir_foreach_block(ctx, block) {
+                midgard_opt_dead_move_eliminate(ctx, block);
+        }
+
+        do {
+                if (spilled) 
+                        mir_spill_register(ctx, g, &spill_count);
 
                 mir_squeeze_index(ctx);
 
                 g = NULL;
                 g = allocate_registers(ctx, &spilled);
         } while(spilled && ((iter_count--) > 0));
+
+        /* We can simplify a bit after RA */
+
+        mir_foreach_block(ctx, block) {
+                midgard_opt_post_move_eliminate(ctx, block, g);
+        }
 
         /* After RA finishes, we schedule all at once */
 

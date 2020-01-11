@@ -25,22 +25,6 @@
 #include "compiler.h"
 #include "midgard_ops.h"
 
-static bool
-mir_nontrivial_outmod(midgard_instruction *ins)
-{
-        bool is_int = midgard_is_integer_op(ins->alu.op);
-        unsigned mod = ins->alu.outmod;
-
-        /* Type conversion is a sort of outmod */
-        if (ins->alu.dest_override != midgard_dest_override_none)
-                return true;
-
-        if (is_int)
-                return mod != midgard_outmod_int_wrap;
-        else
-                return mod != midgard_outmod_none;
-}
-
 bool
 midgard_opt_copy_prop(compiler_context *ctx, midgard_block *block)
 {
@@ -50,26 +34,59 @@ midgard_opt_copy_prop(compiler_context *ctx, midgard_block *block)
                 if (ins->type != TAG_ALU_4) continue;
                 if (!OP_IS_MOVE(ins->alu.op)) continue;
 
-                unsigned from = ins->ssa_args.src1;
+                unsigned from = ins->ssa_args.src[1];
                 unsigned to = ins->ssa_args.dest;
 
                 /* We only work on pure SSA */
 
                 if (to >= SSA_FIXED_MINIMUM) continue;
                 if (from >= SSA_FIXED_MINIMUM) continue;
-                if (to >= ctx->func->impl->ssa_alloc) continue;
-                if (from >= ctx->func->impl->ssa_alloc) continue;
+                if (to & IS_REG) continue;
+                if (from & IS_REG) continue;
 
                 /* Constant propagation is not handled here, either */
                 if (ins->ssa_args.inline_constant) continue;
                 if (ins->has_constants) continue;
 
                 /* Modifier propagation is not handled here */
-                if (mir_nontrivial_source2_mod(ins)) continue;
+                if (mir_nontrivial_source2_mod_simple(ins)) continue;
                 if (mir_nontrivial_outmod(ins)) continue;
 
-                /* We're clear -- rewrite */
-                mir_rewrite_index_src(ctx, to, from);
+                /* Shortened arguments (bias for textures, extra load/store
+                 * arguments, etc.) do not get a swizzlw, only a start
+                 * component and even that is restricted. */
+
+                bool skip = false;
+
+                mir_foreach_instr_global(ctx, q) {
+                        bool is_tex = q->type == TAG_TEXTURE_4;
+                        bool is_ldst = q->type == TAG_LOAD_STORE_4;
+
+                        if (!(is_tex || is_ldst)) continue;
+
+                        /* For textures, we get one real swizzle. For stores,
+                         * we also get one. For loads, we get none. */
+
+                        unsigned start =
+                                is_tex ? 1 :
+                                OP_IS_STORE(q->load_store.op) ? 1 : 0;
+
+                        mir_foreach_src(q, s) {
+                                if ((s >= start) && q->ssa_args.src[s] == to) {
+                                        skip = true;
+                                        break;
+                                }
+                        }
+                }
+
+                if (skip)
+                        continue;
+
+                /* We're clear -- rewrite, composing the swizzle */
+                midgard_vector_alu_src src2 =
+                        vector_alu_from_unsigned(ins->alu.src2);
+
+                mir_rewrite_index_src_swizzle(ctx, to, from, src2.swizzle);
                 mir_remove_instruction(ins);
                 progress |= true;
         }

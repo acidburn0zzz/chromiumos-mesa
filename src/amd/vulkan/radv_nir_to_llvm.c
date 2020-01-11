@@ -55,7 +55,7 @@ struct radv_shader_context {
 	LLVMContextRef context;
 	LLVMValueRef main_function;
 
-	LLVMValueRef descriptor_sets[RADV_UD_MAX_SETS];
+	LLVMValueRef descriptor_sets[MAX_SETS];
 	LLVMValueRef ring_offsets;
 
 	LLVMValueRef vertex_buffers;
@@ -295,7 +295,7 @@ get_tcs_num_patches(struct radv_shader_context *ctx)
 
 	/* GFX6 bug workaround - limit LS-HS threadgroups to only one wave. */
 	if (ctx->options->chip_class == GFX6) {
-		unsigned one_wave = 64 / MAX2(num_tcs_input_cp, num_tcs_output_cp);
+		unsigned one_wave = ctx->options->wave_size / MAX2(num_tcs_input_cp, num_tcs_output_cp);
 		num_patches = MIN2(num_patches, one_wave);
 	}
 	return num_patches;
@@ -754,7 +754,7 @@ static void allocate_user_sgprs(struct radv_shader_context *ctx,
 	if (ctx->shader_info->info.loads_push_constants)
 		user_sgpr_count++;
 
-	if (ctx->streamout_buffers)
+	if (ctx->shader_info->info.so.num_outputs)
 		user_sgpr_count++;
 
 	uint32_t available_sgprs = ctx->options->chip_class >= GFX9 && stage != MESA_SHADER_COMPUTE ? 32 : 16;
@@ -1704,6 +1704,18 @@ load_tes_input(struct ac_shader_abi *abi,
 }
 
 static LLVMValueRef
+radv_emit_fetch_64bit(struct radv_shader_context *ctx,
+		      LLVMTypeRef type, LLVMValueRef a, LLVMValueRef b)
+{
+	LLVMValueRef values[2] = {
+		ac_to_integer(&ctx->ac, a),
+		ac_to_integer(&ctx->ac, b),
+	};
+	LLVMValueRef result = ac_build_gather_values(&ctx->ac, values, 2);
+	return LLVMBuildBitCast(ctx->ac.builder, result, type, "");
+}
+
+static LLVMValueRef
 load_gs_input(struct ac_shader_abi *abi,
 	      unsigned location,
 	      unsigned driver_location,
@@ -1731,6 +1743,14 @@ load_gs_input(struct ac_shader_abi *abi,
 			dw_addr = LLVMBuildAdd(ctx->ac.builder, dw_addr,
 			                       LLVMConstInt(ctx->ac.i32, param * 4 + i + const_index, 0), "");
 			value[i] = ac_lds_load(&ctx->ac, dw_addr);
+
+			if (ac_get_type_size(type) == 8) {
+				dw_addr = LLVMBuildAdd(ctx->ac.builder, dw_addr,
+					               LLVMConstInt(ctx->ac.i32, param * 4 + i + const_index + 1, 0), "");
+				LLVMValueRef tmp = ac_lds_load(&ctx->ac, dw_addr);
+
+				value[i] = radv_emit_fetch_64bit(ctx, type, value[i], tmp);
+			}
 		} else {
 			LLVMValueRef soffset =
 				LLVMConstInt(ctx->ac.i32,
@@ -1742,6 +1762,21 @@ load_gs_input(struct ac_shader_abi *abi,
 							ctx->ac.i32_0,
 							vtx_offset, soffset,
 							0, ac_glc, true, false);
+
+			if (ac_get_type_size(type) == 8) {
+				soffset = LLVMConstInt(ctx->ac.i32,
+						       (param * 4 + i + const_index + 1) * 256,
+						       false);
+
+				LLVMValueRef tmp =
+					ac_build_buffer_load(&ctx->ac,
+							     ctx->esgs_ring, 1,
+							     ctx->ac.i32_0,
+							     vtx_offset, soffset,
+							     0, ac_glc, true, false);
+
+				value[i] = radv_emit_fetch_64bit(ctx, type, value[i], tmp);
+			}
 		}
 
 		if (ac_get_type_size(type) == 2) {
@@ -3038,7 +3073,8 @@ handle_es_outputs_post(struct radv_shader_context *ctx,
 		LLVMValueRef wave_idx = ac_unpack_param(&ctx->ac, ctx->merged_wave_info, 24, 4);
 		vertex_idx = LLVMBuildOr(ctx->ac.builder, vertex_idx,
 					 LLVMBuildMul(ctx->ac.builder, wave_idx,
-						      LLVMConstInt(ctx->ac.i32, 64, false), ""), "");
+						      LLVMConstInt(ctx->ac.i32,
+								   ctx->ac.wave_size, false), ""), "");
 		lds_base = LLVMBuildMul(ctx->ac.builder, vertex_idx,
 					LLVMConstInt(ctx->ac.i32, itemsize_dw, 0), "");
 	}
@@ -3140,7 +3176,7 @@ static LLVMValueRef get_thread_id_in_tg(struct radv_shader_context *ctx)
 	LLVMBuilderRef builder = ctx->ac.builder;
 	LLVMValueRef tmp;
 	tmp = LLVMBuildMul(builder, get_wave_id_in_tg(ctx),
-			   LLVMConstInt(ctx->ac.i32, 64, false), "");
+			   LLVMConstInt(ctx->ac.i32, ctx->ac.wave_size, false), "");
 	return LLVMBuildAdd(builder, tmp, ac_get_thread_id(&ctx->ac), "");
 }
 
@@ -4190,7 +4226,7 @@ ac_setup_rings(struct radv_shader_context *ctx)
 		 */
 		LLVMTypeRef v2i64 = LLVMVectorType(ctx->ac.i64, 2);
 		uint64_t stream_offset = 0;
-		unsigned num_records = 64;
+		unsigned num_records = ctx->ac.wave_size;
 		LLVMValueRef base_ring;
 
 		base_ring =
@@ -4223,7 +4259,7 @@ ac_setup_rings(struct radv_shader_context *ctx)
 			ring = LLVMBuildInsertElement(ctx->ac.builder,
 						      ring, tmp, ctx->ac.i32_0, "");
 
-			stream_offset += stride * 64;
+			stream_offset += stride * ctx->ac.wave_size;
 
 			ring = LLVMBuildBitCast(ctx->ac.builder, ring,
 						ctx->ac.v4i32, "");
@@ -4257,23 +4293,8 @@ radv_nir_get_max_workgroup_size(enum chip_class chip_class,
 				gl_shader_stage stage,
 				const struct nir_shader *nir)
 {
-	switch (stage) {
-	case MESA_SHADER_TESS_CTRL:
-		return chip_class >= GFX7 ? 128 : 64;
-	case MESA_SHADER_GEOMETRY:
-		return chip_class >= GFX9 ? 128 : 64;
-	case MESA_SHADER_COMPUTE:
-		break;
-	default:
-		return 0;
-	}
-
-	if (!nir)
-		return chip_class >= GFX9 ? 128 : 64;
-	unsigned max_workgroup_size = nir->info.cs.local_size[0] *
-		nir->info.cs.local_size[1] *
-		nir->info.cs.local_size[2];
-	return max_workgroup_size;
+	const unsigned backup_sizes[] = {chip_class >= GFX9 ? 128 : 64, 1, 1};
+	return radv_get_max_workgroup_size(chip_class, stage, nir ? nir->info.cs.local_size : backup_sizes);
 }
 
 /* Fixup the HW not emitting the TCS regs if there are no HS threads. */
@@ -4334,7 +4355,8 @@ LLVMModuleRef ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm,
 				       AC_FLOAT_MODE_DEFAULT;
 
 	ac_llvm_context_init(&ctx.ac, ac_llvm, options->chip_class,
-			     options->family, float_mode, 64);
+			     options->family, float_mode, options->wave_size,
+			     options->wave_size);
 	ctx.context = ctx.ac.context;
 
 	radv_nir_shader_info_init(&shader_info->info);
@@ -4342,7 +4364,7 @@ LLVMModuleRef ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm,
 	for(int i = 0; i < shader_count; ++i)
 		radv_nir_shader_info_pass(shaders[i], options, &shader_info->info);
 
-	for (i = 0; i < RADV_UD_MAX_SETS; i++)
+	for (i = 0; i < MAX_SETS; i++)
 		shader_info->user_sgprs_locs.descriptor_sets[i].sgpr_idx = -1;
 	for (i = 0; i < AC_UD_MAX_UD; i++)
 		shader_info->user_sgprs_locs.shader_data[i].sgpr_idx = -1;
@@ -4374,6 +4396,7 @@ LLVMModuleRef ac_translate_nir_to_llvm(struct ac_llvm_compiler *ac_llvm,
 	ctx.abi.load_resource = radv_load_resource;
 	ctx.abi.clamp_shadow_reference = false;
 	ctx.abi.gfx9_stride_size_workaround = ctx.ac.chip_class == GFX9 && HAVE_LLVM < 0x800;
+	ctx.abi.robust_buffer_access = options->robust_buffer_access;
 
 	/* Because the new raw/struct atomic intrinsics are buggy with LLVM 8,
 	 * we fallback to the old intrinsics for atomic buffer image operations
@@ -4734,6 +4757,7 @@ radv_compile_nir_shader(struct ac_llvm_compiler *ac_llvm,
 			shader_info->gs.es_type = nir[0]->info.stage;
 		}
 	}
+	shader_info->info.wave_size = options->wave_size;
 }
 
 static void
@@ -4765,7 +4789,7 @@ ac_gs_copy_shader_emit(struct radv_shader_context *ctx)
 		LLVMBasicBlockRef bb;
 		unsigned offset;
 
-		if (!num_components)
+		if (stream > 0 && !num_components)
 			continue;
 
 		if (stream > 0 && !ctx->shader_info->info.so.num_outputs)
@@ -4846,7 +4870,7 @@ radv_compile_gs_copy_shader(struct ac_llvm_compiler *ac_llvm,
 				       AC_FLOAT_MODE_DEFAULT;
 
 	ac_llvm_context_init(&ctx.ac, ac_llvm, options->chip_class,
-			     options->family, float_mode, 64);
+			     options->family, float_mode, 64, 64);
 	ctx.context = ctx.ac.context;
 
 	ctx.is_gs_copy_shader = true;

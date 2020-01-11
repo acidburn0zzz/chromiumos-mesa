@@ -173,6 +173,7 @@ setup_miptree(struct etna_resource *rsc, unsigned paddingX, unsigned paddingY,
 
       mip->width = width;
       mip->height = height;
+      mip->depth = depth;
       mip->padded_width = align(width * msaa_xscale, paddingX);
       mip->padded_height = align(height * msaa_yscale, paddingY);
       mip->stride = util_format_get_stride(prsc->format, mip->padded_width);
@@ -401,7 +402,7 @@ enum modifier_priority {
    MODIFIER_PRIORITY_SUPER_TILED,
 };
 
-const uint64_t priority_to_modifier[] = {
+static const uint64_t priority_to_modifier[] = {
    [MODIFIER_PRIORITY_INVALID] = DRM_FORMAT_MOD_INVALID,
    [MODIFIER_PRIORITY_LINEAR] = DRM_FORMAT_MOD_LINEAR,
    [MODIFIER_PRIORITY_SPLIT_TILED] = DRM_FORMAT_MOD_VIVANTE_SPLIT_TILED,
@@ -554,6 +555,8 @@ etna_resource_from_handle(struct pipe_screen *pscreen,
 
    level->width = tmpl->width0;
    level->height = tmpl->height0;
+   level->depth = tmpl->depth0;
+   level->offset = handle->offset;
 
    /* Determine padding of the imported resource. */
    unsigned paddingX = 0, paddingY = 0;
