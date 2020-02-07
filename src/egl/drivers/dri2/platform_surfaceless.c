@@ -269,11 +269,18 @@ surfaceless_probe_device(_EGLDisplay *disp, bool swrast)
        * card when it shows up first in the devices[] array. This results in
        * Mesa selecting the Intel card which allows the Chrome graphics stack
        * to work.
+       * Skip radeonsi cards as well [OVER-11316].
        */
-      if (strcmp(driver_name, "nouveau") == 0 &&
-          i == 0 &&
-          num_devices > 1)
+      if (i == 0 && num_devices > 1 &&
+            (strcmp(driver_name, "nouveau") == 0 ||
+             strcmp(driver_name, "radeonsi") == 0))
+      {
+         _eglLog(_EGL_WARNING, "Skipping %s on multi-gpu system.", driver_name);
+         close(dri2_dpy->fd);
+         dri2_dpy->fd = -1;
+         free(driver_name);
          continue;
+      }
 
       if (swrast) {
          /* Use kms swrast only with vgem / virtio_gpu.
