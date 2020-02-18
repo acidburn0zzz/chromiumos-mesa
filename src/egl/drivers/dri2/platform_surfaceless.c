@@ -270,10 +270,12 @@ surfaceless_probe_device(_EGLDisplay *disp, bool swrast)
        * Mesa selecting the Intel card which allows the Chrome graphics stack
        * to work.
        * Skip radeonsi cards as well [OVER-11316].
+       * Skip r600 (amd) cards as well [OVER-11486][OVER-11538].
        */
       if (i == 0 && num_devices > 1 &&
             (strcmp(driver_name, "nouveau") == 0 ||
-             strcmp(driver_name, "radeonsi") == 0))
+             strcmp(driver_name, "radeonsi") == 0 ||
+             strcmp(driver_name, "r600") == 0))
       {
          _eglLog(_EGL_WARNING, "Skipping %s on multi-gpu system.", driver_name);
          close(dri2_dpy->fd);
