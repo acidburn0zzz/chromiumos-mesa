@@ -463,6 +463,43 @@ dri_screen_create_swrast(struct gbm_dri_device *dri)
    return 0;
 }
 
+static bool
+is_gbm_debug() {
+   // Check if GBM_DEBUG is enabled.
+   static bool value = false;
+   static bool is_set = false;
+
+   if (!is_set) {
+      value = env_var_as_boolean("GBM_DEBUG", false);
+      is_set = true;
+   }
+   return value;
+}
+
+static bool
+is_force_gbm_software(const char *driver_name) {
+   // Check if the the driver name should be quirked to force
+   // the use of kms_swrast instead of the dri driver.
+   // Can be overridden with the GBM_ALWAYS_SOFTWARE
+   // environment variable.
+
+   // Allow the env to override the value only if it is
+   // explictly set.
+   if (getenv("GBM_ALWAYS_SOFTWARE"))
+      // The default is ignored as getenv checked that it
+      // has been set.
+      return env_var_as_boolean("GBM_ALWAYS_SOFTWARE", false);
+
+   // Restrict all nvidia (nouveau) [OVER-9944] and
+   // AMD [OVER-5884, OVER-5386] drivers to software.
+   return strcmp(driver_name, "nouveau") == 0 ||
+       strcmp(driver_name, "radeon") == 0 ||
+       strcmp(driver_name, "radeonsi") == 0 ||
+       strcmp(driver_name, "r600") == 0 ||
+       strcmp(driver_name, "r300") == 0 ||
+       strcmp(driver_name, "r200") == 0;
+}
+
 static int
 dri_screen_create(struct gbm_dri_device *dri)
 {
@@ -471,6 +508,13 @@ dri_screen_create(struct gbm_dri_device *dri)
    driver_name = loader_get_driver_for_fd(dri->base.fd);
    if (!driver_name)
       return -1;
+
+   if (is_force_gbm_software(driver_name)) {
+      if (is_gbm_debug())
+         fprintf(stderr, "GBM debug: Forcing kms_swrast for %s.\n", driver_name);
+      free(driver_name);
+      return -1;
+   }
 
    return dri_screen_create_dri2(dri, driver_name);
 }
