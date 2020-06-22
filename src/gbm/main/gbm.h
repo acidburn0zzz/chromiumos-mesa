@@ -286,11 +286,7 @@ gbm_bo_create_with_modifiers(struct gbm_device *gbm,
 #define GBM_BO_IMPORT_WL_BUFFER         0x5501
 #define GBM_BO_IMPORT_EGL_IMAGE         0x5502
 #define GBM_BO_IMPORT_FD                0x5503
-#define GBM_BO_IMPORT_FD_PLANAR         0x5504
-/* Moved GBM_BO_IMPORT_FD_MODIFIER from 0x5504 because
- * of minigbm conflict OVER-6267
- */
-#define GBM_BO_IMPORT_FD_MODIFIER       0x5507
+#define GBM_BO_IMPORT_FD_MODIFIER       0x5504
 
 struct gbm_import_fd_data {
    int fd;
@@ -309,20 +305,6 @@ struct gbm_import_fd_modifier_data {
    int strides[4];
    int offsets[4];
    uint64_t modifier;
-};
-
-/* GBM_MAX_PLANES is part of the interface provided by minigbm. */
-#define GBM_MAX_PLANES 4
-
-/* Structure for GBM_BO_IMPORT_FD_PLANAR. */
-struct gbm_import_fd_planar_data {
-   int fds[GBM_MAX_PLANES];
-   uint32_t width;
-   uint32_t height;
-   uint32_t format;
-   uint32_t strides[GBM_MAX_PLANES];
-   uint32_t offsets[GBM_MAX_PLANES];
-   uint64_t format_modifiers[GBM_MAX_PLANES];
 };
 
 struct gbm_bo *
