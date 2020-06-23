@@ -573,6 +573,9 @@ gbm_bo_map2(
               uint32_t x, uint32_t y, uint32_t width, uint32_t height,
               uint32_t flags, uint32_t *stride, void **map_data, int plane)
 {
+   if (plane != 0)
+      fprintf(stderr, "gbm_bo_map2 called with non-zero plane: %d\n", plane);
+
    return gbm_bo_map(bo, x, y, width, height,
                      flags, stride, map_data);
 }
