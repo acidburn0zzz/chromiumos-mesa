@@ -239,6 +239,7 @@ enum gbm_bo_flags {
    GBM_BO_USE_CAMERA_READ = 0,
    GBM_BO_USE_HW_VIDEO_DECODER = 0,
    GBM_BO_USE_HW_VIDEO_ENCODER = 0,
+   GBM_BO_USE_PROTECTED = 0,
 
    /* These are also minigbm flags that aren't implemented in mesagbm. In at
     * least one place
@@ -344,6 +345,12 @@ void *
 gbm_bo_map(struct gbm_bo *bo,
            uint32_t x, uint32_t y, uint32_t width, uint32_t height,
            uint32_t flags, uint32_t *stride, void **map_data);
+
+// Neverware: gbm_bo_map2 shim [OVER-12403]
+void *
+gbm_bo_map2(struct gbm_bo *bo,
+            uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+            uint32_t flags, uint32_t *stride, void **map_data, int plane);
 
 void
 gbm_bo_unmap(struct gbm_bo *bo, void *map_data);
