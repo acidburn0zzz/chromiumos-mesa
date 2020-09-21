@@ -970,11 +970,7 @@ if cc.compiles('''#include <stdint.h>
                               (int)__atomic_add_fetch(x.v, (uint64_t)1, __ATOMIC_ACQ_REL);
                      }''',
                   name : 'GCC atomic builtins required -latomic')
-    # Neverware: for some reason this library doesn't exist in 32-bit builds
-    # [OVER-9391]
-    if host_machine.cpu_family() != 'x86'
-      dep_atomic = cc.find_library('atomic')
-    endif
+    dep_atomic = cc.find_library('atomic')
   endif
 endif
 if not cc.links('''#include <stdint.h>
